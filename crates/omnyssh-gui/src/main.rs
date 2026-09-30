@@ -258,6 +258,8 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Opens the support dialog's GitHub/Telegram links in the default browser.
         .plugin(tauri_plugin_opener::init())
+        // Reads the clipboard for the terminals' right-click paste.
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Restores the window's size and position between launches; the flags keep it
         // away from everything that would touch the window itself (WINDOW_STATE_FLAGS).
         .plugin(

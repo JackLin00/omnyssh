@@ -48,6 +48,10 @@ tauri-plugin-window-state = "2"
 # reached otherwise, and two instances would fight over the tunnels' ports. 2.x only —
 # 3.0 alphas are published.
 tauri-plugin-single-instance = "2.4"
+# Reads the clipboard for the terminals' right-click paste: the webviews' own
+# `navigator.clipboard.readText` may prompt or be refused. Only `read-text` is granted
+# (capabilities/default.json). 2.x only — 3.0 alphas are published.
+tauri-plugin-clipboard-manager = "2"
 # `generate_context!` embeds the `plugins.updater` config and expands to serde_json at
 # runtime; also asserts the wire form of DTOs in tests (e.g. HostDto never carries a password).
 serde_json = "1"
