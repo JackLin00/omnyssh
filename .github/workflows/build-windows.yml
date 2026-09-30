@@ -1,0 +1,68 @@
+name: Build Windows installer
+
+# Builds only the Windows desktop installer (NSIS -setup.exe) for testing a branch,
+# without the full Release matrix. A push to the branch starts it; the manual trigger
+# also shows up once this file is on the default branch. Nothing is published: the
+# installer is attached to the run as an artifact.
+on:
+  push:
+    branches:
+      - feat/serial-port
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Bundle GUI · x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/omnyssh-gui/ui/package-lock.json
+
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gui-x86_64-pc-windows-msvc-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            gui-x86_64-pc-windows-msvc-cargo-
+
+      - name: Install the Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Install frontend dependencies
+        working-directory: crates/omnyssh-gui/ui
+        run: npm ci
+
+      # The cache restores the whole `target` tree, earlier bundles included.
+      - name: Drop bundles left by an earlier run
+        shell: bash
+        run: rm -rf target/x86_64-pc-windows-msvc/release/bundle
+
+      # `tauri build` runs the frontend build (beforeBuildCommand), compiles the
+      # OmnySSH binary, and packages the NSIS installer.
+      - name: Build the installer
+        working-directory: crates/omnyssh-gui
+        run: tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OmnySSH-windows-setup
+          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          retention-days: 7
+          if-no-files-found: error
