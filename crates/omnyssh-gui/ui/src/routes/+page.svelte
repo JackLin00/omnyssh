@@ -14,6 +14,7 @@
   import Snippets from '$lib/screens/Snippets.svelte';
   import Settings from '$lib/screens/Settings.svelte';
   import TerminalView from '$lib/screens/TerminalView.svelte';
+  import SerialView from '$lib/screens/SerialView.svelte';
   import SftpView from '$lib/screens/SftpView.svelte';
 
   onMount(async () => {
@@ -39,6 +40,8 @@
     {#each $sessions as s (s.id)}
       {#if s.kind === 'terminal'}
         <TerminalView session={s} active={activeSessionId === s.id} />
+      {:else if s.kind === 'serial'}
+        <SerialView session={s} active={activeSessionId === s.id} />
       {:else}
         <SftpView session={s} active={activeSessionId === s.id} />
       {/if}

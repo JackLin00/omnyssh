@@ -22,6 +22,7 @@ const NERD_FAMILIES = [
 
 const STACKS: [string, string][] = [
   ['the terminal stack', 'src/lib/screens/TerminalView.svelte'],
+  ['the serial stack', 'src/lib/screens/SerialView.svelte'],
   ['the chrome font-mono stack', 'tailwind.config.ts']
 ];
 
