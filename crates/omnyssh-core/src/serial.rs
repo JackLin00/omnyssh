@@ -9,7 +9,7 @@
 use std::io::{ErrorKind, Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -18,6 +18,13 @@ use anyhow::{bail, Context, Result};
 /// (CTS low, XOFF, a device not reading) cannot block past this — the loop
 /// instead keeps unsent bytes in a pending buffer and retries next iteration.
 const IO_TIMEOUT: Duration = Duration::from_millis(20);
+
+/// How long a close keeps sending queued bytes before dropping the rest.
+/// Without this, a large pending buffer on a slow or partially-stalled line
+/// (Windows can return small partial counts on timeout, e.g. ~19 bytes per
+/// 20ms at 9600 baud) would make the flush — and so `Drop`, which joins the
+/// thread — block for seconds or minutes on the caller's thread.
+const CLOSE_FLUSH_LIMIT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parity {
@@ -151,8 +158,13 @@ impl SerialSession {
 impl Drop for SerialSession {
     fn drop(&mut self) {
         self.close();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(handle) = self.thread.take() {
+            // Dropping the handle from inside its own on_output callback would
+            // otherwise join the current thread — a deadlock (Unix panics
+            // "Resource deadlock avoided"; Windows just hangs).
+            if handle.thread().id() != thread::current().id() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -248,9 +260,12 @@ fn run<P: Read + Write>(
 
         if closing {
             // Best effort: keep writing while each attempt makes progress
-            // (each is bounded by IO_TIMEOUT); anything else just stops so
-            // closing is never blocked on a still-stalled line.
-            while !pending.is_empty() {
+            // (each is bounded by IO_TIMEOUT); anything else just stops. A
+            // deadline caps the total time too, since a line that keeps making
+            // small partial progress would otherwise flush forever and block
+            // `Drop` on the caller's thread.
+            let deadline = Instant::now() + CLOSE_FLUSH_LIMIT;
+            while !pending.is_empty() && Instant::now() < deadline {
                 match port.write(&pending) {
                     Ok(0) => break,
                     Ok(n) => pending.drain(..n),
@@ -295,6 +310,10 @@ mod tests {
     struct FakePort {
         reads: VecDeque<io::Result<Vec<u8>>>,
         writes: VecDeque<io::Result<usize>>,
+        /// If set, every write is capped to this many bytes and paced with a
+        /// short sleep, simulating a slow line that always makes some
+        /// progress — enough to defeat an attempt-count bound, not a time one.
+        max_write_chunk: Option<usize>,
         written: Arc<Mutex<Vec<u8>>>,
     }
 
@@ -314,8 +333,17 @@ mod tests {
             let port = Self {
                 reads: reads.into(),
                 writes: writes.into(),
+                max_write_chunk: None,
                 written: Arc::clone(&written),
             };
+            (port, written)
+        }
+
+        /// A port that only ever accepts `chunk` bytes per `write` call, no
+        /// matter how much is offered, and always makes progress.
+        fn trickle(chunk: usize) -> (Self, Arc<Mutex<Vec<u8>>>) {
+            let (mut port, written) = Self::with_writes(vec![], Vec::new());
+            port.max_write_chunk = Some(chunk);
             (port, written)
         }
     }
@@ -338,6 +366,15 @@ mod tests {
 
     impl Write for FakePort {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let buf = match self.max_write_chunk {
+                Some(chunk) => {
+                    // Paces the trickle so draining a large buffer this way
+                    // would take a long time if nothing bounded it.
+                    thread::sleep(Duration::from_millis(1));
+                    &buf[..buf.len().min(chunk)]
+                }
+                None => buf,
+            };
             match self.writes.pop_front() {
                 Some(Ok(n)) => {
                     self.written.lock().unwrap().extend_from_slice(&buf[..n]);
@@ -390,8 +427,9 @@ mod tests {
         let (session, rx) = start(port);
         session.write(b"AT\r\n");
         session.close();
-        // Close is handled after the queued write, so once it is reported the
-        // bytes are on the port.
+        // Holds because the fake accepts every write in full and close
+        // flushes any pending bytes on a best-effort basis — so by the time
+        // Closed is reported, this write has already landed.
         assert_eq!(next(&rx), SerialOutput::Closed(None));
         assert_eq!(written.lock().unwrap().as_slice(), b"AT\r\n");
     }
@@ -448,6 +486,18 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
 
+        session.close();
+        assert_eq!(next(&rx), SerialOutput::Closed(None));
+    }
+
+    #[test]
+    fn the_close_flush_stops_after_its_time_budget_not_when_pending_is_empty() {
+        let (port, _written) = FakePort::trickle(1);
+        let (session, rx) = start(port);
+        // At 1 byte per ~1ms attempt, draining this would take well over a
+        // minute if the flush loop were bounded only by "still making
+        // progress"; the close's time budget must cut it short instead.
+        session.write(&vec![0u8; 100_000]);
         session.close();
         assert_eq!(next(&rx), SerialOutput::Closed(None));
     }
