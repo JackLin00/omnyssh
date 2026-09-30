@@ -9,6 +9,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use omnyssh_core::event::{CoreEvent, SessionId, TransferId};
+use omnyssh_core::serial::SerialSession;
 use omnyssh_core::ssh::client::Host;
 use omnyssh_core::ssh::pool::PollManager;
 use omnyssh_core::ssh::pty::PtyManager;
@@ -82,6 +83,8 @@ pub struct GuiState {
     term_channels: Mutex<HashMap<SessionId, Channel<TerminalBytes>>>,
     /// One SFTP manager per tab, keyed by its public session id (§3.4).
     sftp: Mutex<HashMap<SessionId, SftpManager>>,
+    /// Open serial ports, keyed by public session id (like SFTP, no inner id).
+    serial: Mutex<HashMap<SessionId, SerialSession>>,
     /// SFTP progress routing: GUI-allocated transfer id -> owning session (§3.4).
     transfer_owner: Mutex<HashMap<TransferId, SessionId>>,
     /// Monotonic source for GUI-allocated transfer ids (§3.4).
@@ -115,6 +118,7 @@ impl GuiState {
             pty: Mutex::new(pty),
             term_channels: Mutex::new(HashMap::new()),
             sftp: Mutex::new(HashMap::new()),
+            serial: Mutex::new(HashMap::new()),
             transfer_owner: Mutex::new(HashMap::new()),
             next_transfer_id: AtomicU64::new(0),
             update_check_started: AtomicBool::new(false),
@@ -495,11 +499,50 @@ impl GuiState {
             .expect("transfer_owner lock poisoned")
             .retain(|_, owner| *owner != session_id);
     }
+
+    /// A fresh public id from the shared registry. A serial tab takes its id before
+    /// its port opens, so the session's output callback can be built around it.
+    pub fn allocate_session(&self) -> SessionId {
+        self.sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .allocate()
+    }
+
+    /// Keep an opened serial session under its public id.
+    pub fn insert_serial(&self, id: SessionId, session: SerialSession) {
+        self.serial
+            .lock()
+            .expect("serial lock poisoned")
+            .insert(id, session);
+    }
+
+    /// Send bytes to a serial port. Unknown/closed ids are a no-op.
+    pub fn write_serial(&self, id: SessionId, data: &[u8]) {
+        if let Some(session) = self.serial.lock().expect("serial lock poisoned").get(&id) {
+            session.write(data);
+        }
+    }
+
+    /// User-initiated close: dropping the session closes its port and waits for its
+    /// thread, so the port is free to reopen at once. The drop happens after the map
+    /// lock is released, since the session's callback runs during that wait. A port
+    /// that already failed stays in the map until this, which is harmless — writes
+    /// to it go nowhere.
+    pub fn close_serial(&self, id: SessionId) {
+        let session = self
+            .serial
+            .lock()
+            .expect("serial lock poisoned")
+            .remove(&id);
+        drop(session);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnyssh_core::serial::{SerialOutput, SerialSession};
 
     #[test]
     fn public_ids_are_unique_and_monotonic() {
@@ -750,5 +793,54 @@ mod tests {
         assert_eq!(replayed.len(), 1);
         assert_eq!(replayed[0].0, "up");
         assert!(matches!(replayed[0].1, TunnelStatusDto::Up));
+    }
+
+    // A serial id comes from the shared registry, so it can never collide with a
+    // terminal or SFTP tab's id in the frontend.
+    #[test]
+    fn serial_ids_share_the_session_id_space() {
+        let (engine_tx, _engine_rx) = mpsc::channel::<CoreEvent>(8);
+        let state = GuiState::new(engine_tx, PtyManager::new());
+        let sftp = state.sessions.lock().unwrap().allocate();
+        let serial = state.allocate_session();
+        assert_ne!(sftp, serial);
+    }
+
+    #[test]
+    fn closing_a_serial_session_closes_its_port() {
+        let (engine_tx, _engine_rx) = mpsc::channel::<CoreEvent>(8);
+        let state = GuiState::new(engine_tx, PtyManager::new());
+        /// A port that never sends anything: every read times out.
+        struct IdlePort;
+        impl std::io::Read for IdlePort {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(1));
+                Err(std::io::ErrorKind::TimedOut.into())
+            }
+        }
+        impl std::io::Write for IdlePort {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session = SerialSession::spawn(IdlePort, move |out| {
+            let _ = tx.send(out);
+        });
+        let id = state.allocate_session();
+        state.insert_serial(id, session);
+
+        state.close_serial(id);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            SerialOutput::Closed(None)
+        );
+        // Unknown ids are a no-op, like the terminal commands.
+        state.write_serial(id, b"late");
+        state.close_serial(id);
     }
 }

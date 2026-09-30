@@ -9,6 +9,7 @@ use omnyssh_core::config::snippets::{Snippet, SnippetScope};
 use omnyssh_core::event::{
     DetectedService, MetricValue, Metrics, ProcessInfo, ServiceKind, ServiceMetric,
 };
+use omnyssh_core::serial::{FlowControl, Parity, PortInfo, SerialConfig, StopBits};
 use omnyssh_core::ssh::client::{ConnectionStatus, Host, HostSource, MonitorMode};
 use omnyssh_core::ssh::key_setup::KeySetupStep;
 use omnyssh_core::ssh::sftp::FileEntry;
@@ -311,6 +312,93 @@ impl tauri::ipc::IpcResponse for TerminalBytes {
     fn body(self) -> tauri::Result<tauri::ipc::InvokeResponseBody> {
         Ok(tauri::ipc::InvokeResponseBody::Raw(self.0))
     }
+}
+
+/// Parity bit, mirrors `omnyssh_core::serial::Parity`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ParityDto {
+    None,
+    Odd,
+    Even,
+}
+
+/// Stop bits, mirrors `omnyssh_core::serial::StopBits`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum StopBitsDto {
+    One,
+    Two,
+}
+
+/// Flow control, mirrors `omnyssh_core::serial::FlowControl`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum FlowControlDto {
+    None,
+    Software,
+    Hardware,
+}
+
+/// The line settings a serial tab opens with.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialConfigDto {
+    pub port: String,
+    pub baud_rate: u32,
+    pub data_bits: u8,
+    pub parity: ParityDto,
+    pub stop_bits: StopBitsDto,
+    pub flow_control: FlowControlDto,
+}
+
+impl From<SerialConfigDto> for SerialConfig {
+    fn from(dto: SerialConfigDto) -> Self {
+        Self {
+            port: dto.port,
+            baud_rate: dto.baud_rate,
+            data_bits: dto.data_bits,
+            parity: match dto.parity {
+                ParityDto::None => Parity::None,
+                ParityDto::Odd => Parity::Odd,
+                ParityDto::Even => Parity::Even,
+            },
+            stop_bits: match dto.stop_bits {
+                StopBitsDto::One => StopBits::One,
+                StopBitsDto::Two => StopBits::Two,
+            },
+            flow_control: match dto.flow_control {
+                FlowControlDto::None => FlowControl::None,
+                FlowControlDto::Software => FlowControl::Software,
+                FlowControlDto::Hardware => FlowControl::Hardware,
+            },
+        }
+    }
+}
+
+/// A serial port present on this machine.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialPortDto {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+impl From<PortInfo> for SerialPortDto {
+    fn from(info: PortInfo) -> Self {
+        Self {
+            name: info.name,
+            description: info.description,
+        }
+    }
+}
+
+/// Why a serial tab's port closed on its own (adapter unplugged, driver error).
+/// Sent once on the tab's exit channel; a user-initiated close sends nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialExitDto {
+    pub error: String,
 }
 
 impl From<&HostSource> for HostSourceDto {
