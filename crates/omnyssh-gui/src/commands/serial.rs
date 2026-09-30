@@ -11,11 +11,16 @@ use crate::dto::{SerialConfigDto, SerialExitDto, SerialPortDto, TerminalBytes};
 use crate::error::CommandError;
 use crate::state::GuiState;
 
-/// The serial ports present right now.
+/// The serial ports present right now. Async: enumeration can take 100ms+ on
+/// Windows, so it runs off the main thread.
 #[tauri::command]
 #[specta::specta]
-pub fn serial_list_ports() -> Result<Vec<SerialPortDto>, CommandError> {
-    serial::list_ports()
+pub async fn serial_list_ports() -> Result<Vec<SerialPortDto>, CommandError> {
+    tauri::async_runtime::spawn_blocking(serial::list_ports)
+        .await
+        .map_err(|e| CommandError {
+            message: format!("serial port listing task panicked: {e}"),
+        })?
         .map(|ports| ports.into_iter().map(SerialPortDto::from).collect())
         .map_err(|e| CommandError {
             message: format!("{e:#}"),
@@ -23,8 +28,9 @@ pub fn serial_list_ports() -> Result<Vec<SerialPortDto>, CommandError> {
 }
 
 /// Open a serial port and return the public session id the write/close commands
-/// take. A missing or busy port fails here. Async so opening (which may block
-/// briefly in the driver) stays off the main thread.
+/// take. A missing or busy port fails here. The open itself runs in a blocking task —
+/// it can stall for seconds (e.g. a Bluetooth SPP port) — so it never holds a tokio
+/// worker thread.
 #[tauri::command]
 #[specta::specta]
 pub async fn serial_open(
@@ -34,16 +40,23 @@ pub async fn serial_open(
     on_exit: Channel<SerialExitDto>,
 ) -> Result<u64, CommandError> {
     let id = state.allocate_session();
-    let session = SerialSession::open(&config.into(), move |out| match out {
-        SerialOutput::Data(bytes) => {
-            let _ = on_output.send(TerminalBytes(bytes));
-        }
-        SerialOutput::Closed(Some(error)) => {
-            let _ = on_exit.send(SerialExitDto { error });
-        }
-        // Closed by the user: the tab is already gone.
-        SerialOutput::Closed(None) => {}
+    let config = config.into();
+    let session = tauri::async_runtime::spawn_blocking(move || {
+        SerialSession::open(&config, move |out| match out {
+            SerialOutput::Data(bytes) => {
+                let _ = on_output.send(TerminalBytes(bytes));
+            }
+            SerialOutput::Closed(Some(error)) => {
+                let _ = on_exit.send(SerialExitDto { error });
+            }
+            // Closed by the user: the tab is already gone.
+            SerialOutput::Closed(None) => {}
+        })
     })
+    .await
+    .map_err(|e| CommandError {
+        message: format!("serial open task panicked: {e}"),
+    })?
     .map_err(|e| CommandError {
         message: format!("{e:#}"),
     })?;
@@ -63,10 +76,17 @@ pub fn serial_write(
     Ok(())
 }
 
-/// Close a serial port. Idempotent.
+/// Close a serial port. Idempotent. Async: dropping the taken session closes the
+/// port and joins its session thread (up to ~540ms with pending bytes on a stalled
+/// line), so that wait runs in a blocking task instead of on the main thread. Returns
+/// only once the port is released, so a reopen right after can succeed at once.
 #[tauri::command]
 #[specta::specta]
-pub fn serial_close(state: State<'_, GuiState>, session_id: u64) -> Result<(), CommandError> {
-    state.close_serial(session_id);
-    Ok(())
+pub async fn serial_close(state: State<'_, GuiState>, session_id: u64) -> Result<(), CommandError> {
+    let session = state.take_serial(session_id);
+    tauri::async_runtime::spawn_blocking(move || drop(session))
+        .await
+        .map_err(|e| CommandError {
+            message: format!("serial close task panicked: {e}"),
+        })
 }

@@ -524,25 +524,24 @@ impl GuiState {
         }
     }
 
-    /// User-initiated close: dropping the session closes its port and waits for its
-    /// thread, so the port is free to reopen at once. The drop happens after the map
-    /// lock is released, since the session's callback runs during that wait. A port
-    /// that already failed stays in the map until this, which is harmless — writes
-    /// to it go nowhere.
-    pub fn close_serial(&self, id: SessionId) {
-        let session = self
-            .serial
+    /// User-initiated close: removes the session from the map under the lock and
+    /// hands it to the caller. Dropping it closes the port and waits for its session
+    /// thread (up to `CLOSE_FLUSH_LIMIT` with pending bytes on a stalled line), so the
+    /// caller must drop it off the main thread, and never while holding a lock the
+    /// session's callback might take. A port that already failed stays in the map
+    /// until this, which is harmless — writes to it go nowhere.
+    pub fn take_serial(&self, id: SessionId) -> Option<SerialSession> {
+        self.serial
             .lock()
             .expect("serial lock poisoned")
-            .remove(&id);
-        drop(session);
+            .remove(&id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnyssh_core::serial::{SerialOutput, SerialSession};
+    use omnyssh_core::serial::SerialOutput;
 
     #[test]
     fn public_ids_are_unique_and_monotonic() {
@@ -834,13 +833,13 @@ mod tests {
         let id = state.allocate_session();
         state.insert_serial(id, session);
 
-        state.close_serial(id);
+        drop(state.take_serial(id));
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             SerialOutput::Closed(None)
         );
         // Unknown ids are a no-op, like the terminal commands.
         state.write_serial(id, b"late");
-        state.close_serial(id);
+        assert!(state.take_serial(id).is_none());
     }
 }

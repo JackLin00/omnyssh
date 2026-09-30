@@ -172,7 +172,8 @@ async terminalPaste() : Promise<Result<null, CommandError>> {
 }
 },
 /**
- * The serial ports present right now.
+ * The serial ports present right now. Async: enumeration can take 100ms+ on
+ * Windows, so it runs off the main thread.
  */
 async serialListPorts() : Promise<Result<SerialPortDto[], CommandError>> {
     try {
@@ -184,8 +185,9 @@ async serialListPorts() : Promise<Result<SerialPortDto[], CommandError>> {
 },
 /**
  * Open a serial port and return the public session id the write/close commands
- * take. A missing or busy port fails here. Async so opening (which may block
- * briefly in the driver) stays off the main thread.
+ * take. A missing or busy port fails here. The open itself runs in a blocking task —
+ * it can stall for seconds (e.g. a Bluetooth SPP port) — so it never holds a tokio
+ * worker thread.
  */
 async serialOpen(config: SerialConfigDto, onOutput: TAURI_CHANNEL<TerminalBytes>, onExit: TAURI_CHANNEL<SerialExitDto>) : Promise<Result<number, CommandError>> {
     try {
@@ -207,7 +209,10 @@ async serialWrite(sessionId: number, data: number[]) : Promise<Result<null, Comm
 }
 },
 /**
- * Close a serial port. Idempotent.
+ * Close a serial port. Idempotent. Async: dropping the taken session closes the
+ * port and joins its session thread (up to ~540ms with pending bytes on a stalled
+ * line), so that wait runs in a blocking task instead of on the main thread. Returns
+ * only once the port is released, so a reopen right after can succeed at once.
  */
 async serialClose(sessionId: number) : Promise<Result<null, CommandError>> {
     try {
