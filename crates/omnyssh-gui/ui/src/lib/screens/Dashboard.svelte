@@ -7,13 +7,18 @@
   // Editing an SSH-config host adopts it into hosts.toml; the file itself is never
   // written, so only Delete stays manual-only.
   import { get } from 'svelte/store';
-  import type { HostDto, HostInputDto } from '$lib/bindings';
+  import { onMount } from 'svelte';
+  import type { HostDto, HostInputDto, SerialDeviceDto } from '$lib/bindings';
   import { Surface, Chip, StatusDot, Icon, Button, statusToken } from '$lib/theme';
   import { serverCards, filterHosts, forwardListen, forwardTarget, QUICK_ACTIONS } from './serverCard';
   import { spawnSession } from '$lib/stores/navigation';
   import { streamerMode, displayHostname } from '$lib/stores/streamer';
   import { hosts } from '$lib/stores/hosts';
   import { lastError } from '$lib/stores/notifications';
+  import { isWindows } from '$lib/platform';
+  import { serialDevices, reloadSerialDevices } from '$lib/stores/serialDevices';
+  import { emptyDeviceFields, fieldsFromDevice, filterSerialDevices } from './serialForm';
+  import type { SerialMode } from '$lib/stores/sessions';
   import {
     saveHost,
     deleteHost,
@@ -22,19 +27,27 @@
     startKeySetup,
     refreshMetrics,
     tunnelStart,
-    tunnelStop
+    tunnelStop,
+    saveSerialDevice,
+    deleteSerialDevice
   } from '$lib/ipc/commands';
   import { isRefreshHotkey } from '$lib/stores/ui';
   import { beginKeySetup, dismissKeySetup } from '$lib/stores/keySetup';
-  import { emptyForm, formFromHost, formForDuplicate } from './hostForm';
+  import { emptyForm, formFromHost, formForDuplicate, copyName } from './hostForm';
   import HostEditor from './HostEditor.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import SerialDeviceCard from './SerialDeviceCard.svelte';
+  import SerialDeviceEditor from './SerialDeviceEditor.svelte';
 
   type Dialog =
     | { kind: 'add' }
     | { kind: 'edit'; host: HostDto }
     | { kind: 'duplicate'; host: HostDto }
-    | { kind: 'delete'; host: HostDto };
+    | { kind: 'delete'; host: HostDto }
+    | { kind: 'addSerial' }
+    | { kind: 'editSerial'; device: SerialDeviceDto }
+    | { kind: 'duplicateSerial'; device: SerialDeviceDto }
+    | { kind: 'deleteSerial'; device: SerialDeviceDto };
 
   let dialog = $state<Dialog | null>(null);
 
@@ -137,6 +150,34 @@
     dialog = null;
   }
 
+  // Saved serial devices (Windows only, like the Serial entry): cards after the hosts.
+  onMount(() => {
+    if (isWindows) void reloadSerialDevices();
+  });
+  const devices = $derived(isWindows ? $serialDevices : []);
+  const visibleDevices = $derived(filterSerialDevices(devices, query));
+  const deviceNames = $derived(devices.map((d) => d.name));
+
+  function openDevice(device: SerialDeviceDto, mode: SerialMode): void {
+    spawnSession('serial', device.name, { config: device.config, mode, enter: device.enter });
+  }
+
+  async function submitDevice(device: SerialDeviceDto): Promise<void> {
+    await saveSerialDevice(device);
+    await reloadSerialDevices();
+    dialog = null;
+  }
+
+  async function confirmDeleteDevice(name: string): Promise<void> {
+    try {
+      await deleteSerialDevice(name);
+      await reloadSerialDevices();
+    } catch (e) {
+      lastError.set(message(e));
+    }
+    dialog = null;
+  }
+
   // Shared pill used by the header/empty-state "Add host" and the per-card quick actions.
   const pill =
     'inline-flex items-center gap-1.5 rounded-full border border-default px-2.5 py-1 text-xs ' +
@@ -205,10 +246,16 @@
         <Icon name="plus" size={13} />
         Add host
       </button>
+      {#if isWindows}
+        <button type="button" class={pill} onclick={() => (dialog = { kind: 'addSerial' })}>
+          <Icon name="plus" size={13} />
+          Add serial
+        </button>
+      {/if}
     </div>
   </div>
 
-  {#if $serverCards.length === 0}
+  {#if $serverCards.length === 0 && devices.length === 0}
     <div class="flex flex-col items-center justify-center gap-2 py-20 text-center">
       <p class="font-medium">No servers yet</p>
       <p class="text-sm text-muted">Add a host, or import one from your SSH config, to see it here.</p>
@@ -217,7 +264,7 @@
         Add host
       </button>
     </div>
-  {:else if visibleCards.length === 0}
+  {:else if visibleCards.length === 0 && visibleDevices.length === 0}
     <div class="flex flex-col items-center justify-center gap-2 py-20 text-center">
       <p class="text-sm text-muted">No hosts match “{query}”.</p>
     </div>
@@ -450,6 +497,15 @@
           {/if}
         </Surface>
       {/each}
+      {#each visibleDevices as device (device.name)}
+        <SerialDeviceCard
+          {device}
+          onOpen={(mode) => openDevice(device, mode)}
+          onEdit={() => (dialog = { kind: 'editSerial', device })}
+          onDuplicate={() => (dialog = { kind: 'duplicateSerial', device })}
+          onDelete={() => (dialog = { kind: 'deleteSerial', device })}
+        />
+      {/each}
     </div>
   {/if}
 </section>
@@ -475,6 +531,46 @@
     onSubmit={(input) => submitDuplicate(host.name, input)}
     onCancel={() => (dialog = null)}
   />
+{:else if dialog?.kind === 'addSerial'}
+  <SerialDeviceEditor
+    mode="add"
+    initial={emptyDeviceFields()}
+    taken={deviceNames}
+    onSubmit={submitDevice}
+    onCancel={() => (dialog = null)}
+  />
+{:else if dialog?.kind === 'editSerial'}
+  {@const device = dialog.device}
+  <SerialDeviceEditor
+    mode="edit"
+    initial={fieldsFromDevice(device)}
+    taken={deviceNames.filter((n) => n !== device.name)}
+    onSubmit={submitDevice}
+    onCancel={() => (dialog = null)}
+  />
+{:else if dialog?.kind === 'duplicateSerial'}
+  {@const device = dialog.device}
+  <SerialDeviceEditor
+    mode="add"
+    initial={{ ...fieldsFromDevice(device), name: copyName(device.name, deviceNames) }}
+    taken={deviceNames}
+    onSubmit={submitDevice}
+    onCancel={() => (dialog = null)}
+  />
+{:else if dialog?.kind === 'deleteSerial'}
+  {@const device = dialog.device}
+  <Modal label="Delete serial device" onClose={() => (dialog = null)}>
+    <div class="space-y-3 px-5 py-4">
+      <h2 class="text-sm font-semibold">Delete serial device</h2>
+      <p class="text-sm text-muted">
+        Delete “{device.name}”? This removes it from <span class="font-mono">serial.toml</span>.
+      </p>
+      <div class="flex justify-end gap-2 pt-1">
+        <Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button>
+        <Button variant="primary" onclick={() => confirmDeleteDevice(device.name)}>Delete</Button>
+      </div>
+    </div>
+  </Modal>
 {:else if dialog?.kind === 'delete'}
   {@const host = dialog.host}
   <Modal label="Delete host" onClose={() => (dialog = null)}>
