@@ -55,4 +55,26 @@ describe('sessions store', () => {
     expect(sessionStatusDot.connecting).toBe('unknown');
     sessions.close(s.id);
   });
+
+  it('a serial session carries its port options', () => {
+    const serial = {
+      config: {
+        port: 'COM3',
+        baudRate: 115200,
+        dataBits: 8,
+        parity: 'none' as const,
+        stopBits: 'one' as const,
+        flowControl: 'none' as const
+      },
+      mode: 'monitor' as const,
+      enter: 'cr' as const
+    };
+    const s = sessions.spawn('serial', 'COM3 · 115200', serial);
+    expect(get(sessions).find((r) => r.id === s.id)).toMatchObject({
+      kind: 'serial',
+      hostName: 'COM3 · 115200',
+      serial
+    });
+    sessions.close(s.id);
+  });
 });

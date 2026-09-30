@@ -1,11 +1,13 @@
 import { writable } from 'svelte/store';
 import type { Status } from '$lib/theme';
+import type { SerialConfigDto } from '$lib/bindings';
+import type { EnterKey } from '$lib/screens/serialFormat';
 
 // The open terminal/SFTP tabs (tech-gui.md §2, §3.5). Spawners append a row here;
 // Stage 3 makes the sessions real (live PTY / SFTP). Ids come from one monotonic
 // space so a closed tab's id is never reused and terminal/SFTP ids never collide in
 // the frontend.
-export type SessionKind = 'terminal' | 'sftp';
+export type SessionKind = 'terminal' | 'sftp' | 'serial';
 export type SessionStatus = 'connecting' | 'connected' | 'failed' | 'unknown';
 
 /** Session state on the shared server-state palette — one source for every session dot
@@ -17,6 +19,15 @@ export const sessionStatusDot: Record<SessionStatus, Status> = {
   unknown: 'unknown'
 };
 
+/** `terminal` sends keystrokes to the port; `monitor` only shows what it prints. */
+export type SerialMode = 'terminal' | 'monitor';
+
+export interface SerialSessionOptions {
+  config: SerialConfigDto;
+  mode: SerialMode;
+  enter: EnterKey;
+}
+
 export interface Session {
   id: number;
   kind: SessionKind;
@@ -25,6 +36,8 @@ export interface Session {
   /** The backend public session id, set once `terminal_open` resolves (tech-gui.md
    *  §3.4). Undefined while connecting; the id crossing IPC is always this public id. */
   termId?: number;
+  /** Set on serial tabs only; `hostName` then holds the tab label, e.g. `COM3 · 115200`. */
+  serial?: SerialSessionOptions;
 }
 
 /** The visible session label: just the host name. The type (terminal/SFTP) is already
@@ -44,8 +57,8 @@ function createSessions() {
   let nextId = 1;
   return {
     subscribe,
-    spawn(kind: SessionKind, hostName: string): Session {
-      const session: Session = { id: nextId++, kind, hostName, status: 'connecting' };
+    spawn(kind: SessionKind, hostName: string, serial?: SerialSessionOptions): Session {
+      const session: Session = { id: nextId++, kind, hostName, status: 'connecting', serial };
       update((list) => [...list, session]);
       return session;
     },

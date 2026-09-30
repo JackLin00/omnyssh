@@ -7,6 +7,9 @@ import type {
   FileEntryDto,
   HostDto,
   HostInputDto,
+  SerialConfigDto,
+  SerialExitDto,
+  SerialPortDto,
   SnippetDto,
   TerminalBytes,
   TraySupportDto,
@@ -95,6 +98,37 @@ export async function terminalResize(sessionId: number, cols: number, rows: numb
 /** Close a terminal and its connection. Idempotent for an already-closed id. */
 export async function terminalClose(sessionId: number): Promise<void> {
   const res = await commands.terminalClose(sessionId);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** The serial ports present right now (COM ports on Windows). */
+export async function serialListPorts(): Promise<SerialPortDto[]> {
+  const res = await commands.serialListPorts();
+  if (res.status === 'error') throw new Error(res.error.message);
+  return res.data;
+}
+
+/** Open a serial port. Received bytes stream into `onOutput`; a port that fails on its
+ *  own (adapter unplugged) reports once on `onExit`. Rejects a missing or busy port. */
+export async function serialOpen(
+  config: SerialConfigDto,
+  onOutput: Channel<TerminalBytes>,
+  onExit: Channel<SerialExitDto>
+): Promise<number> {
+  const res = await commands.serialOpen(config, onOutput, onExit);
+  if (res.status === 'error') throw new Error(res.error.message);
+  return res.data;
+}
+
+/** Send bytes to a serial port. */
+export async function serialWrite(sessionId: number, data: number[]): Promise<void> {
+  const res = await commands.serialWrite(sessionId, data);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Close a serial port. Idempotent for an already-closed id. */
+export async function serialClose(sessionId: number): Promise<void> {
+  const res = await commands.serialClose(sessionId);
   if (res.status === 'error') throw new Error(res.error.message);
 }
 
