@@ -237,6 +237,39 @@ async serialClose(sessionId: number) : Promise<Result<null, CommandError>> {
 }
 },
 /**
+ * The saved serial devices, for the dashboard's cards.
+ */
+async listSerialDevices() : Promise<Result<SerialDeviceDto[], CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_serial_devices") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Add a device, or replace the one with the same name.
+ */
+async saveSerialDevice(device: SerialDeviceDto) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_serial_device", { device }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete the device named `name`; a missing name is a no-op success.
+ */
+async deleteSerialDevice(name: string) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_serial_device", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Open an SFTP session for `host_name` (tech-gui.md §4.2). Awaits the core connect,
  * registers the manager under a fresh public id, and spawns the per-session
  * forwarder; the `sftp-connected` ack then arrives stamped with that id (§3.4).
@@ -651,6 +684,10 @@ export type KeySetupRollback = { hostName: string; result: string }
  */
 export type KeySetupStepDto = { index: number; total: number; description: string }
 /**
+ * What Enter sends in a serial terminal, mirrors `LineEnding`.
+ */
+export type LineEndingDto = "cr" | "lf" | "crlf"
+/**
  * One `ssh -L` rule (tech-gui.md §4.1): listen on `bindAddress:bindPort` here and
  * reach `remoteHost:remotePort` as the host resolves it. No `bindAddress` means the
  * loopback, as with ssh.
@@ -689,6 +726,10 @@ export type ProcessDto = { name: string; cpuPercent: number; memPercent: number 
  * The line settings a serial tab opens with.
  */
 export type SerialConfigDto = { port: string; baudRate: number; dataBits: number; parity: ParityDto; stopBits: StopBitsDto; flowControl: FlowControlDto }
+/**
+ * A saved serial device, shown as a dashboard card.
+ */
+export type SerialDeviceDto = { name: string; config: SerialConfigDto; enter: LineEndingDto; notes: string | null }
 /**
  * Why a serial tab's port closed on its own (adapter unplugged, driver error).
  * Sent once on the tab's exit channel; a user-initiated close sends nothing.

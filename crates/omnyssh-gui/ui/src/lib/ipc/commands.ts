@@ -8,6 +8,7 @@ import type {
   HostDto,
   HostInputDto,
   SerialConfigDto,
+  SerialDeviceDto,
   SerialExitDto,
   SerialPortDto,
   SnippetDto,
@@ -136,6 +137,25 @@ export async function serialWrite(sessionId: number, data: number[]): Promise<vo
 /** Close a serial port. Idempotent for an already-closed id. */
 export async function serialClose(sessionId: number): Promise<void> {
   const res = await commands.serialClose(sessionId);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** The saved serial devices shown on the dashboard. */
+export async function listSerialDevices(): Promise<SerialDeviceDto[]> {
+  const res = await commands.listSerialDevices();
+  if (res.status === 'error') throw new Error(res.error.message);
+  return res.data;
+}
+
+/** Add a serial device, or replace the one with the same name. */
+export async function saveSerialDevice(device: SerialDeviceDto): Promise<void> {
+  const res = await commands.saveSerialDevice(device);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Delete a saved serial device; a missing name is a no-op. */
+export async function deleteSerialDevice(name: string): Promise<void> {
+  const res = await commands.deleteSerialDevice(name);
   if (res.status === 'error') throw new Error(res.error.message);
 }
 

@@ -19,7 +19,10 @@ use commands::hosts::{
     delete_host, duplicate_host, list_hosts, refresh_metrics, reload_hosts, save_host,
 };
 use commands::keysetup::start_key_setup;
-use commands::serial::{serial_close, serial_list_ports, serial_open, serial_write};
+use commands::serial::{
+    delete_serial_device, list_serial_devices, save_serial_device, serial_close, serial_list_ports,
+    serial_open, serial_write,
+};
 use commands::sftp::{
     list_local_dir, list_local_roots, preview_local_file, sftp_close, sftp_delete, sftp_download,
     sftp_list, sftp_mkdir, sftp_open, sftp_preview, sftp_rename, sftp_upload,
@@ -112,6 +115,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
             serial_open,
             serial_write,
             serial_close,
+            list_serial_devices,
+            save_serial_device,
+            delete_serial_device,
             sftp_open,
             sftp_list,
             sftp_upload,

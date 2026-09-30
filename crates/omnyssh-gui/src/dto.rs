@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use omnyssh_core::config::app_config::UpdateConfig;
+use omnyssh_core::config::serial_devices::{LineEnding, SerialDevice};
 use omnyssh_core::config::snippets::{Snippet, SnippetScope};
 use omnyssh_core::event::{
     DetectedService, MetricValue, Metrics, ProcessInfo, ServiceKind, ServiceMetric,
@@ -399,6 +400,83 @@ impl From<PortInfo> for SerialPortDto {
 #[serde(rename_all = "camelCase")]
 pub struct SerialExitDto {
     pub error: String,
+}
+
+/// What Enter sends in a serial terminal, mirrors `LineEnding`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum LineEndingDto {
+    Cr,
+    Lf,
+    Crlf,
+}
+
+/// A saved serial device, shown as a dashboard card.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialDeviceDto {
+    pub name: String,
+    pub config: SerialConfigDto,
+    pub enter: LineEndingDto,
+    pub notes: Option<String>,
+}
+
+impl From<&SerialDevice> for SerialDeviceDto {
+    fn from(d: &SerialDevice) -> Self {
+        Self {
+            name: d.name.clone(),
+            config: SerialConfigDto {
+                port: d.port.clone(),
+                baud_rate: d.baud_rate,
+                data_bits: d.data_bits,
+                parity: match d.parity {
+                    Parity::None => ParityDto::None,
+                    Parity::Odd => ParityDto::Odd,
+                    Parity::Even => ParityDto::Even,
+                },
+                stop_bits: match d.stop_bits {
+                    StopBits::One => StopBitsDto::One,
+                    StopBits::Two => StopBitsDto::Two,
+                },
+                flow_control: match d.flow_control {
+                    FlowControl::None => FlowControlDto::None,
+                    FlowControl::Software => FlowControlDto::Software,
+                    FlowControl::Hardware => FlowControlDto::Hardware,
+                },
+            },
+            enter: match d.enter {
+                LineEnding::Cr => LineEndingDto::Cr,
+                LineEnding::Lf => LineEndingDto::Lf,
+                LineEnding::Crlf => LineEndingDto::Crlf,
+            },
+            notes: d.notes.clone(),
+        }
+    }
+}
+
+impl From<SerialDeviceDto> for SerialDevice {
+    /// Names and notes are trimmed; blank notes are dropped.
+    fn from(dto: SerialDeviceDto) -> Self {
+        let config: SerialConfig = dto.config.into();
+        Self {
+            name: dto.name.trim().to_string(),
+            port: config.port,
+            baud_rate: config.baud_rate,
+            data_bits: config.data_bits,
+            parity: config.parity,
+            stop_bits: config.stop_bits,
+            flow_control: config.flow_control,
+            enter: match dto.enter {
+                LineEndingDto::Cr => LineEnding::Cr,
+                LineEndingDto::Lf => LineEnding::Lf,
+                LineEndingDto::Crlf => LineEnding::Crlf,
+            },
+            notes: dto
+                .notes
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty()),
+        }
+    }
 }
 
 impl From<&HostSource> for HostSourceDto {
