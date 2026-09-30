@@ -9,6 +9,7 @@ export type IconName =
   | 'snippets'
   | 'sftp'
   | 'terminal'
+  | 'serial'
   | 'close'
   | 'collapse'
   | 'expand'

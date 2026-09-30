@@ -46,6 +46,13 @@
   {:else if name === 'terminal'}
     <polyline points="4 7 9 12 4 17" />
     <line x1="12" y1="17" x2="20" y2="17" />
+  {:else if name === 'serial'}
+    <path d="M3 8h18l-2 8H5z" />
+    <line x1="8" y1="11" x2="8.01" y2="11" />
+    <line x1="12" y1="11" x2="12.01" y2="11" />
+    <line x1="16" y1="11" x2="16.01" y2="11" />
+    <line x1="10" y1="13.5" x2="10.01" y2="13.5" />
+    <line x1="14" y1="13.5" x2="14.01" y2="13.5" />
   {:else if name === 'close'}
     <line x1="6" y1="6" x2="18" y2="18" />
     <line x1="18" y1="6" x2="6" y2="18" />

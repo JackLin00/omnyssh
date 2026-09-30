@@ -19,6 +19,8 @@
   import { spawnSession, closeSession } from '$lib/stores/navigation';
   import { palette } from '$lib/stores/palette';
   import { support } from '$lib/stores/support';
+  import { isWindows } from '$lib/platform';
+  import { serialConnect } from '$lib/stores/serialConnect';
 
   // Action-first spawn (tech-gui.md §2): a spawner opens the host-picker, then creates
   // a session of its kind for the chosen host. A dismissed picker spawns nothing.
@@ -36,7 +38,9 @@
   ];
   const spawners: Spawner[] = [
     { kind: 'sftp', label: 'SFTP', icon: 'sftp' },
-    { kind: 'terminal', label: 'Terminal', icon: 'terminal' }
+    { kind: 'terminal', label: 'Terminal', icon: 'terminal' },
+    // Serial ports are Windows-only in this first version.
+    ...(isWindows ? [{ kind: 'serial', label: 'Serial', icon: 'serial' } satisfies Spawner] : [])
   ];
 
   const rowBase = 'flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition';
@@ -92,7 +96,7 @@
             type="button"
             class="{rowBase} {focusRing} {rowState(false)} {$sidebarCollapsed ? 'justify-center' : ''}"
             title={sp.label}
-            onclick={() => pickAndSpawn(sp.kind)}
+            onclick={() => (sp.kind === 'serial' ? serialConnect.open() : pickAndSpawn(sp.kind))}
           >
             <Icon name={sp.icon} />
             {#if !$sidebarCollapsed}<span class="truncate">{sp.label}</span>{/if}

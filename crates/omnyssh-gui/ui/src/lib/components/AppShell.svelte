@@ -13,6 +13,8 @@
   import PasswordPrompt from '$lib/screens/PasswordPrompt.svelte';
   import UpdateBanner from './UpdateBanner.svelte';
   import { support } from '$lib/stores/support';
+  import SerialConnect from '$lib/screens/SerialConnect.svelte';
+  import { serialConnect } from '$lib/stores/serialConnect';
   import { sidebarCollapsed, isCollapseChord } from '$lib/stores/ui';
 
   let { children }: { children: Snippet } = $props();
@@ -43,6 +45,9 @@
   <CommandPalette />
   {#if $support}
     <SupportModal />
+  {/if}
+  {#if $serialConnect}
+    <SerialConnect />
   {/if}
   <KeySetupProgress />
   <PassphrasePrompt />
