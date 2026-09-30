@@ -121,7 +121,7 @@ test('host-first: spawn a terminal from a card, run a command, see output, then 
   await expect(page.locator('.xterm-rows')).toContainText('RESULT-OK');
 
   // Closing the tab tears the terminal down.
-  await page.getByRole('button', { name: 'Close web-1 · terminal' }).click();
+  await page.getByRole('button', { name: 'Close web-1', exact: true }).click();
   await expect(page.locator('.xterm')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'web-1 · terminal', exact: true })).toHaveCount(0);
 });
@@ -180,15 +180,18 @@ test('a remote exit (terminal-exited) tears the tab down', async ({ page }) => {
 // Windows and Linux copy with Ctrl+Shift+C. The Desktop Chrome device reports a Windows
 // user agent, so this is the path those platforms take; the clipboard is stubbed at the
 // boundary like the IPC, which also keeps parallel runs apart.
-async function bootWithClipboard(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+async function bootWithClipboard(page: Page, copyOnSelect = false): Promise<void> {
+  await page.addInitScript((copyOnSelect) => {
     const win = window as unknown as { __copied: string[] };
     win.__copied = [];
+    // Most of these tests exercise the Ctrl+Shift+C chord alone, so copy-on-select (which
+    // copies the double-click selection by itself) is switched off unless asked for.
+    if (!copyOnSelect) localStorage.setItem('omnyssh-copy-on-select', 'false');
     navigator.clipboard.writeText = (text: string) => {
       win.__copied.push(text);
       return Promise.resolve();
     };
-  });
+  }, copyOnSelect);
   await boot(page);
   await page.getByTitle('sh on web-1').click();
   await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
@@ -221,6 +224,14 @@ test('Ctrl+Shift+C copies the selection and sends the shell nothing', async ({ p
   // Ctrl+Shift+V is the webview's own paste; xterm must not turn it into ^V or a V.
   await page.keyboard.press('Control+Shift+V');
   expect(await writes(page)).toEqual([[3]]);
+});
+
+test('copy-on-select copies a double-click selection with no key pressed', async ({ page }) => {
+  await bootWithClipboard(page, true);
+  await selectPrompt(page);
+
+  await expect.poll(() => copied(page)).toEqual(['omnyssh-ready>']);
+  expect(await writes(page)).toEqual([]);
 });
 
 test('Ctrl+Shift+C with nothing selected copies nothing', async ({ page }) => {
