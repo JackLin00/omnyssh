@@ -54,6 +54,14 @@ export function sessionTitle(s: Session): string {
   return `${s.hostName} · ${s.kind}`;
 }
 
+/** A split terminal tab's status from its panes': connected while any pane is, failed
+ *  once every pane has failed, else still connecting. */
+export function combineStatus(statuses: readonly SessionStatus[]): SessionStatus {
+  if (statuses.includes('connected')) return 'connected';
+  if (statuses.length > 0 && statuses.every((s) => s === 'failed')) return 'failed';
+  return 'connecting';
+}
+
 function createSessions() {
   const { subscribe, update } = writable<Session[]>([]);
   let nextId = 1;

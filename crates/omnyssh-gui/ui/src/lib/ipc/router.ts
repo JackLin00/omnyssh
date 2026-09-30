@@ -31,6 +31,7 @@ import { snippetRun, reduceRunResult } from '$lib/stores/snippets';
 import { sessions } from '$lib/stores/sessions';
 import { sftp } from '$lib/stores/sftp';
 import { closeSession } from '$lib/stores/navigation';
+import { dispatchPaneExit } from '$lib/stores/paneExits';
 import { lastError } from '$lib/stores/notifications';
 import {
   keySetup,
@@ -99,9 +100,13 @@ export function applySnippetResult(payload: SnippetResult): void {
 // An instant-fail connect can emit terminal-exited before terminalOpen resolves, so
 // the tab has no termId yet: park the id and let the tab reconcile once it records
 // its backend id (`terminalDidExit`), rather than stranding a dead tab open.
+// A terminal pane registers its id in paneExits and is closed on its own; the termId
+// match covers any tab that records a single id.
 const exitedBeforeMapped = new Set<number>();
 
 export function applyTerminalExited(sessionId: number): void {
+  // A split pane owns its backend id and closes itself (and its tab, if it was the last).
+  if (dispatchPaneExit(sessionId)) return;
   const target = get(sessions).find((s) => s.termId === sessionId);
   if (target) closeSession(target.id);
   else exitedBeforeMapped.add(sessionId);

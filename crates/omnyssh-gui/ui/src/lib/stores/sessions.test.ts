@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { get } from 'svelte/store';
-import { sessions, sessionLabel, sessionTitle, sessionStatusDot } from './sessions';
+import { sessions, sessionLabel, sessionTitle, sessionStatusDot, combineStatus } from './sessions';
 
 // The sessions list backs the sidebar rows and the terminal layer (tech-gui.md §2,
 // §3.1). Ids are monotonic (never reused) and each session carries the backend
@@ -76,5 +76,20 @@ describe('sessions store', () => {
       serial
     });
     sessions.close(s.id);
+  });
+});
+
+describe('combineStatus', () => {
+  it('is connected while any pane is', () => {
+    expect(combineStatus(['failed', 'connected', 'connecting'])).toBe('connected');
+  });
+
+  it('is failed only once every pane has failed', () => {
+    expect(combineStatus(['failed', 'failed'])).toBe('failed');
+    expect(combineStatus(['failed', 'connecting'])).toBe('connecting');
+  });
+
+  it('is connecting with no pane reported yet', () => {
+    expect(combineStatus([])).toBe('connecting');
   });
 });

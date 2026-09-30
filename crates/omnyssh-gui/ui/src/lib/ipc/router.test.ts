@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import type { HostDto } from '$lib/bindings';
 import { hosts } from '$lib/stores/hosts';
@@ -8,6 +8,7 @@ import { services } from '$lib/stores/services';
 import { tunnels } from '$lib/stores/tunnels';
 import { snippetRun, beginRun, clearRun } from '$lib/stores/snippets';
 import { sessions } from '$lib/stores/sessions';
+import { registerPaneExit } from '$lib/stores/paneExits';
 import { lastError } from '$lib/stores/notifications';
 import { keySetup, dismissKeySetup, beginKeySetup } from '$lib/stores/keySetup';
 import { passphrasePrompt, passphraseQueue } from '$lib/stores/passphrase';
@@ -172,6 +173,20 @@ describe('ipc event router', () => {
     applyTerminalExited(501);
 
     expect(get(sessions).some((s) => s.id === tab.id)).toBe(false);
+  });
+
+  it('terminal-exited closes only the pane that owns the backend id', () => {
+    const tab = sessions.spawn('terminal', 'web-1');
+    const onExit = vi.fn();
+    registerPaneExit(601, onExit);
+
+    applyTerminalExited(601);
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+    // The pane decides whether its tab goes too; the router does not close it.
+    expect(get(sessions).some((s) => s.id === tab.id)).toBe(true);
+    expect(terminalDidExit(601)).toBe(false); // handled, not parked
+    sessions.close(tab.id);
   });
 
   it('a terminal-exited that races ahead of terminalOpen reconciles on setTermId', () => {
