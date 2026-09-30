@@ -6,6 +6,7 @@
   import { onMount } from 'svelte';
   import type { UpdateConfigDto } from '$lib/bindings';
   import { Surface, Icon } from '$lib/theme';
+  import ShortcutSettings from './ShortcutSettings.svelte';
   import { theme } from '$lib/stores/theme';
   import { streamerMode } from '$lib/stores/streamer';
   import { copyOnSelect, rightClickPaste } from '$lib/stores/terminalPrefs';
@@ -158,6 +159,12 @@
           () => rightClickPaste.toggle()
         )}
       </div>
+    </Surface>
+
+    <!-- Keyboard shortcuts -->
+    <Surface class="p-5">
+      <h2 class="mb-3 text-sm font-semibold">Keyboard shortcuts</h2>
+      <ShortcutSettings />
     </Surface>
 
     <!-- Dashboard -->
