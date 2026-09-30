@@ -284,7 +284,7 @@
   <div class="relative min-h-0 flex-1 px-2 pb-4 pt-2">
     <div bind:this={container} class="h-full w-full"></div>
     {#if searchOpen && searchAddon}
-      <div class="absolute right-3 top-2 z-20">
+      <div class="absolute right-3 top-2 z-20 max-w-[calc(100%-1.5rem)]">
         <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
       </div>
     {/if}

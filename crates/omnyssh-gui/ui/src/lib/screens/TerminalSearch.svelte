@@ -25,11 +25,30 @@
   let regex = $state(false);
   let results = $state<{ resultIndex: number; resultCount: number } | null>(null);
   const invalid = $derived(regex && query !== '' && !isValidRegex(query));
+  // The query this component last searched for, so the effect below can tell "the query
+  // changed" from "only Aa/.* changed" without the query itself being reactive state.
+  let lastQuery = '';
 
   onMount(() => {
     const off = addon.onDidChangeResults((r) => (results = r));
+    // Skip the subscription's own initial, synchronous call — nothing has been searched
+    // yet, so there is nothing to re-search.
+    let firstTheme = true;
+    const themeOff = theme.subscribe(() => {
+      if (firstTheme) {
+        firstTheme = false;
+        return;
+      }
+      // The decorations baked into the last search are in the old theme's colours;
+      // re-run it so the highlights match the new one.
+      if (query !== '' && !invalid) {
+        addon.clearDecorations();
+        find(true, true);
+      }
+    });
     return () => {
       off.dispose();
+      themeOff();
       addon.clearDecorations();
     };
   });
@@ -48,11 +67,16 @@
     else addon.findPrevious(query, options(incremental));
   }
 
-  // Search as the query or an option changes, keeping the current match where it is.
+  // Search as the query or an option changes, keeping the current match where it is. The
+  // addon ignores `incremental` once a term is cached, so toggling Aa/.* with the query
+  // unchanged would otherwise resume from the current selection's end rather than its
+  // start; clearing decorations first forces a search from scratch.
   $effect(() => {
     void query;
     void caseSensitive;
     void regex;
+    if (query === lastQuery) addon.clearDecorations();
+    lastQuery = query;
     find(true, true);
   });
 
@@ -64,9 +88,10 @@
       input?.select();
     });
   });
-  onMount(() => input?.focus());
 
   function onKeydown(e: KeyboardEvent): void {
+    // An IME's own Enter/Escape commits or cancels composition; they are not this bar's.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       onClose();
@@ -89,7 +114,7 @@
 </script>
 
 <div
-  class="flex items-center gap-1 rounded-lg border border-default bg-surface-raised p-1 shadow-soft"
+  class="flex max-w-full items-center gap-1 overflow-hidden rounded-lg border border-default bg-surface-raised p-1 shadow-soft"
   role="search"
 >
   <input
@@ -99,12 +124,12 @@
     placeholder="Find"
     aria-label="Find in terminal"
     aria-invalid={invalid}
-    class="w-44 rounded bg-surface-inset px-2 py-1 text-xs text-fg outline-none placeholder:text-faint focus-visible:ring-2 {invalid
+    class="min-w-[4rem] flex-1 rounded bg-surface-inset px-2 py-1 text-xs text-fg outline-none placeholder:text-faint focus-visible:ring-2 {invalid
       ? 'ring-2 ring-status-crit'
       : 'focus-visible:ring-focus'}"
     onkeydown={onKeydown}
   />
-  <span class="min-w-[4.5rem] px-1 text-center text-[11px] tabular-nums text-muted" aria-live="polite">
+  <span class="shrink-0 px-1 text-center text-[11px] tabular-nums text-muted" aria-live="polite">
     {invalid ? 'Bad regex' : results ? formatResults(results) : ''}
   </span>
   <button

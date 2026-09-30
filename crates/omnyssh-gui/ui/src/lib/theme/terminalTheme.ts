@@ -66,12 +66,14 @@ export function xtermTheme(theme: Theme): ITheme {
 
 // Search highlights, for the same reason as the palette above: xterm draws them, not
 // CSS. Every match gets a quiet wash; the current one takes the warning yellow so it
-// stands out on either surface. The addon requires #RRGGBB.
+// stands out on either surface. The addon requires #RRGGBB. The overview-ruler colours
+// only show once a terminal turns `overviewRulerWidth` on; none does today, so they are
+// unused decoration until one does.
 const SEARCH: Record<Theme, ISearchDecorationOptions> = {
   dark: {
     matchBackground: '#4a5058',
     matchOverviewRuler: '#7a8088',
-    activeMatchBackground: '#8a6d1f',
+    activeMatchBackground: '#6e5818',
     activeMatchColorOverviewRuler: '#e8c15a'
   },
   light: {

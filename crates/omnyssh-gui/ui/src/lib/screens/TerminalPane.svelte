@@ -117,6 +117,8 @@
 
   let container: HTMLDivElement;
   let toolbar: HTMLDivElement;
+  // Read inside the focus $effect below, so Svelte needs it reactive to track that read.
+  let searchBox = $state<HTMLDivElement>();
   let term: Terminal | undefined;
   let fitAddon: FitAddon | undefined;
   let searchAddon = $state<SearchAddon>();
@@ -288,23 +290,25 @@
 
   // Becoming visible: a hidden container measured 0, so refit, and the focused pane
   // takes the keyboard. An open dialog keeps it (keystrokes meant for a key passphrase
-  // must never reach the shell); the pane takes it back once the last one closes.
+  // must never reach the shell); the pane takes it back once the last one closes. Never
+  // while the find bar holds focus — clicking another pane and back must not pull the
+  // keyboard out of an open find input.
   $effect(() => {
     if (active && ready) {
       const take = focused && $dialogs.length === 0;
       requestAnimationFrame(() => {
         safeFit();
-        if (take) term?.focus();
+        if (take && !searchBox?.contains(document.activeElement)) term?.focus();
         syncScrolled();
       });
     }
   });
 
-  // Focus landing on a toolbar button (Tab) leaves the pane's focus alone: making the
-  // pane focused would hand the keyboard to xterm next frame and pull it off the button.
-  // A click still focuses the pane through pointerdown.
+  // Focus landing on a toolbar button (Tab) or the find bar leaves the pane's focus
+  // alone: making the pane focused would hand the keyboard to xterm next frame and pull
+  // it off the button or input. A click still focuses the pane through pointerdown.
   function focusIn(e: FocusEvent): void {
-    if (toolbar?.contains(e.target as Node)) return;
+    if (toolbar?.contains(e.target as Node) || searchBox?.contains(e.target as Node)) return;
     onFocus();
   }
 
@@ -341,7 +345,7 @@
     </button>
   </div>
   {#if searchOpen && searchAddon}
-    <div class="absolute right-1.5 top-9 z-20">
+    <div bind:this={searchBox} class="absolute right-1.5 top-9 z-20 max-w-[calc(100%-0.75rem)]">
       <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
     </div>
   {/if}

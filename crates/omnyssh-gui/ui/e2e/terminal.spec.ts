@@ -185,7 +185,9 @@ test('a remote exit (terminal-exited) tears the tab down', async ({ page }) => {
   await expect(page.locator('.xterm')).toHaveCount(0);
 });
 
-test('Ctrl+Shift+F opens find, searches incrementally, and Escape closes it', async ({ page }) => {
+test('Ctrl+Shift+F opens find, searches incrementally, re-presses reselect, and Escape closes it and returns focus', async ({
+  page
+}) => {
   await boot(page);
   await page.getByTitle('sh on web-1').click();
   await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
@@ -194,16 +196,50 @@ test('Ctrl+Shift+F opens find, searches incrementally, and Escape closes it', as
   const bar = page.getByRole('search');
   await expect(bar).toBeVisible();
 
-  await page.getByLabel('Find in terminal').fill('ready');
-  // Incremental search may not have a current match selected yet, showing just the
-  // total; Enter steps to (and selects) the first one.
-  if (!(await bar.getByText('1 / 1').count())) {
-    await page.keyboard.press('Enter');
-  }
+  const findInput = page.getByLabel('Find in terminal');
+  await findInput.fill('ready');
   await expect(bar.getByText('1 / 1')).toBeVisible();
+
+  // Pressing the chord again while the input still has focus keeps the bar open and
+  // reselects its text, so typing replaces the query instead of appending to it.
+  await page.keyboard.press('Control+Shift+F');
+  await expect(bar).toBeVisible();
+  await page.keyboard.type('x');
+  await expect(findInput).toHaveValue('x');
 
   await page.keyboard.press('Escape');
   await expect(bar).toHaveCount(0);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeFocused();
+});
+
+test("clicking another pane doesn't steal focus back from an open find bar", async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+  // Split right: pane A (left, the original session) and pane B (right, a new one),
+  // which the split focuses.
+  await page.getByTitle('Split right (Alt+Shift+=)').click();
+  await expect(page.locator('.xterm')).toHaveCount(2);
+  await expect(page.locator('.xterm-rows').nth(1)).toContainText('omnyssh-ready');
+
+  // Focus pane A and open its find bar. `.xterm-screen` (not `.xterm-rows`, which it
+  // overlays) is what actually receives pointer events.
+  await page.locator('.xterm-screen').nth(0).click();
+  await page.keyboard.press('Control+Shift+F');
+  const findInput = page.getByLabel('Find in terminal');
+  await expect(findInput).toBeVisible();
+
+  // Click into pane B: its own becoming-focused effect must not reach across and pull
+  // the keyboard out of pane A's still-open find input.
+  await page.locator('.xterm-screen').nth(1).click();
+
+  // Click back into pane A's find input and type: the keystrokes must land in the
+  // input, not fall through to the terminal underneath it.
+  await findInput.click();
+  await page.keyboard.type('abc');
+  await expect(findInput).toHaveValue('abc');
+  expect(await writes(page)).toEqual([]);
 });
 
 // Windows and Linux copy with Ctrl+Shift+C. The Desktop Chrome device reports a Windows
