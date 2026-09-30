@@ -242,7 +242,9 @@ test("clicking another pane doesn't steal focus back from an open find bar", asy
   expect(await writes(page)).toEqual([]);
 });
 
-test('dragging a pane by its title bar moves it, keeping its session', async ({ page }) => {
+test('dragging a pane by its title bar moves it, keeping its session and its keyboard', async ({
+  page
+}) => {
   await boot(page);
   await page.getByTitle('sh on web-1').click();
   await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
@@ -254,7 +256,7 @@ test('dragging a pane by its title bar moves it, keeping its session', async ({ 
   // The original session's xterm element, to prove the move doesn't remount it.
   const firstXterm = await page.locator('[data-pane="1"] .xterm').elementHandle();
 
-  const titleBar1 = (await page.locator('[data-pane="1"] [role="toolbar"]').boundingBox())!;
+  const titleBar1 = (await page.locator('[data-pane="1"] [data-titlebar]').boundingBox())!;
   const box2 = (await page.locator('[data-pane="2"]').boundingBox())!;
 
   // Press on the title bar's free area (left of its buttons), drag onto pane 2's top
@@ -265,14 +267,40 @@ test('dragging a pane by its title bar moves it, keeping its session', async ({ 
   await page.mouse.move(box2.x + box2.width / 2, box2.y + 10, { steps: 5 });
   await page.mouse.up();
 
-  const box1After = (await page.locator('[data-pane="1"]').boundingBox())!;
-  const box2After = (await page.locator('[data-pane="2"]').boundingBox())!;
-  expect(Math.abs(box1After.x - box2After.x)).toBeLessThan(5);
-  expect(box1After.y).toBeLessThan(box2After.y);
+  await expect(async () => {
+    const box1After = (await page.locator('[data-pane="1"]').boundingBox())!;
+    const box2After = (await page.locator('[data-pane="2"]').boundingBox())!;
+    expect(Math.abs(box1After.x - box2After.x)).toBeLessThan(5);
+    expect(box1After.y).toBeLessThan(box2After.y);
+  }).toPass();
 
   // The moved pane's xterm element is the very same one — no remount, no dropped session.
   await expect(page.locator('[data-pane="1"] .xterm')).toHaveCount(1);
   expect(await firstXterm!.evaluate((el) => el.isConnected)).toBe(true);
+
+  // The moved pane keeps the keyboard: typing lands on its own session (backend id 1),
+  // not stranded on the title bar the drag started from.
+  await page.keyboard.type('z');
+  await expect.poll(() => writes(page)).toEqual([[122]]);
+});
+
+test("clicking a pane's title bar keeps the keyboard in its own terminal", async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+  // Split right: pane 2 (the new session) ends up focused.
+  await page.keyboard.press('Alt+Shift+=');
+  await expect(page.locator('[data-pane]')).toHaveCount(2);
+  await expect(page.locator('.xterm-rows').nth(1)).toContainText('omnyssh-ready');
+
+  // A plain click on pane 1's title bar (its free area, left of the buttons) only
+  // switches focus, and must hand the keyboard to pane 1's own xterm — not strand it on
+  // the title bar itself.
+  await page.locator('[data-pane="1"] [data-titlebar]').click({ position: { x: 20, y: 12 } });
+  // xterm reports each keystroke as its own onData event, so "hi" is two writes.
+  await page.keyboard.type('hi');
+  await expect.poll(() => writes(page)).toEqual([[104], [105]]);
 });
 
 test('Escape cancels a pane drag and leaves the layout as it was', async ({ page }) => {
@@ -283,20 +311,68 @@ test('Escape cancels a pane drag and leaves the layout as it was', async ({ page
   await page.keyboard.press('Alt+Shift+=');
   await expect(page.locator('[data-pane]')).toHaveCount(2);
 
-  const titleBar1 = (await page.locator('[data-pane="1"] [role="toolbar"]').boundingBox())!;
+  const titleBar1 = (await page.locator('[data-pane="1"] [data-titlebar]').boundingBox())!;
   const box2Before = (await page.locator('[data-pane="2"]').boundingBox())!;
 
   await page.mouse.move(titleBar1.x + 20, titleBar1.y + titleBar1.height / 2);
   await page.mouse.down();
   await page.mouse.move(box2Before.x + box2Before.width / 2, box2Before.y + 10, { steps: 5 });
+
+  // The drag is actually under way before we cancel it.
+  await expect(page.locator('[data-pane="1"].opacity-50')).toHaveCount(1);
+
   await page.keyboard.press('Escape');
   await page.mouse.up();
 
-  const box1After = (await page.locator('[data-pane="1"]').boundingBox())!;
-  const box2After = (await page.locator('[data-pane="2"]').boundingBox())!;
-  // Still side by side: same y, pane 1 left of pane 2.
-  expect(Math.abs(box1After.y - box2After.y)).toBeLessThan(5);
-  expect(box1After.x).toBeLessThan(box2After.x);
+  await expect(async () => {
+    const box1After = (await page.locator('[data-pane="1"]').boundingBox())!;
+    const box2After = (await page.locator('[data-pane="2"]').boundingBox())!;
+    // Still side by side: same y, pane 1 left of pane 2.
+    expect(Math.abs(box1After.y - box2After.y)).toBeLessThan(5);
+    expect(box1After.x).toBeLessThan(box2After.x);
+  }).toPass();
+});
+
+test('a pane exiting mid-drag ends the move, with no dangling preview or leaked Escape listener', async ({
+  page
+}) => {
+  await boot(page);
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+  await page.keyboard.press('Alt+Shift+=');
+  await expect(page.locator('[data-pane]')).toHaveCount(2);
+
+  const titleBar1 = (await page.locator('[data-pane="1"] [data-titlebar]').boundingBox())!;
+  const box2 = (await page.locator('[data-pane="2"]').boundingBox())!;
+
+  await page.mouse.move(titleBar1.x + 20, titleBar1.y + titleBar1.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box2.x + box2.width / 2, box2.y + 10, { steps: 5 });
+
+  // The drag is under way: the dragged pane is dimmed and a preview shows.
+  await expect(page.locator('[data-pane="1"].opacity-50')).toHaveCount(1);
+  await expect(page.locator('.border-accent')).toHaveCount(1);
+
+  // Pane 1's session exits mid-drag: its title bar — the drag's pointer-capture target —
+  // is removed from the DOM before the drag would otherwise end on its own.
+  await page.evaluate(() => {
+    (window as unknown as { __fireTerminalExited: (id: number) => void }).__fireTerminalExited(1);
+  });
+  await expect(page.locator('[data-pane]')).toHaveCount(1);
+
+  // The move is cancelled on its own: no preview left dangling.
+  await expect(page.locator('.border-accent')).toHaveCount(0);
+  await page.mouse.up();
+
+  // And no leaked capture-phase Escape listener: opening find in the surviving pane and
+  // pressing Escape closes it on the very first press.
+  await page.locator('.xterm-screen').first().click();
+  await page.keyboard.press('Control+Shift+F');
+  const findInput = page.getByLabel('Find in terminal');
+  await expect(findInput).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(findInput).toHaveCount(0);
 });
 
 // Windows and Linux copy with Ctrl+Shift+C. The Desktop Chrome device reports a Windows

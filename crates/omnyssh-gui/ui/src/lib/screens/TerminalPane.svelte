@@ -30,8 +30,9 @@
   import { shouldFadeTop } from './terminalFade';
   import { chunkBytes, layoutFallback } from './terminalInput';
   import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
-  import { matchTerminalAction, type TerminalAction } from './terminalShortcuts';
+  import { matchTerminalAction, formatChord, type TerminalAction } from './terminalShortcuts';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
+  import { isMac } from '$lib/platform';
   import type { SplitDir } from './splitLayout';
   import type { TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
@@ -305,15 +306,18 @@
   // Becoming visible: a hidden container measured 0, so refit, and the focused pane
   // takes the keyboard. An open dialog keeps it (keystrokes meant for a key passphrase
   // must never reach the shell); the pane takes it back once the last one closes. Never
-  // while the find bar holds focus — clicking another pane and back must not pull the
-  // keyboard out of an open find input.
+  // while the find bar holds focus, or Tab has landed on a title-bar button — clicking
+  // another pane and back, or tabbing onto a button, must not pull the keyboard away.
+  // A press elsewhere on the title bar's free area never moves DOM focus there (see the
+  // title bar's own onmousedown below), so this is not also excluded.
   $effect(() => {
     if (active && ready) {
       const take = focused && $dialogs.length === 0;
       requestAnimationFrame(() => {
         safeFit();
         const focusedEl = document.activeElement;
-        if (take && !searchBox?.contains(focusedEl) && !titleBar?.contains(focusedEl)) {
+        const onTitleBarButton = !!titleBar?.contains(focusedEl) && focusedEl !== titleBar;
+        if (take && !searchBox?.contains(focusedEl) && !onTitleBarButton) {
           term?.focus();
         }
         syncScrolled();
@@ -342,6 +346,12 @@
   const titleBtn =
     'grid h-5 w-5 place-items-center rounded text-muted transition hover:bg-surface hover:text-fg ' +
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+
+  /** The action's current shortcut, formatted for a title, or empty when unbound. */
+  function hint(action: TerminalAction): string {
+    const chord = $terminalShortcuts[action];
+    return chord ? ` (${formatChord(chord, isMac)})` : '';
+  }
 </script>
 
 <!-- Clicking anywhere in the pane, or xterm's textarea taking focus, makes it the
@@ -358,28 +368,36 @@
       : ''}"
   >
     {#if titled}
-      <!-- Drag the free area to move the pane; the buttons act as buttons. -->
+      <!-- Drag the free area to move the pane; the buttons act as buttons. A mousedown
+           on the free area is prevented from moving DOM focus onto this div itself
+           (only a real focus target, like a button, should ever hold focus here) — see
+           the focus $effect above, which otherwise couldn't tell the pane's own
+           keyboard focus from a stray one parked on the title bar. -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -- pointer/mouse handlers only start a drag or keep focus off the free area; the buttons inside are the actual interactive controls. -->
       <div
         bind:this={titleBar}
+        data-titlebar
         class="flex h-6 shrink-0 cursor-grab items-center gap-1.5 border-b border-default bg-surface-inset px-1.5 text-xs active:cursor-grabbing"
-        role="toolbar"
-        aria-label="Pane: {title || hostName}. Drag to move."
-        tabindex="-1"
+        role="group"
+        aria-label="Pane {hostName}"
         onpointerdown={(e) => {
           if (e.button === 0 && !(e.target as Element).closest('button')) onMoveStart(e);
+        }}
+        onmousedown={(e) => {
+          if (!(e.target as Element).closest('button')) e.preventDefault();
         }}
       >
         <StatusDot status={sessionStatusDot[status]} size={7} />
         <span class="min-w-0 flex-1 truncate text-muted" title={title || hostName}>
           {title || hostName}
         </span>
-        <button type="button" class={titleBtn} title="Split right" aria-label="Split right" onclick={() => onSplit('row')}>
+        <button type="button" class={titleBtn} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
           <Icon name="splitRight" size={13} />
         </button>
-        <button type="button" class={titleBtn} title="Split down" aria-label="Split down" onclick={() => onSplit('column')}>
+        <button type="button" class={titleBtn} title="Split down{hint('splitDown')}" aria-label="Split down" onclick={() => onSplit('column')}>
           <Icon name="splitDown" size={13} />
         </button>
-        <button type="button" class={titleBtn} title="Close pane" aria-label="Close pane" onclick={onClose}>
+        <button type="button" class={titleBtn} title="Close pane{hint('closePane')}" aria-label="Close pane" onclick={onClose}>
           <Icon name="close" size={13} />
         </button>
       </div>
@@ -391,13 +409,13 @@
       bind:this={toolbar}
       class="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100"
     >
-      <button type="button" class={toolBtn} title="Split right (Alt+Shift+=)" aria-label="Split right" onclick={() => onSplit('row')}>
+      <button type="button" class={toolBtn} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
         <Icon name="splitRight" size={14} />
       </button>
-      <button type="button" class={toolBtn} title="Split down (Alt+Shift+-)" aria-label="Split down" onclick={() => onSplit('column')}>
+      <button type="button" class={toolBtn} title="Split down{hint('splitDown')}" aria-label="Split down" onclick={() => onSplit('column')}>
         <Icon name="splitDown" size={14} />
       </button>
-      <button type="button" class={toolBtn} title="Close pane (Ctrl+Shift+W)" aria-label="Close pane" onclick={onClose}>
+      <button type="button" class={toolBtn} title="Close pane{hint('closePane')}" aria-label="Close pane" onclick={onClose}>
         <Icon name="close" size={14} />
       </button>
     </div>

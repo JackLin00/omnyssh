@@ -4,7 +4,7 @@
   // Panes are positioned absolutely from the tree and keyed by id, so a split or a close
   // never remounts a pane — its xterm and session live on. Kept mounted for the tab's
   // whole life, hidden when another entity is active.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { closeSession } from '$lib/stores/navigation';
   import { sessions, combineStatus, type Session, type SessionStatus } from '$lib/stores/sessions';
   import TerminalPane from './TerminalPane.svelte';
@@ -103,6 +103,12 @@
     const target = arranged.panes.find((p) => p.id === moving!.target);
     return target ? dropPreview(target.rect, moving.side) : null;
   });
+  // Ends the drag in progress, if any — set while one runs, cleared once it ends. A
+  // pane can be destroyed mid-drag (remote exit, its tab closing): the handle that held
+  // pointer capture is then removed from the DOM, so `lostpointercapture` fires on the
+  // document instead of reaching the handle's own listener below, and `end` would never
+  // run on its own. The $effect after this function, and `onDestroy`, call it directly.
+  let cancelMove: (() => void) | null = null;
 
   // Moving a pane by its title bar: past a few pixels the press becomes a drag, the pane
   // under the pointer shows where it would land, and a release there moves it. Esc, a
@@ -137,25 +143,37 @@
       }
     }
     function key(ev: KeyboardEvent): void {
-      if (ev.key !== 'Escape') return;
+      // Before the press has become a drag, Escape is none of this listener's business.
+      if (!moving || ev.key !== 'Escape') return;
       ev.preventDefault();
       ev.stopPropagation();
       end();
     }
     function end(): void {
       moving = null;
+      cancelMove = null;
       handle.removeEventListener('pointermove', move);
       handle.removeEventListener('pointerup', drop);
       handle.removeEventListener('pointercancel', end);
       handle.removeEventListener('lostpointercapture', end);
       window.removeEventListener('keydown', key, true);
     }
+    cancelMove = end;
     handle.addEventListener('pointermove', move);
     handle.addEventListener('pointerup', drop);
     handle.addEventListener('pointercancel', end);
     handle.addEventListener('lostpointercapture', end);
     window.addEventListener('keydown', key, true);
   }
+
+  // The dragged pane can vanish mid-drag (its session exits, or its tab closes): once
+  // it's no longer in the layout, end the drag rather than leave the preview and the
+  // capture-phase Escape listener dangling.
+  $effect(() => {
+    if (moving && !arranged.panes.some((p) => p.id === moving!.id)) cancelMove?.();
+  });
+
+  onDestroy(() => cancelMove?.());
 
   const pct = (n: number): string => `${n * 100}%`;
 </script>
@@ -207,10 +225,15 @@
         </div>
       {/each}
       {#if preview}
+        <!-- A full-opacity border reads clearly in both themes; the fill alone stays
+             faint (a dimmed border, as opacity on the whole box would give, nearly
+             disappears in dark mode). -->
         <div
-          class="pointer-events-none absolute z-30 rounded border-2 border-focus bg-surface-inset opacity-60"
+          class="pointer-events-none absolute z-30 overflow-hidden rounded border-2 border-accent"
           style="left: {pct(preview.x)}; top: {pct(preview.y)}; width: {pct(preview.w)}; height: {pct(preview.h)};"
-        ></div>
+        >
+          <div class="absolute inset-0 bg-accent opacity-20"></div>
+        </div>
       {/if}
     </div>
   </div>
