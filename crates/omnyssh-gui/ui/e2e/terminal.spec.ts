@@ -185,6 +185,27 @@ test('a remote exit (terminal-exited) tears the tab down', async ({ page }) => {
   await expect(page.locator('.xterm')).toHaveCount(0);
 });
 
+test('Ctrl+Shift+F opens find, searches incrementally, and Escape closes it', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+  await page.keyboard.press('Control+Shift+F');
+  const bar = page.getByRole('search');
+  await expect(bar).toBeVisible();
+
+  await page.getByLabel('Find in terminal').fill('ready');
+  // Incremental search may not have a current match selected yet, showing just the
+  // total; Enter steps to (and selects) the first one.
+  if (!(await bar.getByText('1 / 1').count())) {
+    await page.keyboard.press('Enter');
+  }
+  await expect(bar.getByText('1 / 1')).toBeVisible();
+
+  await page.keyboard.press('Escape');
+  await expect(bar).toHaveCount(0);
+});
+
 // Windows and Linux copy with Ctrl+Shift+C. The Desktop Chrome device reports a Windows
 // user agent, so this is the path those platforms take; the clipboard is stubbed at the
 // boundary like the IPC, which also keeps parallel runs apart.

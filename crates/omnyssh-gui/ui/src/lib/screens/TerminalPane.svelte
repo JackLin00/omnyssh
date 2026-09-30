@@ -10,6 +10,7 @@
   import { get } from 'svelte/store';
   import type { Terminal } from '@xterm/xterm';
   import type { FitAddon } from '@xterm/addon-fit';
+  import type { SearchAddon } from '@xterm/addon-search';
   import { Channel } from '@tauri-apps/api/core';
   import { Icon } from '$lib/theme';
   import { theme } from '$lib/stores/theme';
@@ -33,6 +34,8 @@
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import type { SplitDir } from './splitLayout';
   import type { TerminalBytes } from '$lib/bindings';
+  import TerminalSearch from './TerminalSearch.svelte';
+  import { HIGHLIGHT_LIMIT } from './terminalSearch';
 
   let {
     hostName,
@@ -97,14 +100,28 @@
     if (!term) return;
     if (action === 'copy') copySelection(term);
     else if (action === 'paste') void pasteClipboard(term);
+    else if (action === 'find') openSearch();
     else if (action === 'closePane') onClose();
     else onSplit(action === 'splitRight' ? 'row' : 'column');
+  }
+
+  function openSearch(): void {
+    searchOpen = true;
+    searchFocus += 1;
+  }
+
+  function closeSearch(): void {
+    searchOpen = false;
+    term?.focus();
   }
 
   let container: HTMLDivElement;
   let toolbar: HTMLDivElement;
   let term: Terminal | undefined;
   let fitAddon: FitAddon | undefined;
+  let searchAddon = $state<SearchAddon>();
+  let searchOpen = $state(false);
+  let searchFocus = $state(0);
   let termId: number | undefined;
   let destroyed = false;
   let connected = false;
@@ -148,9 +165,10 @@
   onMount(() => {
     onStatus('connecting');
     void (async () => {
-      const [{ Terminal }, { FitAddon }] = await Promise.all([
+      const [{ Terminal }, { FitAddon }, searchModule] = await Promise.all([
         import('@xterm/xterm'),
-        import('@xterm/addon-fit')
+        import('@xterm/addon-fit'),
+        import('@xterm/addon-search')
       ]);
       if (destroyed) return;
 
@@ -158,10 +176,14 @@
         fontFamily: MONO,
         fontSize: 13,
         cursorBlink: true,
-        scrollback: 5000
+        scrollback: 5000,
+        allowProposedApi: true // the search addon's match highlights are decorations
       });
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
+      const { SearchAddon } = searchModule;
+      searchAddon = new SearchAddon({ highlightLimit: HIGHLIGHT_LIMIT });
+      term.loadAddon(searchAddon);
       term.open(container);
       mouseClipboardOff = attachMouseClipboard(term, container, true);
       term.onScroll(syncScrolled);
@@ -205,12 +227,15 @@
         // The chords from Settings → Keyboard shortcuts never reach the shell; they act
         // on keydown only. The copy runs inside the keydown, which WebKit requires. A
         // held chord repeats keydown with no keyup between; splitting, closing or
-        // pasting again on every repeat would be surprising, so only copy also acts on a
-        // repeat (copying the same selection again is harmless).
+        // pasting again on every repeat would be surprising, so only copy and find also
+        // act on a repeat (copying the same selection, or reopening/reselecting the
+        // find bar, is harmless).
         const action = matchTerminalAction(e, get(terminalShortcuts));
         if (action) {
           e.preventDefault();
-          if (e.type === 'keydown' && (action === 'copy' || !e.repeat)) runAction(action);
+          if (e.type === 'keydown' && (action === 'copy' || action === 'find' || !e.repeat)) {
+            runAction(action);
+          }
           return false;
         }
         // Under a non-Latin layout WebKitGTK names no key; the physical one stands in.
@@ -315,6 +340,11 @@
       <Icon name="close" size={14} />
     </button>
   </div>
+  {#if searchOpen && searchAddon}
+    <div class="absolute right-1.5 top-9 z-20">
+      <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
+    </div>
+  {/if}
 </div>
 
 <style>

@@ -9,6 +9,7 @@
   import { get } from 'svelte/store';
   import type { Terminal } from '@xterm/xterm';
   import type { FitAddon } from '@xterm/addon-fit';
+  import type { SearchAddon } from '@xterm/addon-search';
   import { Channel } from '@tauri-apps/api/core';
   import { Button } from '$lib/theme';
   import { theme } from '$lib/stores/theme';
@@ -23,6 +24,8 @@
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
   import type { SerialExitDto, TerminalBytes } from '$lib/bindings';
+  import TerminalSearch from './TerminalSearch.svelte';
+  import { HIGHLIGHT_LIMIT } from './terminalSearch';
 
   let { session, active }: { session: Session; active: boolean } = $props();
   // SerialConnect always spawns serial tabs with their options, fixed for the tab's life.
@@ -46,6 +49,9 @@
   let container: HTMLDivElement;
   let term: Terminal | undefined;
   let fitAddon: FitAddon | undefined;
+  let searchAddon = $state<SearchAddon>();
+  let searchOpen = $state(false);
+  let searchFocus = $state(0);
   let serialId: number | undefined;
   let destroyed = false;
   let failed = false;
@@ -98,6 +104,16 @@
     term?.write('\x1bc');
   }
 
+  function openSearch(): void {
+    searchOpen = true;
+    searchFocus += 1;
+  }
+
+  function closeSearch(): void {
+    searchOpen = false;
+    term?.focus();
+  }
+
   /** Fit only while visible: a hidden container measures 0. A serial line has no
    *  window size, so nothing is sent to the device. */
   function safeFit(): void {
@@ -120,9 +136,10 @@
 
   onMount(() => {
     void (async () => {
-      const [{ Terminal }, { FitAddon }] = await Promise.all([
+      const [{ Terminal }, { FitAddon }, searchModule] = await Promise.all([
         import('@xterm/xterm'),
-        import('@xterm/addon-fit')
+        import('@xterm/addon-fit'),
+        import('@xterm/addon-search')
       ]);
       if (destroyed) return;
 
@@ -133,25 +150,33 @@
         // MCUs print bare LF line ends; without this every line would stair-step.
         convertEol: true,
         cursorBlink: opts.mode === 'terminal',
-        disableStdin: opts.mode === 'monitor'
+        disableStdin: opts.mode === 'monitor',
+        allowProposedApi: true // the search addon's match highlights are decorations
       });
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
+      const { SearchAddon } = searchModule;
+      searchAddon = new SearchAddon({ highlightLimit: HIGHLIGHT_LIMIT });
+      term.loadAddon(searchAddon);
       term.open(container);
       // Receive-only monitor tabs send nothing, so right-click keeps its native menu.
       mouseClipboardOff = attachMouseClipboard(term, container, opts.mode === 'terminal');
-      // Copy (both modes) and paste (terminal mode) follow Settings → Keyboard shortcuts;
-      // the pane chords mean nothing in a serial tab, so those keys go to the device. A
-      // held paste chord repeats keydown with no keyup between; only the first press
-      // should paste (copy stays on every repeat — copying the same selection again is
-      // harmless).
+      // Copy and find (both modes) and paste (terminal mode) follow Settings → Keyboard
+      // shortcuts; the pane chords mean nothing in a serial tab, so those keys go to the
+      // device. A held paste chord repeats keydown with no keyup between; only the first
+      // press should paste (copy and find stay on every repeat — copying the same
+      // selection, or reopening/reselecting the find bar, is harmless).
       term.attachCustomKeyEventHandler((e) => {
         const action = matchTerminalAction(e, get(terminalShortcuts));
-        const handled = action === 'copy' || (action === 'paste' && opts.mode === 'terminal');
+        const handled =
+          action === 'copy' ||
+          action === 'find' ||
+          (action === 'paste' && opts.mode === 'terminal');
         if (!handled) return true;
         e.preventDefault();
         if (e.type === 'keydown' && term) {
           if (action === 'copy') copySelection(term);
+          else if (action === 'find') openSearch();
           else if (!e.repeat) void pasteClipboard(term);
         }
         return false;
@@ -256,7 +281,12 @@
     </div>
     <Button variant="ghost" title="Clear the output" onclick={clear}>Clear</Button>
   </div>
-  <div class="min-h-0 flex-1 px-2 pb-4 pt-2">
+  <div class="relative min-h-0 flex-1 px-2 pb-4 pt-2">
     <div bind:this={container} class="h-full w-full"></div>
+    {#if searchOpen && searchAddon}
+      <div class="absolute right-3 top-2 z-20">
+        <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
+      </div>
+    {/if}
   </div>
 </div>
