@@ -17,9 +17,10 @@
   import { lastError } from '$lib/stores/notifications';
   import { dialogs } from '$lib/stores/dialogs';
   import { serialOpen, serialWrite, serialClose } from '$lib/ipc/commands';
-  import { attachMouseClipboard } from './terminalClipboard';
-  import { chunkBytes, isCopyShortcut } from './terminalInput';
-  import { isMac } from '$lib/platform';
+  import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
+  import { chunkBytes } from './terminalInput';
+  import { matchTerminalAction } from './terminalShortcuts';
+  import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
   import type { SerialExitDto, TerminalBytes } from '$lib/bindings';
 
@@ -139,15 +140,16 @@
       term.open(container);
       // Receive-only monitor tabs send nothing, so right-click keeps its native menu.
       mouseClipboardOff = attachMouseClipboard(term, container, opts.mode === 'terminal');
-      // Copy takes Ctrl+Shift+C whether or not anything is selected, in both modes, so
-      // the chord never reaches the device. As in TerminalView.
+      // Copy (both modes) and paste (terminal mode) follow Settings → Keyboard shortcuts;
+      // the pane chords mean nothing in a serial tab, so those keys go to the device.
       term.attachCustomKeyEventHandler((e) => {
-        if (!isCopyShortcut(e, isMac)) return true;
+        const action = matchTerminalAction(e, get(terminalShortcuts));
+        const handled = action === 'copy' || (action === 'paste' && opts.mode === 'terminal');
+        if (!handled) return true;
         e.preventDefault();
-        if (term?.hasSelection()) {
-          navigator.clipboard.writeText(term.getSelection()).catch((err) => {
-            lastError.set(`Copy failed: ${err instanceof Error ? err.message : String(err)}`);
-          });
+        if (e.type === 'keydown' && term) {
+          if (action === 'copy') copySelection(term);
+          else void pasteClipboard(term);
         }
         return false;
       });

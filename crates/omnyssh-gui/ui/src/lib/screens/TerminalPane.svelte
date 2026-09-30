@@ -27,10 +27,11 @@
     terminalPaste
   } from '$lib/ipc/commands';
   import { shouldFadeTop } from './terminalFade';
-  import { chunkBytes, isCopyShortcut, layoutFallback, paneShortcut } from './terminalInput';
-  import { attachMouseClipboard } from './terminalClipboard';
+  import { chunkBytes, layoutFallback } from './terminalInput';
+  import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
+  import { matchTerminalAction, type TerminalAction } from './terminalShortcuts';
+  import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import type { SplitDir } from './splitLayout';
-  import { isMac } from '$lib/platform';
   import type { TerminalBytes } from '$lib/bindings';
 
   let {
@@ -90,6 +91,14 @@
         }
       }
     });
+  }
+
+  function runAction(action: TerminalAction): void {
+    if (!term) return;
+    if (action === 'copy') copySelection(term);
+    else if (action === 'paste') void pasteClipboard(term);
+    else if (action === 'closePane') onClose();
+    else onSplit(action === 'splitRight' ? 'row' : 'column');
   }
 
   let container: HTMLDivElement;
@@ -193,26 +202,12 @@
       exitOff = registerPaneExit(id, () => onClose());
 
       term.attachCustomKeyEventHandler((e) => {
-        // Pane chords never reach the shell; they act on keydown only.
-        const action = paneShortcut(e);
+        // The chords from Settings → Keyboard shortcuts never reach the shell; they act
+        // on keydown only. The copy runs inside the keydown, which WebKit requires.
+        const action = matchTerminalAction(e, get(terminalShortcuts));
         if (action) {
           e.preventDefault();
-          if (e.type === 'keydown') {
-            if (action === 'closePane') onClose();
-            else onSplit(action === 'splitRight' ? 'row' : 'column');
-          }
-          return false;
-        }
-        // Copy takes Ctrl+Shift+C whether or not anything is selected, so the chord never
-        // reaches the shell. Returning false only keeps xterm out of it; the default is
-        // ours to stop. The write happens inside the keydown, which WebKit requires.
-        if (isCopyShortcut(e, isMac)) {
-          e.preventDefault();
-          if (term?.hasSelection()) {
-            navigator.clipboard.writeText(term.getSelection()).catch((err) => {
-              lastError.set(`Copy failed: ${err instanceof Error ? err.message : String(err)}`);
-            });
-          }
+          if (e.type === 'keydown') runAction(action);
           return false;
         }
         // Under a non-Latin layout WebKitGTK names no key; the physical one stands in.

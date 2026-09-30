@@ -71,6 +71,10 @@ async function boot(page: Page): Promise<void> {
             case 'terminal_paste':
               win.__pasted = ((win.__pasted as number | undefined) ?? 0) + 1;
               return Promise.resolve(null);
+            // The keyboard-shortcut paste (default Ctrl+Shift+V) reads through this
+            // plugin, the same path as right-click paste; empty unless a test sets it.
+            case 'plugin:clipboard-manager|read_text':
+              return Promise.resolve((win.__clipboardText as string | undefined) ?? '');
             case 'terminal_resize':
             case 'terminal_close':
               return Promise.resolve(null);
@@ -266,11 +270,14 @@ test('under a non-Latin layout Ctrl+C still interrupts and Ctrl+Shift+V still pa
   await press('KeyC', false, 67);
   await expect.poll(() => writes(page)).toEqual([[3], [3]]);
 
+  // The default paste chord (Ctrl+Shift+V) now matches on the physical key too, so it
+  // pastes through the same clipboard-manager path as right-click, ahead of the
+  // WebKitGTK fallback below.
+  await page.evaluate(() => {
+    (window as unknown as { __clipboardText: string }).__clipboardText = 'hi';
+  });
   await press('KeyV', true);
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __pasted?: number }).__pasted))
-    .toBe(1);
-  expect(await writes(page)).toEqual([[3], [3]]);
+  await expect.poll(() => writes(page)).toEqual([[3], [3], [104, 105]]);
 });
 
 test.describe('on macOS', () => {

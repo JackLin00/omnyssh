@@ -1,12 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  chunkBytes,
-  INPUT_CHUNK,
-  isCopyShortcut,
-  layoutFallback,
-  paneShortcut,
-  type KeyPress
-} from './terminalInput';
+import { chunkBytes, INPUT_CHUNK, layoutFallback, type KeyPress } from './terminalInput';
 
 const seq = (n: number) => new Uint8Array(Array.from({ length: n }, (_, i) => i & 0xff));
 
@@ -21,46 +14,6 @@ const press = (over: Partial<KeyPress>): KeyPress => ({
   metaKey: false,
   isComposing: false,
   ...over
-});
-
-describe('isCopyShortcut — Ctrl+Shift+C copies on Windows and Linux', () => {
-  it('copies on Ctrl+Shift+C, whichever case the key reports', () => {
-    expect(isCopyShortcut(press({}), false)).toBe(true);
-    expect(isCopyShortcut(press({ key: 'c' }), false)).toBe(true);
-  });
-
-  it('copies on the same physical key under a non-Latin layout', () => {
-    // What the C key types on a Russian layout, with the keyCode WebKitGTK gives it.
-    expect(isCopyShortcut(press({ key: '\u0421', keyCode: 0 }), false)).toBe(true);
-  });
-
-  it('follows the letter, not the key, on a Latin layout like Dvorak', () => {
-    expect(isCopyShortcut(press({ key: 'J', code: 'KeyC' }), false)).toBe(false);
-    expect(isCopyShortcut(press({ key: 'C', code: 'KeyI' }), false)).toBe(true);
-    // A Latin letter with a diacritic on the C key is still that letter.
-    expect(isCopyShortcut(press({ key: '\u00e7', code: 'KeyC' }), false)).toBe(false);
-  });
-
-  it('leaves bare Ctrl+C to the shell as ^C', () => {
-    expect(isCopyShortcut(press({ shiftKey: false, key: 'c' }), false)).toBe(false);
-  });
-
-  it('leaves Ctrl+Shift+V, other keys and extra modifiers alone', () => {
-    expect(isCopyShortcut(press({ key: 'V', code: 'KeyV' }), false)).toBe(false);
-    expect(isCopyShortcut(press({ altKey: true }), false)).toBe(false);
-    expect(isCopyShortcut(press({ metaKey: true }), false)).toBe(false);
-  });
-
-  it('acts on keydown only, and never mid-composition', () => {
-    expect(isCopyShortcut(press({ type: 'keyup' }), false)).toBe(false);
-    expect(isCopyShortcut(press({ type: 'keypress' }), false)).toBe(false);
-    expect(isCopyShortcut(press({ isComposing: true }), false)).toBe(false);
-    expect(isCopyShortcut(press({ key: 'Process', keyCode: 229 }), false)).toBe(false);
-  });
-
-  it('does nothing on macOS, where Cmd+C already copies', () => {
-    expect(isCopyShortcut(press({}), true)).toBe(false);
-  });
 });
 
 // WebKitGTK under a Russian layout: the key is Cyrillic, the keyCode 0, the code Latin.
@@ -145,37 +98,5 @@ describe('chunkBytes — bounded terminal input', () => {
 
   it('defaults to the INPUT_CHUNK cap', () => {
     expect(chunkBytes(seq(INPUT_CHUNK + 1)).map((c) => c.length)).toEqual([INPUT_CHUNK, 1]);
-  });
-});
-
-describe('paneShortcut — Windows Terminal pane chords', () => {
-  const chord = (over: Partial<KeyPress>) =>
-    press({ ctrlKey: false, shiftKey: true, altKey: true, ...over });
-
-  it('splits right on Alt+Shift+= and down on Alt+Shift+-', () => {
-    expect(paneShortcut(chord({ key: '+', code: 'Equal' }))).toBe('splitRight');
-    expect(paneShortcut(chord({ key: '_', code: 'Minus' }))).toBe('splitDown');
-  });
-
-  it('matches the character too, for layouts that move + and - (German, French)', () => {
-    expect(paneShortcut(chord({ key: '+', code: 'BracketRight' }))).toBe('splitRight');
-    expect(paneShortcut(chord({ key: '_', code: 'Slash' }))).toBe('splitDown');
-    expect(paneShortcut(chord({ key: 'A', code: 'KeyA' }))).toBeNull();
-  });
-
-  it('closes the pane on Ctrl+Shift+W', () => {
-    expect(paneShortcut(press({ key: 'W', code: 'KeyW' }))).toBe('closePane');
-  });
-
-  it('matches on keyup too, so the whole chord stays out of the shell', () => {
-    expect(paneShortcut(chord({ type: 'keyup', key: '+', code: 'Equal' }))).toBe('splitRight');
-  });
-
-  it('leaves other chords, and composition, alone', () => {
-    expect(paneShortcut(chord({ altKey: false, key: '+', code: 'Equal' }))).toBeNull();
-    expect(paneShortcut(chord({ ctrlKey: true, key: '+', code: 'Equal' }))).toBeNull();
-    expect(paneShortcut(press({ key: 'C', code: 'KeyC' }))).toBeNull();
-    expect(paneShortcut(press({ key: 'W', code: 'KeyW', isComposing: true }))).toBeNull();
-    expect(paneShortcut(press({ key: 'W', code: 'KeyW', metaKey: true }))).toBeNull();
   });
 });

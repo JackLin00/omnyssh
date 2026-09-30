@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/plugin-store', () => ({
   })
 }));
 
-import { attachMouseClipboard } from './terminalClipboard';
+import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
 import { copyOnSelect, rightClickPaste } from '$lib/stores/terminalPrefs';
 import { lastError } from '$lib/stores/notifications';
 
@@ -148,5 +148,25 @@ describe('attachMouseClipboard', () => {
     dispose();
     document.dispatchEvent(mouse('mouseup'));
     expect(writeText).not.toHaveBeenCalled();
+  });
+});
+
+describe('keyboard copy and paste helpers', () => {
+  it('copySelection writes the selection and skips an empty one', () => {
+    copySelection(fakeTerm('abc') as never);
+    expect(writeText).toHaveBeenCalledWith('abc');
+    writeText.mockClear();
+    copySelection(fakeTerm('') as never);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it('pasteClipboard pastes through xterm and reports a failure', async () => {
+    readText.mockResolvedValue('hi');
+    const term = fakeTerm();
+    await pasteClipboard(term as never);
+    expect(term.paste).toHaveBeenCalledWith('hi');
+    readText.mockRejectedValue(new Error('denied'));
+    await pasteClipboard(term as never);
+    expect(get(lastError)).toBe('Paste failed: denied');
   });
 });

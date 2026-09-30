@@ -2,8 +2,9 @@
 // paste would serialize as one giant array on the main thread and freeze the UI, so the
 // view splits it into bounded chunks and awaits each (yielding between). This is the
 // pure split; the view owns the ordered dispatch. The Ctrl chords xterm cannot handle
-// itself — the copy shortcut, and those WebKitGTK leaves unnamed under a non-Latin
-// layout — are decided here too, before xterm turns the key into input.
+// itself — the Ctrl chords WebKitGTK leaves unnamed under a non-Latin layout — are
+// decided here too, before xterm turns the key into input; the customizable chords live
+// in terminalShortcuts.ts.
 
 /** The per-write byte cap. Small enough that one chunk's `number[]` serialization is
  *  imperceptible, so a multi-MB paste streams without a visible stall (§9). */
@@ -28,18 +29,6 @@ export type KeyPress = Pick<
  *  (ü, å, ç) or a dead key keeps its own meaning. */
 function nonLatinLetter(key: string): boolean {
   return /^\p{L}$/u.test(key) && !/\p{Script=Latin}/u.test(key);
-}
-
-/** Ctrl+Shift+C on Windows and Linux, as in GNOME Terminal and Windows Terminal: a bare
- *  Ctrl+C has to stay ^C. macOS needs none — Cmd+C copies there through the Edit menu.
- *  The webview pastes Ctrl+Shift+V natively, except where `layoutFallback` steps in. */
-export function isCopyShortcut(e: KeyPress, mac: boolean): boolean {
-  // keyCode 229 marks the keydown that starts an IME composition.
-  if (mac || e.type !== 'keydown' || e.isComposing || e.keyCode === 229) return false;
-  if (e.altKey || e.metaKey || !e.ctrlKey || !e.shiftKey) return false;
-  // The physical key stands in only where the layout puts a non-Latin letter on it, so
-  // a Cyrillic layout copies with the same keys while Dvorak's J there stays a J.
-  return e.key === 'c' || e.key === 'C' || (e.code === 'KeyC' && nonLatinLetter(e.key));
 }
 
 /** What a Ctrl chord means when WebKitGTK cannot say. Under a non-Latin layout it
@@ -75,22 +64,4 @@ export function chunkBytes(data: Uint8Array, size: number = INPUT_CHUNK): Uint8A
     chunks.push(data.subarray(i, i + size));
   }
   return chunks;
-}
-
-/** What a pane chord asks for. */
-export type PaneAction = 'splitRight' | 'splitDown' | 'closePane';
-
-/** Windows Terminal's pane chords: Alt+Shift+= splits right, Alt+Shift+- splits down,
- *  Ctrl+Shift+W closes the pane. The splits match the physical key (Shift turns `=` into
- *  `+`) or the character, so layouts that move `+`/`-` (German, French) work as in
- *  Windows Terminal. Matched on every event type, so no half of the chord reaches the
- *  shell; the caller acts on keydown only. */
-export function paneShortcut(e: KeyPress): PaneAction | null {
-  if (e.isComposing || e.metaKey) return null;
-  if (e.altKey && e.shiftKey && !e.ctrlKey) {
-    if (e.code === 'Equal' || e.key === '+' || e.key === '=') return 'splitRight';
-    if (e.code === 'Minus' || e.key === '-' || e.key === '_') return 'splitDown';
-  }
-  if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyW') return 'closePane';
-  return null;
 }
