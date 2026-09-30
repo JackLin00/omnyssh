@@ -60,12 +60,31 @@ export function parseChord(chord: Chord): ParsedChord | null {
   };
 }
 
-const MODIFIER_KEYS = new Set(['Control', 'Shift', 'Alt', 'AltGraph', 'Meta', 'CapsLock']);
+const MODIFIER_KEYS = new Set([
+  'Control',
+  'Shift',
+  'Alt',
+  'AltGraph',
+  'Meta',
+  'CapsLock',
+  // Some webviews name the Windows/Super/Cmd key 'OS' rather than 'Meta'.
+  'OS',
+  'Super',
+  'Hyper',
+  'Fn',
+  'NumLock',
+  'ScrollLock'
+]);
+// Defensive fallback for a webview that reports none of the names above but still gives
+// the physical modifier key's own code (e.g. an unnamed key on 'AltRight').
+const MODIFIER_CODE = /^(Control|Shift|Alt|Meta|OS)(Left|Right)$/;
 
 /** The chord a key event spells, or null for a lone modifier or an IME keystroke
  *  (keyCode 229 marks the keydown that starts a composition). */
 export function chordFromEvent(e: KeyPress): Chord | null {
-  if (e.isComposing || e.keyCode === 229 || MODIFIER_KEYS.has(e.key)) return null;
+  if (e.isComposing || e.keyCode === 229 || MODIFIER_KEYS.has(e.key) || MODIFIER_CODE.test(e.code)) {
+    return null;
+  }
   const letter = /^[a-z]$/i.test(e.key) ? e.key.toUpperCase() : /^Key([A-Z])$/.exec(e.code)?.[1];
   const key = letter ?? e.code;
   if (!key) return null;
@@ -124,10 +143,14 @@ export function validateChord(action: TerminalAction, chord: Chord, bindings: Bi
   const other = TERMINAL_ACTIONS.find((a) => a.action !== action && bindings[a.action] === chord);
   if (other) return { ok: false, error: `Already used by “${other.label}”` };
   const shellControl = p.ctrl && !p.alt && !p.shift && !p.meta && /^[A-Z]$/.test(p.key);
-  return {
-    ok: true,
-    warning: shellControl
-      ? `Ctrl+${p.key} is the shell's ^${p.key}; the terminal will no longer send it`
-      : null
-  };
+  // WebView2 reports AltGr (used on many non-US layouts to type @, {, [, …) as Ctrl+Alt;
+  // shellControl can never also be true here, since that one requires no Alt.
+  const altGr = p.ctrl && p.alt && !p.shift && !p.meta;
+  let warning: string | null = null;
+  if (shellControl) {
+    warning = `Ctrl+${p.key} is the shell's ^${p.key}; the terminal will no longer send it`;
+  } else if (altGr) {
+    warning = 'Ctrl+Alt is AltGr on many keyboards; this may stop a character like @ or { from being typed';
+  }
+  return { ok: true, warning };
 }

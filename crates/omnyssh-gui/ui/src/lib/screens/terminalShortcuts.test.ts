@@ -58,6 +58,17 @@ describe('chordFromEvent', () => {
     expect(chordFromEvent(press({ isComposing: true }))).toBeNull();
     expect(chordFromEvent(press({ key: 'Process', keyCode: 229 }))).toBeNull();
   });
+
+  it('ignores the Meta/OS key and other modifier-ish keys by name or physical code', () => {
+    // The Windows/Super/Cmd key: some webviews name it 'OS' rather than 'Meta'.
+    expect(chordFromEvent(press({ key: 'OS', code: 'MetaLeft', metaKey: true }))).toBeNull();
+    expect(chordFromEvent(press({ key: 'Super', code: 'MetaRight', metaKey: true }))).toBeNull();
+    expect(chordFromEvent(press({ key: 'Fn' }))).toBeNull();
+    expect(chordFromEvent(press({ key: 'NumLock' }))).toBeNull();
+    expect(chordFromEvent(press({ key: 'ScrollLock' }))).toBeNull();
+    // Defensive: an unnamed key reported only by its physical modifier code.
+    expect(chordFromEvent(press({ key: 'Unidentified', code: 'AltRight' }))).toBeNull();
+  });
 });
 
 describe('matchTerminalAction', () => {
@@ -148,5 +159,18 @@ describe('validateChord', () => {
     const result = validateChord('closePane', 'Ctrl+W', defaults);
     expect(result.ok).toBe(true);
     expect(result.ok && result.warning).toContain('^W');
+  });
+
+  it('warns that Ctrl+Alt may be AltGr on some keyboards', () => {
+    // WebView2 reports AltGr as Ctrl+Alt; German AltGr+Q types '@'.
+    const result = validateChord('closePane', 'Ctrl+Alt+Q', defaults);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.warning).toContain('AltGr');
+  });
+
+  it('does not confuse the AltGr warning with the bare-Ctrl-letter one', () => {
+    // Shift alongside Ctrl+Alt is no longer the AltGr shape, and Ctrl+Alt can never be
+    // the bare-Ctrl-letter shape (that one requires no Alt).
+    expect(validateChord('closePane', 'Ctrl+Alt+Shift+Q', defaults)).toEqual({ ok: true, warning: null });
   });
 });

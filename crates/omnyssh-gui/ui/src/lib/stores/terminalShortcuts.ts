@@ -84,15 +84,26 @@ function createTerminalShortcuts() {
     }
   }
 
+  /** Drop `action`'s override, if any, from `overrides`. */
+  function withoutOverride(overrides: Overrides, action: TerminalAction): Overrides {
+    const { [action]: _dropped, ...rest } = overrides;
+    return rest;
+  }
+
   return {
     subscribe: bindings.subscribe,
-    /** Bind `action` to `chord`, or to nothing with null. */
-    set: (action: TerminalAction, chord: Chord | null) => apply({ ...current, [action]: chord }, true),
+    /** Bind `action` to `chord`, or to nothing with null. Setting it back to its default
+     *  drops the override rather than storing a redundant one, so a default that changes
+     *  in a later release still reaches this user. */
+    set: (action: TerminalAction, chord: Chord | null) =>
+      apply(
+        chord === defaults[action]
+          ? withoutOverride(current, action)
+          : { ...current, [action]: chord },
+        true
+      ),
     /** Back to the default for `action`. */
-    reset: (action: TerminalAction) => {
-      const { [action]: _dropped, ...rest } = current;
-      apply(rest, true);
-    },
+    reset: (action: TerminalAction) => apply(withoutOverride(current, action), true),
     resetAll: () => apply({}, true),
     /** Reconcile with the canonical tauri-plugin-store value once Tauri is reachable. */
     async hydrate(): Promise<void> {

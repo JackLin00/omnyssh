@@ -203,11 +203,14 @@
 
       term.attachCustomKeyEventHandler((e) => {
         // The chords from Settings → Keyboard shortcuts never reach the shell; they act
-        // on keydown only. The copy runs inside the keydown, which WebKit requires.
+        // on keydown only. The copy runs inside the keydown, which WebKit requires. A
+        // held chord repeats keydown with no keyup between; splitting, closing or
+        // pasting again on every repeat would be surprising, so only copy also acts on a
+        // repeat (copying the same selection again is harmless).
         const action = matchTerminalAction(e, get(terminalShortcuts));
         if (action) {
           e.preventDefault();
-          if (e.type === 'keydown') runAction(action);
+          if (e.type === 'keydown' && (action === 'copy' || !e.repeat)) runAction(action);
           return false;
         }
         // Under a non-Latin layout WebKitGTK names no key; the physical one stands in.

@@ -270,14 +270,40 @@ test('under a non-Latin layout Ctrl+C still interrupts and Ctrl+Shift+V still pa
   await press('KeyC', false, 67);
   await expect.poll(() => writes(page)).toEqual([[3], [3]]);
 
-  // The default paste chord (Ctrl+Shift+V) now matches on the physical key too, so it
-  // pastes through the same clipboard-manager path as right-click, ahead of the
-  // WebKitGTK fallback below.
+  // The default paste chord (Ctrl+Shift+V) matches on the physical key too, so with
+  // paste still bound to it, this pastes through the same clipboard-manager path as
+  // right-click. Only when paste is unbound or rebound does the WebKitGTK fallback
+  // below take over (see the next test).
   await page.evaluate(() => {
     (window as unknown as { __clipboardText: string }).__clipboardText = 'hi';
   });
   await press('KeyV', true);
   await expect.poll(() => writes(page)).toEqual([[3], [3], [104, 105]]);
+});
+
+test('under a non-Latin layout, an unbound paste still falls back to the webview paste', async ({
+  page
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('omnyssh-terminal-shortcuts', JSON.stringify({ paste: null }));
+  });
+  await bootWithClipboard(page);
+
+  await page.locator('.xterm-helper-textarea').evaluate((el) => {
+    el.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'с',
+        code: 'KeyV',
+        keyCode: 0,
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true
+      })
+    );
+  });
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __pasted?: number }).__pasted))
+    .toBe(1);
 });
 
 test.describe('on macOS', () => {

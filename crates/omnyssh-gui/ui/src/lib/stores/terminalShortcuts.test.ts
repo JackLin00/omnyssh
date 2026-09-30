@@ -48,6 +48,17 @@ describe('terminal shortcuts store', () => {
     expect(get(shortcuts).copy).toBe('Ctrl+Shift+C');
   });
 
+  it('setting a chord back to its default drops the override instead of storing it', async () => {
+    const shortcuts = await fresh();
+    shortcuts.set('closePane', 'Ctrl+Shift+Q');
+    await vi.waitFor(() =>
+      expect(backend.set).toHaveBeenLastCalledWith('terminalShortcuts', { closePane: 'Ctrl+Shift+Q' })
+    );
+    shortcuts.set('closePane', 'Ctrl+Shift+W'); // the default
+    await vi.waitFor(() => expect(backend.set).toHaveBeenLastCalledWith('terminalShortcuts', {}));
+    expect(get(shortcuts).closePane).toBe('Ctrl+Shift+W');
+  });
+
   it('drops unknown actions and unreadable chords from storage', async () => {
     localStorage.setItem(
       'omnyssh-terminal-shortcuts',

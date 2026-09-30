@@ -141,7 +141,10 @@
       // Receive-only monitor tabs send nothing, so right-click keeps its native menu.
       mouseClipboardOff = attachMouseClipboard(term, container, opts.mode === 'terminal');
       // Copy (both modes) and paste (terminal mode) follow Settings → Keyboard shortcuts;
-      // the pane chords mean nothing in a serial tab, so those keys go to the device.
+      // the pane chords mean nothing in a serial tab, so those keys go to the device. A
+      // held paste chord repeats keydown with no keyup between; only the first press
+      // should paste (copy stays on every repeat — copying the same selection again is
+      // harmless).
       term.attachCustomKeyEventHandler((e) => {
         const action = matchTerminalAction(e, get(terminalShortcuts));
         const handled = action === 'copy' || (action === 'paste' && opts.mode === 'terminal');
@@ -149,7 +152,7 @@
         e.preventDefault();
         if (e.type === 'keydown' && term) {
           if (action === 'copy') copySelection(term);
-          else void pasteClipboard(term);
+          else if (!e.repeat) void pasteClipboard(term);
         }
         return false;
       });
