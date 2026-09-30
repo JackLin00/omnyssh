@@ -9,7 +9,10 @@ export type EnterKey = 'cr' | 'lf' | 'crlf';
 /** Bytes per hex row, the 16 columns most serial tools print. */
 export const HEX_ROW = 16;
 
-const hex = (b: number): string => b.toString(16).toUpperCase().padStart(2, '0');
+// Precomputed so the hot path does no per-byte string formatting.
+const HEX_BYTE = Array.from({ length: 256 }, (_, b) =>
+  b.toString(16).toUpperCase().padStart(2, '0')
+);
 
 export class SerialFormatter {
   // Not fatal: bytes that are not UTF-8 show as U+FFFD instead of throwing.
@@ -24,7 +27,7 @@ export class SerialFormatter {
     let out = '';
     for (const b of bytes) {
       this.column = (this.column + 1) % HEX_ROW;
-      out += hex(b) + (this.column === 0 ? '\r\n' : ' ');
+      out += HEX_BYTE[b] + (this.column === 0 ? '\r\n' : ' ');
     }
     return out;
   }

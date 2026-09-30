@@ -17,7 +17,8 @@
   import { lastError } from '$lib/stores/notifications';
   import { dialogs } from '$lib/stores/dialogs';
   import { serialOpen, serialWrite, serialClose } from '$lib/ipc/commands';
-  import { chunkBytes } from './terminalInput';
+  import { chunkBytes, isCopyShortcut } from './terminalInput';
+  import { isMac } from '$lib/platform';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
   import type { SerialExitDto, TerminalBytes } from '$lib/bindings';
 
@@ -35,6 +36,8 @@
     '"FiraCode Nerd Font Mono", "FiraCode Nerd Font"';
   /** Received bytes kept for a text/hex re-render. */
   const HISTORY_LIMIT = 2 * 1024 * 1024;
+  /** Characters per xterm write when replaying history, so the UI can paint between writes. */
+  const REPLAY_BATCH = 64 * 1024;
   const DISPLAYS: SerialDisplay[] = ['text', 'hex'];
   const ENCODER = new TextEncoder();
 
@@ -72,14 +75,24 @@
     if (!term || next === display) return;
     display = next;
     formatter.reset(next);
-    term.reset();
-    for (const chunk of history.all()) term.write(formatter.push(chunk));
+    // In-band RIS, not term.reset(): it is ordered after output xterm has queued but
+    // not parsed yet, so nothing from before the flip lands after it.
+    term.write('\x1bc');
+    let batch = '';
+    for (const chunk of history.all()) {
+      batch += formatter.push(chunk);
+      if (batch.length >= REPLAY_BATCH) {
+        term.write(batch);
+        batch = '';
+      }
+    }
+    if (batch) term.write(batch);
   }
 
   function clear(): void {
     history.clear();
     formatter.reset(display);
-    term?.reset();
+    term?.write('\x1bc');
   }
 
   /** Fit only while visible: a hidden container measures 0. A serial line has no
@@ -122,6 +135,18 @@
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(container);
+      // Copy takes Ctrl+Shift+C whether or not anything is selected, in both modes, so
+      // the chord never reaches the device. As in TerminalView.
+      term.attachCustomKeyEventHandler((e) => {
+        if (!isCopyShortcut(e, isMac)) return true;
+        e.preventDefault();
+        if (term?.hasSelection()) {
+          navigator.clipboard.writeText(term.getSelection()).catch((err) => {
+            lastError.set(`Copy failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
+        return false;
+      });
       themeUnsub = theme.subscribe((t) => {
         if (term) term.options.theme = xtermTheme(t);
       });
@@ -135,6 +160,7 @@
       };
       const exit = new Channel<SerialExitDto>();
       exit.onmessage = (msg) => {
+        if (destroyed) return;
         // Keep the tab and its output: the log up to the failure is what matters.
         failed = true;
         sessions.setStatus(session.id, 'failed');

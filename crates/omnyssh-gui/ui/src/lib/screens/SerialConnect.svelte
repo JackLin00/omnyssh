@@ -37,7 +37,7 @@
   }
   onMount(rescan);
 
-  const baudRate = $derived(Number.parseInt(baud, 10));
+  const baudRate = $derived(/^\d+$/.test(baud.trim()) ? Number(baud.trim()) : NaN);
   const valid = $derived(port !== '' && Number.isInteger(baudRate) && baudRate > 0);
 
   function connect(): void {
