@@ -46,6 +46,12 @@
   {:else if name === 'terminal'}
     <polyline points="4 7 9 12 4 17" />
     <line x1="12" y1="17" x2="20" y2="17" />
+  {:else if name === 'splitRight'}
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="12" y1="4" x2="12" y2="20" />
+  {:else if name === 'splitDown'}
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="3" y1="12" x2="21" y2="12" />
   {:else if name === 'serial'}
     <path d="M3 8h18l-2 8H5z" />
     <line x1="8" y1="11" x2="8.01" y2="11" />
