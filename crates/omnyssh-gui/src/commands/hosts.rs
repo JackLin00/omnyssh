@@ -149,6 +149,28 @@ fn upsert(hosts: &mut Vec<Host>, input: HostInputDto, imported: Option<Host>) {
     }
 }
 
+/// The host a duplicate saves: `input` as typed, with the login details the form never
+/// sees (password, identity file, jump host, `IdentitiesOnly`, §3.4) taken from `source`
+/// wherever the input left them blank. Key-setup records describe the source's server,
+/// and the SSH-config origin names the source's import, so neither is copied.
+fn duplicate(source: &Host, input: HostInputDto) -> Host {
+    let mut host = Host::from(input);
+    host.password = host.password.or_else(|| source.password.clone());
+    host.identity_file = host.identity_file.or_else(|| source.identity_file.clone());
+    host.proxy_jump = host.proxy_jump.or_else(|| source.proxy_jump.clone());
+    host.identities_only = source.identities_only;
+    host
+}
+
+/// A duplicate must not take the name of any host, manual or imported: saving it would
+/// replace that host (or hide the import) instead of adding one.
+fn check_duplicate_name(hosts: &[Host], name: &str) -> Result<(), String> {
+    if hosts.iter().any(|h| h.name == name) {
+        return Err(format!("a host named '{name}' already exists"));
+    }
+    Ok(())
+}
+
 /// Drop the host named `name` from the manual list. A missing name is a no-op — the
 /// desired end state (absent) already holds (tech-gui.md §4.2).
 fn remove(hosts: &mut Vec<Host>, name: &str) {
@@ -419,5 +441,61 @@ mod tests {
         on.forward_agent = true;
         upsert(&mut hosts, on, None);
         assert!(hosts[0].forward_agent);
+    }
+
+    fn source_host() -> Host {
+        Host {
+            name: "web-1".to_string(),
+            hostname: "10.0.0.1".to_string(),
+            password: Some("s3cret".to_string()),
+            identity_file: Some("~/.ssh/id_web".to_string()),
+            proxy_jump: Some("bastion".to_string()),
+            identities_only: true,
+            key_setup_date: Some("2026-09-01".to_string()),
+            password_auth_disabled: Some(true),
+            ..Host::default()
+        }
+    }
+
+    #[test]
+    fn a_duplicate_keeps_the_sources_hidden_login_details() {
+        let mut typed = input("web-2");
+        typed.hostname = "10.0.0.2".to_string();
+        let host = duplicate(&source_host(), typed);
+        assert_eq!(host.name, "web-2");
+        assert_eq!(host.hostname, "10.0.0.2");
+        assert_eq!(host.password.as_deref(), Some("s3cret"));
+        assert_eq!(host.identity_file.as_deref(), Some("~/.ssh/id_web"));
+        assert_eq!(host.proxy_jump.as_deref(), Some("bastion"));
+        assert!(host.identities_only);
+        assert_eq!(host.source, HostSource::Manual);
+    }
+
+    #[test]
+    fn typed_login_details_win_over_the_sources() {
+        let mut typed = input("web-2");
+        typed.password = Some("other".to_string());
+        typed.identity_file = Some("~/.ssh/id_other".to_string());
+        typed.proxy_jump = Some("jump2".to_string());
+        let host = duplicate(&source_host(), typed);
+        assert_eq!(host.password.as_deref(), Some("other"));
+        assert_eq!(host.identity_file.as_deref(), Some("~/.ssh/id_other"));
+        assert_eq!(host.proxy_jump.as_deref(), Some("jump2"));
+    }
+
+    #[test]
+    fn a_duplicate_does_not_inherit_the_sources_key_setup_record() {
+        let host = duplicate(&source_host(), input("web-2"));
+        assert_eq!(host.key_setup_date, None);
+        assert_eq!(host.password_auth_disabled, None);
+        assert_eq!(host.original_ssh_host, None);
+    }
+
+    #[test]
+    fn a_duplicate_name_must_be_free() {
+        let hosts = vec![source_host()];
+        assert!(check_duplicate_name(&hosts, "web-2").is_ok());
+        let err = check_duplicate_name(&hosts, "web-1").unwrap_err();
+        assert_eq!(err, "a host named 'web-1' already exists");
     }
 }
