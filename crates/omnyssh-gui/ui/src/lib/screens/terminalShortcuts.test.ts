@@ -79,6 +79,7 @@ describe('matchTerminalAction', () => {
     const alt = { ctrlKey: false, altKey: true };
     expect(matchTerminalAction(press({ ...alt, key: '+', code: 'Equal' }), defaults)).toBe('splitRight');
     expect(matchTerminalAction(press({ ...alt, key: '_', code: 'Minus' }), defaults)).toBe('splitDown');
+    expect(matchTerminalAction(press({ key: 'F', code: 'KeyF' }), defaults)).toBe('find');
   });
 
   it('matches every event type, so no half of a chord reaches the shell', () => {
@@ -106,6 +107,11 @@ describe('defaultBindings', () => {
     expect(mac.copy).toBeNull();
     expect(mac.paste).toBeNull();
     expect(mac.closePane).toBe('Ctrl+Shift+W');
+  });
+
+  it('finds with Ctrl+Shift+F, and Cmd+F on macOS', () => {
+    expect(defaultBindings(false).find).toBe('Ctrl+Shift+F');
+    expect(defaultBindings(true).find).toBe('Meta+F');
   });
 });
 

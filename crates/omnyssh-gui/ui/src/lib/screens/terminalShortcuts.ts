@@ -6,7 +6,7 @@
 // key. Matching turns the event into the same string and compares.
 import type { KeyPress } from './terminalInput';
 
-export type TerminalAction = 'copy' | 'paste' | 'splitRight' | 'splitDown' | 'closePane';
+export type TerminalAction = 'copy' | 'paste' | 'splitRight' | 'splitDown' | 'closePane' | 'find';
 export type Chord = string;
 /** The chord bound to each action; null leaves the keys to the shell. */
 export type Bindings = Record<TerminalAction, Chord | null>;
@@ -17,18 +17,21 @@ export const TERMINAL_ACTIONS: readonly { action: TerminalAction; label: string 
   { action: 'paste', label: 'Paste' },
   { action: 'splitRight', label: 'Split right' },
   { action: 'splitDown', label: 'Split down' },
-  { action: 'closePane', label: 'Close pane' }
+  { action: 'closePane', label: 'Close pane' },
+  { action: 'find', label: 'Find' }
 ];
 
 /** Windows Terminal's chords. macOS copies and pastes with Cmd+C / Cmd+V through the
- *  Edit menu, so those two start unbound there. */
+ *  Edit menu, so those two start unbound there. Find is Cmd+F on macOS, as in its own
+ *  apps. */
 export function defaultBindings(mac: boolean): Bindings {
   return {
     copy: mac ? null : 'Ctrl+Shift+C',
     paste: mac ? null : 'Ctrl+Shift+V',
     splitRight: 'Alt+Shift+Equal',
     splitDown: 'Alt+Shift+Minus',
-    closePane: 'Ctrl+Shift+W'
+    closePane: 'Ctrl+Shift+W',
+    find: mac ? 'Meta+F' : 'Ctrl+Shift+F'
   };
 }
 
