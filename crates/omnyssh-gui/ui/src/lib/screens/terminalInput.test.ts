@@ -4,6 +4,7 @@ import {
   INPUT_CHUNK,
   isCopyShortcut,
   layoutFallback,
+  paneShortcut,
   type KeyPress
 } from './terminalInput';
 
@@ -144,5 +145,31 @@ describe('chunkBytes — bounded terminal input', () => {
 
   it('defaults to the INPUT_CHUNK cap', () => {
     expect(chunkBytes(seq(INPUT_CHUNK + 1)).map((c) => c.length)).toEqual([INPUT_CHUNK, 1]);
+  });
+});
+
+describe('paneShortcut — Windows Terminal pane chords', () => {
+  const chord = (over: Partial<KeyPress>) =>
+    press({ ctrlKey: false, shiftKey: true, altKey: true, ...over });
+
+  it('splits right on Alt+Shift+= and down on Alt+Shift+-', () => {
+    expect(paneShortcut(chord({ key: '+', code: 'Equal' }))).toBe('splitRight');
+    expect(paneShortcut(chord({ key: '_', code: 'Minus' }))).toBe('splitDown');
+  });
+
+  it('closes the pane on Ctrl+Shift+W', () => {
+    expect(paneShortcut(press({ key: 'W', code: 'KeyW' }))).toBe('closePane');
+  });
+
+  it('matches on keyup too, so the whole chord stays out of the shell', () => {
+    expect(paneShortcut(chord({ type: 'keyup', key: '+', code: 'Equal' }))).toBe('splitRight');
+  });
+
+  it('leaves other chords, and composition, alone', () => {
+    expect(paneShortcut(chord({ altKey: false, key: '+', code: 'Equal' }))).toBeNull();
+    expect(paneShortcut(chord({ ctrlKey: true, key: '+', code: 'Equal' }))).toBeNull();
+    expect(paneShortcut(press({ key: 'C', code: 'KeyC' }))).toBeNull();
+    expect(paneShortcut(press({ key: 'W', code: 'KeyW', isComposing: true }))).toBeNull();
+    expect(paneShortcut(press({ key: 'W', code: 'KeyW', metaKey: true }))).toBeNull();
   });
 });
