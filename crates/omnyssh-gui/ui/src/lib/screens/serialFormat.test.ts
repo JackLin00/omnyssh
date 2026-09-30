@@ -32,6 +32,13 @@ describe('SerialFormatter', () => {
     f.reset('text');
     expect(f.push(bytes(0x41))).toBe('A');
   });
+
+  it('handles invalid UTF-8 gracefully with replacement character', () => {
+    const f = new SerialFormatter('text');
+    const result = f.push(bytes(0xff));
+    expect(result).toContain('�');
+    expect(result).not.toThrow;
+  });
 });
 
 describe('ByteHistory', () => {
@@ -50,6 +57,26 @@ describe('ByteHistory', () => {
     h.push(bytes(1));
     h.clear();
     expect(h.all()).toEqual([]);
+  });
+
+  it('handles many small chunks efficiently and preserves last 100 bytes in order', () => {
+    const h = new ByteHistory(100);
+    // Push 10,000 one-byte chunks
+    for (let i = 0; i < 10_000; i++) {
+      h.push(bytes((i % 256)));
+    }
+    const all = h.all();
+    const combined = new Uint8Array(all.reduce((sum, arr) => sum + arr.length, 0));
+    let offset = 0;
+    for (const chunk of all) {
+      combined.set(chunk, offset);
+      offset += chunk.length;
+    }
+    expect(combined.length).toBe(100);
+    // Verify it contains the last 100 bytes in order (9900-9999 mod 256)
+    for (let i = 0; i < 100; i++) {
+      expect(combined[i]).toBe((9900 + i) % 256);
+    }
   });
 });
 

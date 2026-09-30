@@ -38,9 +38,10 @@ export class SerialFormatter {
 }
 
 /** The received bytes kept for a re-render, at most `limit` of them. Whole chunks
- *  are dropped from the front, but the newest one is always kept. */
+ *  are dropped from the front, but the newest one is always kept. Eviction is amortized O(1). */
 export class ByteHistory {
   private chunks: Uint8Array[] = [];
+  private head = 0;
   private size = 0;
 
   constructor(private readonly limit: number) {}
@@ -48,17 +49,23 @@ export class ByteHistory {
   push(chunk: Uint8Array): void {
     this.chunks.push(chunk);
     this.size += chunk.length;
-    while (this.size > this.limit && this.chunks.length > 1) {
-      this.size -= this.chunks.shift()!.length;
+    while (this.size > this.limit && this.chunks.length - this.head > 1) {
+      this.size -= this.chunks[this.head].length;
+      this.head += 1;
+    }
+    if (this.head * 2 >= this.chunks.length) {
+      this.chunks = this.chunks.slice(this.head);
+      this.head = 0;
     }
   }
 
   all(): Uint8Array[] {
-    return this.chunks;
+    return this.chunks.slice(this.head);
   }
 
   clear(): void {
     this.chunks = [];
+    this.head = 0;
     this.size = 0;
   }
 }
