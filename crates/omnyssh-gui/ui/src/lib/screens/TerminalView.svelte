@@ -11,11 +11,16 @@
   import {
     arrange,
     clampRatio,
+    dropPreview,
+    dropSide,
+    movePane,
     neighbor,
+    paneAt,
     remove,
     setRatio,
     split,
     type DividerRect,
+    type DropSide,
     type Layout,
     type PaneId,
     type SplitDir
@@ -89,6 +94,69 @@
     handle.addEventListener('lostpointercapture', end);
   }
 
+  /** How far the pointer must travel before a press on a title bar becomes a move. */
+  const MOVE_THRESHOLD_PX = 5;
+
+  let moving = $state<{ id: PaneId; target: PaneId | null; side: DropSide | null } | null>(null);
+  const preview = $derived.by(() => {
+    if (!moving || moving.target === null || moving.side === null) return null;
+    const target = arranged.panes.find((p) => p.id === moving!.target);
+    return target ? dropPreview(target.rect, moving.side) : null;
+  });
+
+  // Moving a pane by its title bar: past a few pixels the press becomes a drag, the pane
+  // under the pointer shows where it would land, and a release there moves it. Esc, a
+  // release elsewhere, or a lost capture leaves the layout as it was.
+  function startMove(e: PointerEvent, id: PaneId): void {
+    const handle = e.currentTarget as HTMLElement;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    handle.setPointerCapture(e.pointerId);
+
+    function move(ev: PointerEvent): void {
+      if (!moving) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < MOVE_THRESHOLD_PX) return;
+        moving = { id, target: null, side: null };
+      }
+      const box = area.getBoundingClientRect();
+      if (box.width === 0 || box.height === 0) return;
+      const x = (ev.clientX - box.left) / box.width;
+      const y = (ev.clientY - box.top) / box.height;
+      const hit = paneAt(x, y, arranged.panes);
+      moving =
+        hit && hit.id !== id
+          ? { id, target: hit.id, side: dropSide(x, y, hit.rect) }
+          : { id, target: null, side: null };
+    }
+    function drop(): void {
+      const m = moving;
+      end();
+      if (m && m.target !== null && m.side !== null) {
+        layout = movePane(layout, m.id, m.target, m.side);
+        focused = m.id;
+      }
+    }
+    function key(ev: KeyboardEvent): void {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      end();
+    }
+    function end(): void {
+      moving = null;
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', drop);
+      handle.removeEventListener('pointercancel', end);
+      handle.removeEventListener('lostpointercapture', end);
+      window.removeEventListener('keydown', key, true);
+    }
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', drop);
+    handle.addEventListener('pointercancel', end);
+    handle.addEventListener('lostpointercapture', end);
+    window.addEventListener('keydown', key, true);
+  }
+
   const pct = (n: number): string => `${n * 100}%`;
 </script>
 
@@ -103,7 +171,8 @@
     <div bind:this={area} class="relative h-full w-full">
       {#each arranged.panes as p (p.id)}
         <div
-          class="absolute"
+          class="absolute {moving?.id === p.id ? 'opacity-50' : ''}"
+          data-pane={p.id}
           style="left: {pct(p.rect.x)}; top: {pct(p.rect.y)}; width: {pct(p.rect.w)}; height: {pct(p.rect.h)};"
         >
           <TerminalPane
@@ -111,10 +180,13 @@
             {active}
             focused={focused === p.id}
             framed={arranged.panes.length > 1}
+            titled={arranged.panes.length > 1}
+            status={statuses[p.id] ?? 'connecting'}
             onStatus={(s) => (statuses[p.id] = s)}
             onFocus={() => (focused = p.id)}
             onSplit={(dir) => splitPane(p.id, dir)}
             onClose={() => closePane(p.id)}
+            onMoveStart={(e) => startMove(e, p.id)}
           />
         </div>
       {/each}
@@ -134,6 +206,12 @@
           <div class={d.dir === 'row' ? 'h-full border-l border-default' : 'w-full border-t border-default'}></div>
         </div>
       {/each}
+      {#if preview}
+        <div
+          class="pointer-events-none absolute z-30 rounded border-2 border-focus bg-surface-inset opacity-60"
+          style="left: {pct(preview.x)}; top: {pct(preview.y)}; width: {pct(preview.w)}; height: {pct(preview.h)};"
+        ></div>
+      {/if}
     </div>
   </div>
 </div>

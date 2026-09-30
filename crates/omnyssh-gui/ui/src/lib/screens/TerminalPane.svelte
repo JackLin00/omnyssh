@@ -12,10 +12,10 @@
   import type { FitAddon } from '@xterm/addon-fit';
   import type { SearchAddon } from '@xterm/addon-search';
   import { Channel } from '@tauri-apps/api/core';
-  import { Icon } from '$lib/theme';
+  import { Icon, StatusDot } from '$lib/theme';
   import { theme } from '$lib/stores/theme';
   import { xtermTheme } from '$lib/theme/terminalTheme';
-  import type { SessionStatus } from '$lib/stores/sessions';
+  import { sessionStatusDot, type SessionStatus } from '$lib/stores/sessions';
   import { registerPaneExit } from '$lib/stores/paneExits';
   import { terminalDidExit } from '$lib/ipc/router';
   import { lastError } from '$lib/stores/notifications';
@@ -42,10 +42,13 @@
     active,
     focused,
     framed,
+    titled,
+    status,
     onStatus,
     onFocus,
     onSplit,
-    onClose
+    onClose,
+    onMoveStart
   }: {
     hostName: string;
     /** Its tab is the visible one. */
@@ -54,11 +57,17 @@
     focused: boolean;
     /** Draw the focus frame: only once the tab has more than one pane. */
     framed: boolean;
+    /** Show the title bar: once the tab has more than one pane. */
+    titled: boolean;
+    /** This pane's connection state, for the title bar's dot. */
+    status: SessionStatus;
     onStatus: (status: SessionStatus) => void;
     onFocus: () => void;
     onSplit: (dir: SplitDir) => void;
     /** The user closed the pane, or its session ended. */
     onClose: () => void;
+    /** A press on the title bar's free area: the tab may start moving this pane. */
+    onMoveStart: (e: PointerEvent) => void;
   } = $props();
 
   // The Nerd Font families come after the generic `monospace`, not merely after the
@@ -116,9 +125,12 @@
   }
 
   let container: HTMLDivElement;
-  let toolbar: HTMLDivElement;
+  let toolbar = $state<HTMLDivElement>();
+  let titleBar = $state<HTMLDivElement>();
   // Read inside the focus $effect below, so Svelte needs it reactive to track that read.
   let searchBox = $state<HTMLDivElement>();
+  /** The shell's own title (user@host: dir), when it has set one. */
+  let title = $state('');
   let term: Terminal | undefined;
   let fitAddon: FitAddon | undefined;
   let searchAddon = $state<SearchAddon>();
@@ -189,6 +201,8 @@
       term.open(container);
       mouseClipboardOff = attachMouseClipboard(term, container, true);
       term.onScroll(syncScrolled);
+      // The shell's own title (user@host: dir) names the pane when it sets one.
+      term.onTitleChange((t) => (title = t));
 
       // The #1 theme-regression guard (§5.1): push the matching xterm theme to this
       // terminal — including already-open ones — whenever the store flips. Its
@@ -298,23 +312,36 @@
       const take = focused && $dialogs.length === 0;
       requestAnimationFrame(() => {
         safeFit();
-        if (take && !searchBox?.contains(document.activeElement)) term?.focus();
+        const focusedEl = document.activeElement;
+        if (take && !searchBox?.contains(focusedEl) && !titleBar?.contains(focusedEl)) {
+          term?.focus();
+        }
         syncScrolled();
       });
     }
   });
 
-  // Focus landing on a toolbar button (Tab) or the find bar leaves the pane's focus
-  // alone: making the pane focused would hand the keyboard to xterm next frame and pull
-  // it off the button or input. A click still focuses the pane through pointerdown.
+  // Focus landing on a toolbar or title bar button (Tab) or the find bar leaves the
+  // pane's focus alone: making the pane focused would hand the keyboard to xterm next
+  // frame and pull it off the button or input. A click still focuses the pane through
+  // pointerdown.
   function focusIn(e: FocusEvent): void {
-    if (toolbar?.contains(e.target as Node) || searchBox?.contains(e.target as Node)) return;
+    if (
+      toolbar?.contains(e.target as Node) ||
+      titleBar?.contains(e.target as Node) ||
+      searchBox?.contains(e.target as Node)
+    ) {
+      return;
+    }
     onFocus();
   }
 
   const toolBtn =
     'grid h-6 w-6 place-items-center rounded bg-surface-inset text-muted transition ' +
     'hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+  const titleBtn =
+    'grid h-5 w-5 place-items-center rounded text-muted transition hover:bg-surface hover:text-fg ' +
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
 </script>
 
 <!-- Clicking anywhere in the pane, or xterm's textarea taking focus, makes it the
@@ -326,26 +353,60 @@
   onfocusin={focusIn}
 >
   <div
-    class="h-full w-full rounded {framed && focused ? 'ring-1 ring-focus' : ''}"
+    class="flex h-full w-full flex-col overflow-hidden rounded {framed && focused
+      ? 'ring-1 ring-focus'
+      : ''}"
   >
-    <div bind:this={container} class="h-full w-full" class:term-fade={scrolled}></div>
+    {#if titled}
+      <!-- Drag the free area to move the pane; the buttons act as buttons. -->
+      <div
+        bind:this={titleBar}
+        class="flex h-6 shrink-0 cursor-grab items-center gap-1.5 border-b border-default bg-surface-inset px-1.5 text-xs active:cursor-grabbing"
+        role="toolbar"
+        aria-label="Pane: {title || hostName}. Drag to move."
+        tabindex="-1"
+        onpointerdown={(e) => {
+          if (e.button === 0 && !(e.target as Element).closest('button')) onMoveStart(e);
+        }}
+      >
+        <StatusDot status={sessionStatusDot[status]} size={7} />
+        <span class="min-w-0 flex-1 truncate text-muted" title={title || hostName}>
+          {title || hostName}
+        </span>
+        <button type="button" class={titleBtn} title="Split right" aria-label="Split right" onclick={() => onSplit('row')}>
+          <Icon name="splitRight" size={13} />
+        </button>
+        <button type="button" class={titleBtn} title="Split down" aria-label="Split down" onclick={() => onSplit('column')}>
+          <Icon name="splitDown" size={13} />
+        </button>
+        <button type="button" class={titleBtn} title="Close pane" aria-label="Close pane" onclick={onClose}>
+          <Icon name="close" size={13} />
+        </button>
+      </div>
+    {/if}
+    <div bind:this={container} class="min-h-0 w-full flex-1" class:term-fade={scrolled}></div>
   </div>
-  <div
-    bind:this={toolbar}
-    class="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100"
-  >
-    <button type="button" class={toolBtn} title="Split right (Alt+Shift+=)" aria-label="Split right" onclick={() => onSplit('row')}>
-      <Icon name="splitRight" size={14} />
-    </button>
-    <button type="button" class={toolBtn} title="Split down (Alt+Shift+-)" aria-label="Split down" onclick={() => onSplit('column')}>
-      <Icon name="splitDown" size={14} />
-    </button>
-    <button type="button" class={toolBtn} title="Close pane (Ctrl+Shift+W)" aria-label="Close pane" onclick={onClose}>
-      <Icon name="close" size={14} />
-    </button>
-  </div>
+  {#if !titled}
+    <div
+      bind:this={toolbar}
+      class="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100"
+    >
+      <button type="button" class={toolBtn} title="Split right (Alt+Shift+=)" aria-label="Split right" onclick={() => onSplit('row')}>
+        <Icon name="splitRight" size={14} />
+      </button>
+      <button type="button" class={toolBtn} title="Split down (Alt+Shift+-)" aria-label="Split down" onclick={() => onSplit('column')}>
+        <Icon name="splitDown" size={14} />
+      </button>
+      <button type="button" class={toolBtn} title="Close pane (Ctrl+Shift+W)" aria-label="Close pane" onclick={onClose}>
+        <Icon name="close" size={14} />
+      </button>
+    </div>
+  {/if}
   {#if searchOpen && searchAddon}
-    <div bind:this={searchBox} class="absolute right-1.5 top-9 z-20 max-w-[calc(100%-0.75rem)]">
+    <div
+      bind:this={searchBox}
+      class="absolute right-1.5 {titled ? 'top-8' : 'top-9'} z-20 max-w-[calc(100%-0.75rem)]"
+    >
       <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
     </div>
   {/if}

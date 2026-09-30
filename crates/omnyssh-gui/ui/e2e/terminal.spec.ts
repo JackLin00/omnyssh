@@ -242,6 +242,63 @@ test("clicking another pane doesn't steal focus back from an open find bar", asy
   expect(await writes(page)).toEqual([]);
 });
 
+test('dragging a pane by its title bar moves it, keeping its session', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+  // Split right (Alt+Shift+=): pane 1 (left, the original session) and pane 2 (right).
+  await page.keyboard.press('Alt+Shift+=');
+  await expect(page.locator('[data-pane]')).toHaveCount(2);
+
+  // The original session's xterm element, to prove the move doesn't remount it.
+  const firstXterm = await page.locator('[data-pane="1"] .xterm').elementHandle();
+
+  const titleBar1 = (await page.locator('[data-pane="1"] [role="toolbar"]').boundingBox())!;
+  const box2 = (await page.locator('[data-pane="2"]').boundingBox())!;
+
+  // Press on the title bar's free area (left of its buttons), drag onto pane 2's top
+  // edge, and release: pane 1 should land above pane 2.
+  await page.mouse.move(titleBar1.x + 20, titleBar1.y + titleBar1.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box2.x + box2.width / 2, box2.y + box2.height / 2, { steps: 5 });
+  await page.mouse.move(box2.x + box2.width / 2, box2.y + 10, { steps: 5 });
+  await page.mouse.up();
+
+  const box1After = (await page.locator('[data-pane="1"]').boundingBox())!;
+  const box2After = (await page.locator('[data-pane="2"]').boundingBox())!;
+  expect(Math.abs(box1After.x - box2After.x)).toBeLessThan(5);
+  expect(box1After.y).toBeLessThan(box2After.y);
+
+  // The moved pane's xterm element is the very same one — no remount, no dropped session.
+  await expect(page.locator('[data-pane="1"] .xterm')).toHaveCount(1);
+  expect(await firstXterm!.evaluate((el) => el.isConnected)).toBe(true);
+});
+
+test('Escape cancels a pane drag and leaves the layout as it was', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+  await page.keyboard.press('Alt+Shift+=');
+  await expect(page.locator('[data-pane]')).toHaveCount(2);
+
+  const titleBar1 = (await page.locator('[data-pane="1"] [role="toolbar"]').boundingBox())!;
+  const box2Before = (await page.locator('[data-pane="2"]').boundingBox())!;
+
+  await page.mouse.move(titleBar1.x + 20, titleBar1.y + titleBar1.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box2Before.x + box2Before.width / 2, box2Before.y + 10, { steps: 5 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+
+  const box1After = (await page.locator('[data-pane="1"]').boundingBox())!;
+  const box2After = (await page.locator('[data-pane="2"]').boundingBox())!;
+  // Still side by side: same y, pane 1 left of pane 2.
+  expect(Math.abs(box1After.y - box2After.y)).toBeLessThan(5);
+  expect(box1After.x).toBeLessThan(box2After.x);
+});
+
 // Windows and Linux copy with Ctrl+Shift+C. The Desktop Chrome device reports a Windows
 // user agent, so this is the path those platforms take; the clipboard is stubbed at the
 // boundary like the IPC, which also keeps parallel runs apart.
