@@ -17,6 +17,7 @@
   import { lastError } from '$lib/stores/notifications';
   import { dialogs } from '$lib/stores/dialogs';
   import { serialOpen, serialWrite, serialClose } from '$lib/ipc/commands';
+  import { attachMouseClipboard } from './terminalClipboard';
   import { chunkBytes, isCopyShortcut } from './terminalInput';
   import { isMac } from '$lib/platform';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
@@ -52,6 +53,7 @@
   const formatter = new SerialFormatter('text');
   const history = new ByteHistory(HISTORY_LIMIT);
   let themeUnsub: (() => void) | undefined;
+  let mouseClipboardOff: (() => void) | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let fitScheduled = false;
 
@@ -135,6 +137,8 @@
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(container);
+      // Receive-only monitor tabs send nothing, so right-click keeps its native menu.
+      mouseClipboardOff = attachMouseClipboard(term, container, opts.mode === 'terminal');
       // Copy takes Ctrl+Shift+C whether or not anything is selected, in both modes, so
       // the chord never reaches the device. As in TerminalView.
       term.attachCustomKeyEventHandler((e) => {
@@ -203,6 +207,7 @@
   onDestroy(() => {
     destroyed = true;
     themeUnsub?.();
+    mouseClipboardOff?.();
     resizeObserver?.disconnect();
     if (serialId != null) void serialClose(serialId).catch(() => {});
     term?.dispose();

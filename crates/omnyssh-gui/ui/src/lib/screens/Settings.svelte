@@ -8,6 +8,7 @@
   import { Surface, Icon } from '$lib/theme';
   import { theme } from '$lib/stores/theme';
   import { streamerMode } from '$lib/stores/streamer';
+  import { copyOnSelect, rightClickPaste } from '$lib/stores/terminalPrefs';
   import { refreshInterval, REFRESH_OPTIONS } from '$lib/stores/settings';
   import { traySupport, trayBehavior } from '$lib/stores/tray';
   import { isMac } from '$lib/platform';
@@ -135,6 +136,27 @@
               : 'left-0.5'}"
           ></span>
         </button>
+      </div>
+    </Surface>
+
+    <!-- Terminal -->
+    <Surface class="p-5">
+      <h2 class="mb-3 text-sm font-semibold">Terminal</h2>
+      <div class="space-y-4">
+        {@render traySwitch(
+          'Copy on select',
+          'Copy the selected text as soon as the mouse button is released.',
+          $copyOnSelect,
+          true,
+          () => copyOnSelect.toggle()
+        )}
+        {@render traySwitch(
+          'Right-click pastes',
+          'Right-click in a terminal pastes the clipboard instead of opening the menu.',
+          $rightClickPaste,
+          true,
+          () => rightClickPaste.toggle()
+        )}
       </div>
     </Surface>
 

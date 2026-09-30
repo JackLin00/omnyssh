@@ -6,6 +6,7 @@
   import { theme } from '$lib/stores/theme';
   import { sidebarCollapsed } from '$lib/stores/ui';
   import { streamerMode } from '$lib/stores/streamer';
+  import { copyOnSelect, rightClickPaste } from '$lib/stores/terminalPrefs';
   import { refreshInterval, driveMetricsRefresh } from '$lib/stores/settings';
   import { trayBehavior, driveTray } from '$lib/stores/tray';
   import { lastError } from '$lib/stores/notifications';
@@ -22,6 +23,8 @@
     void streamerMode.hydrate();
     void refreshInterval.hydrate();
     void trayBehavior.hydrate();
+    void copyOnSelect.hydrate();
+    void rightClickPaste.hydrate();
     // Force a metric refresh on the user's interval; re-arms when the interval changes.
     const stopRefresh = driveMetricsRefresh(() => {
       void refreshMetrics().catch(() => {});

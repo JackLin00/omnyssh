@@ -24,6 +24,7 @@
     terminalClose,
     terminalPaste
   } from '$lib/ipc/commands';
+  import { attachMouseClipboard } from './terminalClipboard';
   import { shouldFadeTop } from './terminalFade';
   import { chunkBytes, isCopyShortcut, layoutFallback } from './terminalInput';
   import { isMac } from '$lib/platform';
@@ -74,6 +75,7 @@
   let connected = false;
   let ready = $state(false);
   let themeUnsub: (() => void) | undefined;
+  let mouseClipboardOff: (() => void) | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let fitScheduled = false;
   // The top-edge fade dissolves scrolled output into the top edge, but never the live
@@ -124,6 +126,7 @@
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(container);
+      mouseClipboardOff = attachMouseClipboard(term, container, true);
       term.onScroll(syncScrolled);
 
       // The #1 theme-regression guard (§5.1): push the matching xterm theme to this
@@ -210,6 +213,7 @@
   onDestroy(() => {
     destroyed = true;
     themeUnsub?.();
+    mouseClipboardOff?.();
     resizeObserver?.disconnect();
     // Idempotent: a remote-exit teardown already dropped this id backend-side (§3.4).
     if (termId != null) void terminalClose(termId).catch(() => {});

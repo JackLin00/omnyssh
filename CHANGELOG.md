@@ -11,6 +11,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ### Features
 - **Serial ports in the desktop app (Windows).** A Serial entry in the sidebar opens a COM port as a tab, with its baud rate, data bits, parity, stop bits and flow control; the defaults are 115200 8N1. Monitor mode only shows what the device prints, for boards that have no shell on their UART; Terminal mode sends keystrokes too, with Enter sent as CR, LF or CR LF as the device expects. Either mode switches its output between text and a hex dump at any time, and the switch redraws the output already received, as far back as the tab's scrollback reaches. A port held by another program is refused when you open it, and an adapter pulled out marks the tab failed but keeps its output. Nothing is saved between launches, and macOS and Linux have no Serial entry yet.
+- **Copy on select and paste on right-click in the desktop terminals.** Selecting text in a terminal or serial tab copies it as soon as the mouse button is released, and a right-click pastes the clipboard, as in PuTTY and MobaXterm. Both are on by default and can be switched off under Settings, Terminal; with right-click pasting off, right-click opens the menu again. A serial tab in Monitor mode only copies, since it sends nothing. Ctrl+Shift+C and Ctrl+Shift+V work as before.
 
 ---
 
