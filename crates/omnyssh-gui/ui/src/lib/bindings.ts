@@ -61,6 +61,20 @@ async deleteHost(name: string) : Promise<Result<null, CommandError>> {
 }
 },
 /**
+ * Save a copy of the host named `from` as the new manual host `input` (the dashboard's
+ * Duplicate). The form only sees what `HostDto` carries, so the password, identity file
+ * and jump host it leaves blank come from the source here, backend-side (§3.4). Refuses
+ * an unknown source and a name any host already has. The frontend reloads afterwards.
+ */
+async duplicateHost(from: string, input: HostInputDto) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("duplicate_host", { from, input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * List saved snippets from the shared `snippets.toml` (tech-gui.md §4.2).
  */
 async listSnippets() : Promise<Result<SnippetDto[], CommandError>> {

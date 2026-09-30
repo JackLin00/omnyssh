@@ -98,6 +98,27 @@ pub async fn delete_host(name: String) -> Result<(), CommandError> {
     persist(move |hosts| remove(hosts, &name)).await
 }
 
+/// Save a copy of the host named `from` as the new manual host `input` (the dashboard's
+/// Duplicate). The form only sees what `HostDto` carries, so the password, identity file
+/// and jump host it leaves blank come from the source here, backend-side (§3.4). Refuses
+/// an unknown source and a name any host already has. The frontend reloads afterwards.
+#[tauri::command]
+#[specta::specta]
+pub async fn duplicate_host(
+    from: String,
+    input: HostInputDto,
+    state: State<'_, GuiState>,
+) -> Result<(), CommandError> {
+    check_forwards(&input.local_forwards).map_err(|message| CommandError { message })?;
+    let source = state.host_by_name(&from).ok_or_else(|| CommandError {
+        message: format!("unknown host '{from}'"),
+    })?;
+    check_duplicate_name(&state.hosts_snapshot(), &input.name)
+        .map_err(|message| CommandError { message })?;
+    let host = duplicate(&source, input);
+    persist(move |hosts| hosts.push(host)).await
+}
+
 /// Upsert `input` into the manual host list by name. A new name appends; an existing
 /// name is an in-place edit that **preserves every field the edit form cannot observe**
 /// — password, identity file, and proxy jump (the outbound `HostDto` omits all three,

@@ -175,6 +175,12 @@ impl GuiState {
             .cloned()
     }
 
+    /// Clone the whole cached host list (manual and imported) for a backend-only check,
+    /// such as a duplicate's name being free. Secrets stay backend-side.
+    pub fn hosts_snapshot(&self) -> Vec<Host> {
+        self.hosts.read().expect("hosts lock poisoned").clone()
+    }
+
     /// Trigger an immediate metric poll of every host (tech-gui.md §4.2). A no-op if
     /// the pollers have not started yet. Non-blocking — it only nudges the poller tasks.
     pub fn refresh_metrics(&self) {

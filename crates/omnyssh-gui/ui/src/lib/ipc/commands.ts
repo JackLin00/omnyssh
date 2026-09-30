@@ -41,6 +41,13 @@ export async function deleteHost(name: string): Promise<void> {
   if (res.status === 'error') throw new Error(res.error.message);
 }
 
+/** Save a copy of host `from` as the new host `input`; the password, key and jump host
+ *  left blank come from `from`, backend-side. Call `reloadHosts` after to refresh. */
+export async function duplicateHost(from: string, input: HostInputDto): Promise<void> {
+  const res = await commands.duplicateHost(from, input);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
 /** Read the saved snippets from the shared `snippets.toml`. */
 export async function listSnippets(): Promise<SnippetDto[]> {
   const res = await commands.listSnippets();

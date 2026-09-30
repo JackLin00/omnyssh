@@ -15,7 +15,9 @@ mod state;
 mod tray;
 
 use commands::auth::{answer_password, unlock_identity};
-use commands::hosts::{delete_host, list_hosts, refresh_metrics, reload_hosts, save_host};
+use commands::hosts::{
+    delete_host, duplicate_host, list_hosts, refresh_metrics, reload_hosts, save_host,
+};
 use commands::keysetup::start_key_setup;
 use commands::serial::{serial_close, serial_list_ports, serial_open, serial_write};
 use commands::sftp::{
@@ -96,6 +98,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             reload_hosts,
             save_host,
             delete_host,
+            duplicate_host,
             list_snippets,
             save_snippet,
             delete_snippet,
