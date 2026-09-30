@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { HostDto } from '$lib/bindings';
-import { emptyForm, emptyForwardRow, formFromHost, formToInput, type HostFormFields } from './hostForm';
+import {
+  copyName,
+  emptyForm,
+  emptyForwardRow,
+  formForDuplicate,
+  formFromHost,
+  formToInput,
+  type HostFormFields
+} from './hostForm';
 
 function fields(partial: Partial<HostFormFields>): HostFormFields {
   return { ...emptyForm(), ...partial };
@@ -282,5 +290,38 @@ describe('formToInput — port forwarding', () => {
       { bindAddress: undefined, bindPort: 9443, remoteHost: '127.0.0.1', remotePort: 9443 },
       { bindAddress: '::1', bindPort: 8080, remoteHost: 'db', remotePort: 5432 }
     ]);
+  });
+});
+
+describe('duplicating a host', () => {
+  const host: HostDto = {
+    name: 'web-1',
+    hostname: '10.0.0.1',
+    user: 'deploy',
+    port: 2222,
+    tags: ['prod', 'web'],
+    notes: 'rack 3',
+    source: 'sshConfig',
+    hasKey: true,
+    monitoring: 'ssh',
+    localForwards: [{ bindPort: 8080, remoteHost: 'localhost', remotePort: 80 }],
+    tunnelAutostart: true,
+    forwardAgent: true
+  };
+
+  it('names the copy after its source', () => {
+    expect(copyName('web-1', ['web-1'])).toBe('web-1-copy');
+  });
+
+  it('counts past names that are already taken', () => {
+    expect(copyName('web-1', ['web-1', 'web-1-copy'])).toBe('web-1-copy-2');
+    expect(copyName('web-1', ['web-1', 'web-1-copy', 'web-1-copy-2'])).toBe('web-1-copy-3');
+  });
+
+  it('prefills everything the host shows, under the new name, with blank secrets', () => {
+    const form = formForDuplicate(host, ['web-1']);
+    expect(form).toEqual({ ...formFromHost(host), name: 'web-1-copy' });
+    expect(form.identityFile).toBe('');
+    expect(form.password).toBe('');
   });
 });

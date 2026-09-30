@@ -87,6 +87,20 @@ export function formFromHost(h: HostDto): HostFormFields {
   };
 }
 
+/** A free name for a copy of `name`: `<name>-copy`, then `-copy-2`, `-copy-3`… */
+export function copyName(name: string, taken: readonly string[]): string {
+  const used = new Set(taken);
+  let candidate = `${name}-copy`;
+  for (let n = 2; used.has(candidate); n++) candidate = `${name}-copy-${n}`;
+  return candidate;
+}
+
+/** The add form prefilled from `h` for Duplicate. The secrets stay blank: the backend
+ *  fills whatever is left blank from the source (`duplicate_host`). */
+export function formForDuplicate(h: HostDto, taken: readonly string[]): HostFormFields {
+  return { ...formFromHost(h), name: copyName(h.name, taken) };
+}
+
 // Digits with an optional leading `+`, matching Rust's `u16::parse`; the range check
 // covers 0 and overflow.
 function parsePort(raw: string): number | undefined {
