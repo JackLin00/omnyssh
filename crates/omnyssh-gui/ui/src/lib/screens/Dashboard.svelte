@@ -17,6 +17,7 @@
   import {
     saveHost,
     deleteHost,
+    duplicateHost,
     reloadHosts,
     startKeySetup,
     refreshMetrics,
@@ -25,11 +26,15 @@
   } from '$lib/ipc/commands';
   import { isRefreshHotkey } from '$lib/stores/ui';
   import { beginKeySetup, dismissKeySetup } from '$lib/stores/keySetup';
-  import { emptyForm, formFromHost } from './hostForm';
+  import { emptyForm, formFromHost, formForDuplicate } from './hostForm';
   import HostEditor from './HostEditor.svelte';
   import Modal from '$lib/components/Modal.svelte';
 
-  type Dialog = { kind: 'add' } | { kind: 'edit'; host: HostDto } | { kind: 'delete'; host: HostDto };
+  type Dialog =
+    | { kind: 'add' }
+    | { kind: 'edit'; host: HostDto }
+    | { kind: 'duplicate'; host: HostDto }
+    | { kind: 'delete'; host: HostDto };
 
   let dialog = $state<Dialog | null>(null);
 
@@ -85,6 +90,17 @@
       throw new Error(`A host named "${input.name}" already exists`);
     }
     await saveHost(input);
+    await reloadHosts();
+    dialog = null;
+  }
+
+  // Duplicate (spec A): a new host, so the name must be free like any add; the backend
+  // fills the blank login fields from the source.
+  async function submitDuplicate(from: string, input: HostInputDto): Promise<void> {
+    if (get(hosts).some((h) => h.name === input.name)) {
+      throw new Error(`A host named "${input.name}" already exists`);
+    }
+    await duplicateHost(from, input);
     await reloadHosts();
     dialog = null;
   }
@@ -292,6 +308,15 @@
               >
                 <Icon name="edit" size={14} />
               </button>
+              <button
+                type="button"
+                class={iconBtn}
+                title="Duplicate {card.host.name}"
+                aria-label="Duplicate {card.host.name}"
+                onclick={() => (dialog = { kind: 'duplicate', host: card.host })}
+              >
+                <Icon name="copy" size={14} />
+              </button>
               {#if card.host.source === 'manual'}
                 <button
                   type="button"
@@ -439,6 +464,15 @@
     previousName={host.name}
     imported={host.source === 'sshConfig'}
     onSubmit={submit}
+    onCancel={() => (dialog = null)}
+  />
+{:else if dialog?.kind === 'duplicate'}
+  {@const host = dialog.host}
+  <HostEditor
+    mode="add"
+    initial={formForDuplicate(host, $hosts.map((h) => h.name))}
+    copiedFrom={host.name}
+    onSubmit={(input) => submitDuplicate(host.name, input)}
     onCancel={() => (dialog = null)}
   />
 {:else if dialog?.kind === 'delete'}

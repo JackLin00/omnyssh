@@ -16,6 +16,7 @@
     initial,
     previousName,
     imported = false,
+    copiedFrom,
     onSubmit,
     onCancel
   }: {
@@ -24,6 +25,8 @@
     previousName?: string;
     /** Editing an `~/.ssh/config` import, so the save is an adoption — say so. */
     imported?: boolean;
+    /** Duplicating this host: the blank login fields keep its values — say so. */
+    copiedFrom?: string;
     onSubmit: (input: HostInputDto, previousName: string | undefined) => Promise<void>;
     onCancel: () => void;
   } = $props();
@@ -92,6 +95,12 @@
           Imported from <span class="font-mono">~/.ssh/config</span>. Saving keeps your own copy in
           <span class="font-mono">hosts.toml</span> and OmnySSH uses it from then on — your SSH config
           file is never written, and later edits to it stop showing up for this host.
+        </p>
+      {/if}
+      {#if copiedFrom}
+        <p class="rounded-lg bg-surface-inset px-3 py-2 text-xs text-muted">
+          Key, password and jump host are copied from
+          <span class="font-mono">{copiedFrom}</span> unless you fill them in.
         </p>
       {/if}
       <label class={label}>

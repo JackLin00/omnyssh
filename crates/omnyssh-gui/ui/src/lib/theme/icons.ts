@@ -16,6 +16,7 @@ export type IconName =
   | 'check'
   | 'play'
   | 'edit'
+  | 'copy'
   | 'trash'
   | 'plus'
   | 'folder'
