@@ -13,9 +13,11 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-/// How long one read waits for bytes before the loop checks for input again.
-/// Bounds keystroke latency.
-const READ_TIMEOUT: Duration = Duration::from_millis(20);
+/// How long one read or one write attempt waits before the loop checks for
+/// new input again. Because it bounds writes too, a single stalled write
+/// (CTS low, XOFF, a device not reading) cannot block past this — the loop
+/// instead keeps unsent bytes in a pending buffer and retries next iteration.
+const IO_TIMEOUT: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parity {
@@ -75,15 +77,22 @@ enum Ctrl {
     Close,
 }
 
-/// Handle to an open port. Dropping it closes the port.
+/// Handle to an open port. Dropping it closes the port and waits for its
+/// thread to exit, so the port handle is released before `drop` returns —
+/// Windows opens COM ports exclusively, and a close-then-reopen must not race
+/// the OS releasing it.
 pub struct SerialSession {
     ctrl: Sender<Ctrl>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl SerialSession {
     /// Opens `config.port` and starts its session thread. Fails right away when
     /// the port is missing or held by another program, so the caller can report
     /// it instead of opening a dead tab.
+    ///
+    /// `on_output` runs on the session thread, including while `Drop` joins it,
+    /// so it must not take a lock the dropping caller may hold.
     pub fn open(
         config: &SerialConfig,
         on_output: impl FnMut(SerialOutput) + Send + 'static,
@@ -104,7 +113,7 @@ impl SerialSession {
                 FlowControl::Software => serialport::FlowControl::Software,
                 FlowControl::Hardware => serialport::FlowControl::Hardware,
             })
-            .timeout(READ_TIMEOUT)
+            .timeout(IO_TIMEOUT)
             .open()
             .with_context(|| format!("cannot open {}", config.port))?;
         Ok(Self::spawn(port, on_output))
@@ -112,13 +121,19 @@ impl SerialSession {
 
     /// Runs a session over any byte stream; `open` uses it for a real port, the
     /// tests for a fake one.
+    ///
+    /// `on_output` runs on the session thread, including while `Drop` joins it,
+    /// so it must not take a lock the dropping caller may hold.
     pub fn spawn<P>(port: P, on_output: impl FnMut(SerialOutput) + Send + 'static) -> Self
     where
         P: Read + Write + Send + 'static,
     {
         let (ctrl, rx) = mpsc::channel();
-        thread::spawn(move || run(port, rx, on_output));
-        Self { ctrl }
+        let thread = thread::spawn(move || run(port, rx, on_output));
+        Self {
+            ctrl,
+            thread: Some(thread),
+        }
     }
 
     /// Queues bytes for the device. A no-op once the session has ended.
@@ -126,7 +141,8 @@ impl SerialSession {
         let _ = self.ctrl.send(Ctrl::Write(data.to_vec()));
     }
 
-    /// Asks the session to close the port.
+    /// Asks the session to close the port. Non-blocking: the thread finishes
+    /// asynchronously. `Drop` is what waits for it.
     pub fn close(&self) {
         let _ = self.ctrl.send(Ctrl::Close);
     }
@@ -135,10 +151,14 @@ impl SerialSession {
 impl Drop for SerialSession {
     fn drop(&mut self) {
         self.close();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
-/// The ports present right now, in numeric order (`COM2` before `COM10`).
+/// The ports present right now, with `COMn` names ordered numerically
+/// (`COM2` before `COM10`).
 pub fn list_ports() -> Result<Vec<PortInfo>> {
     let mut ports: Vec<PortInfo> = serialport::available_ports()
         .context("cannot list serial ports")?
@@ -164,7 +184,8 @@ fn describe(kind: &serialport::SerialPortType) -> Option<String> {
     }
 }
 
-/// Shorter names first, so the number after `COM` sorts numerically.
+/// Orders `COMn` names numerically by sorting on length before name, so
+/// shorter numbers (fewer digits) sort first.
 fn sort_ports(ports: &mut [PortInfo]) {
     ports.sort_by(|a, b| (a.name.len(), &a.name).cmp(&(b.name.len(), &b.name)));
 }
@@ -179,32 +200,73 @@ fn data_bits(bits: u8) -> Result<serialport::DataBits> {
     })
 }
 
-/// The session thread: send queued input, then wait up to `READ_TIMEOUT` for
-/// bytes, until closed or the port fails. Reports `Closed` exactly once.
+/// The session thread: drain queued input into a pending buffer and attempt
+/// one write of it, then — unless closing — wait up to `IO_TIMEOUT` for bytes.
+/// Runs until closed or the port fails; reports `Closed` exactly once.
+///
+/// Writes never call `write_all`/`flush`: on a stalled line those can block for
+/// as long as the OS lets them (on Windows, `FlushFileBuffers` can wait
+/// forever), holding the port's exclusive lock. Instead each iteration makes
+/// one bounded `write` attempt and keeps whatever did not fit in `pending` for
+/// the next iteration.
 fn run<P: Read + Write>(
     mut port: P,
     ctrl: Receiver<Ctrl>,
     mut on_output: impl FnMut(SerialOutput),
 ) {
     let mut buf = [0u8; 4096];
+    let mut pending: Vec<u8> = Vec::new();
     loop {
+        let mut closing = false;
         loop {
             match ctrl.try_recv() {
-                Ok(Ctrl::Write(data)) => {
-                    if let Err(e) = port.write_all(&data).and_then(|()| port.flush()) {
-                        on_output(SerialOutput::Closed(Some(e.to_string())));
-                        return;
-                    }
-                }
+                Ok(Ctrl::Write(data)) => pending.extend_from_slice(&data),
                 Ok(Ctrl::Close) | Err(TryRecvError::Disconnected) => {
-                    on_output(SerialOutput::Closed(None));
-                    return;
+                    closing = true;
+                    break;
                 }
                 Err(TryRecvError::Empty) => break,
             }
         }
+
+        if !pending.is_empty() {
+            match port.write(&pending) {
+                Ok(n) => {
+                    pending.drain(..n);
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => {
+                    on_output(SerialOutput::Closed(Some(e.to_string())));
+                    return;
+                }
+            }
+        }
+
+        if closing {
+            // Best effort: keep writing while each attempt makes progress
+            // (each is bounded by IO_TIMEOUT); anything else just stops so
+            // closing is never blocked on a still-stalled line.
+            while !pending.is_empty() {
+                match port.write(&pending) {
+                    Ok(0) => break,
+                    Ok(n) => pending.drain(..n),
+                    Err(_) => break,
+                };
+            }
+            on_output(SerialOutput::Closed(None));
+            return;
+        }
+
         match port.read(&mut buf) {
-            Ok(0) => thread::sleep(Duration::from_millis(1)),
+            // Windows never returns this; POSIX does on hang-up.
+            Ok(0) => {
+                on_output(SerialOutput::Closed(Some("port closed".to_string())));
+                return;
+            }
             Ok(n) => on_output(SerialOutput::Data(buf[..n].to_vec())),
             Err(e)
                 if matches!(
@@ -225,18 +287,33 @@ mod tests {
     use std::collections::VecDeque;
     use std::io;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
-    /// A port that returns scripted reads, then times out forever, and records writes.
+    /// A port that returns scripted reads, then times out forever; and scripted
+    /// write results, then accepts everything. Records what was actually
+    /// written.
     struct FakePort {
         reads: VecDeque<io::Result<Vec<u8>>>,
+        writes: VecDeque<io::Result<usize>>,
         written: Arc<Mutex<Vec<u8>>>,
     }
 
     impl FakePort {
         fn new(reads: Vec<io::Result<Vec<u8>>>) -> (Self, Arc<Mutex<Vec<u8>>>) {
+            Self::with_writes(reads, Vec::new())
+        }
+
+        /// Like `new`, but scripts the result of the first `writes.len()` calls
+        /// to `write` (e.g. stalls before the port accepts data); calls beyond
+        /// that accept the whole buffer.
+        fn with_writes(
+            reads: Vec<io::Result<Vec<u8>>>,
+            writes: Vec<io::Result<usize>>,
+        ) -> (Self, Arc<Mutex<Vec<u8>>>) {
             let written = Arc::new(Mutex::new(Vec::new()));
             let port = Self {
                 reads: reads.into(),
+                writes: writes.into(),
                 written: Arc::clone(&written),
             };
             (port, written)
@@ -261,8 +338,17 @@ mod tests {
 
     impl Write for FakePort {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.written.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
+            match self.writes.pop_front() {
+                Some(Ok(n)) => {
+                    self.written.lock().unwrap().extend_from_slice(&buf[..n]);
+                    Ok(n)
+                }
+                Some(Err(e)) => Err(e),
+                None => {
+                    self.written.lock().unwrap().extend_from_slice(buf);
+                    Ok(buf.len())
+                }
+            }
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
@@ -334,6 +420,57 @@ mod tests {
         assert_eq!(
             next(&rx),
             SerialOutput::Closed(Some("device removed".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_stalled_write_does_not_end_the_session() {
+        let stall = io::Error::new(ErrorKind::TimedOut, "timed out");
+        let (port, written) = FakePort::with_writes(vec![], vec![Ok(0), Err(stall), Ok(0)]);
+        let (session, rx) = start(port);
+        session.write(b"AT\r\n");
+
+        // A few stalled write attempts happen in the background; the session
+        // must stay alive rather than treating the stall as an error.
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            rx.try_recv().is_err(),
+            "session closed while the write was stalled"
+        );
+
+        // Once the port accepts data again, the bytes land, in order.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if written.lock().unwrap().as_slice() == b"AT\r\n" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "write never completed");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        session.close();
+        assert_eq!(next(&rx), SerialOutput::Closed(None));
+    }
+
+    #[test]
+    fn a_write_error_ends_the_session_with_its_reason() {
+        let unplugged = io::Error::new(ErrorKind::BrokenPipe, "device removed");
+        let (port, _) = FakePort::with_writes(vec![], vec![Err(unplugged)]);
+        let (session, rx) = start(port);
+        session.write(b"AT\r\n");
+        assert_eq!(
+            next(&rx),
+            SerialOutput::Closed(Some("device removed".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_empty_read_reports_the_port_closed() {
+        let (port, _) = FakePort::new(vec![Ok(vec![])]);
+        let (_session, rx) = start(port);
+        assert_eq!(
+            next(&rx),
+            SerialOutput::Closed(Some("port closed".to_string()))
         );
     }
 
