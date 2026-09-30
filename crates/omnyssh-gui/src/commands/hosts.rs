@@ -86,7 +86,11 @@ pub async fn save_host(
     let imported = state
         .host_by_name(&input.name)
         .filter(|h| h.source == HostSource::SshConfig);
-    persist(move |hosts| upsert(hosts, input, imported)).await
+    persist(move |hosts| {
+        upsert(hosts, input, imported);
+        Ok(())
+    })
+    .await
 }
 
 /// Delete a manual host by name and persist (tech-gui.md §4.2, Stage 4.1). Only manual
@@ -95,7 +99,11 @@ pub async fn save_host(
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_host(name: String) -> Result<(), CommandError> {
-    persist(move |hosts| remove(hosts, &name)).await
+    persist(move |hosts| {
+        remove(hosts, &name);
+        Ok(())
+    })
+    .await
 }
 
 /// Save a copy of the host named `from` as the new manual host `input` (the dashboard's
@@ -116,7 +124,7 @@ pub async fn duplicate_host(
     check_duplicate_name(&state.hosts_snapshot(), &input.name)
         .map_err(|message| CommandError { message })?;
     let host = duplicate(&source, input);
-    persist(move |hosts| hosts.push(host)).await
+    persist(move |hosts| add_duplicate(hosts, host)).await
 }
 
 /// Upsert `input` into the manual host list by name. A new name appends; an existing
@@ -173,13 +181,19 @@ fn upsert(hosts: &mut Vec<Host>, input: HostInputDto, imported: Option<Host>) {
 /// The host a duplicate saves: `input` as typed, with the login details the form never
 /// sees (password, identity file, jump host, `IdentitiesOnly`, §3.4) taken from `source`
 /// wherever the input left them blank. Key-setup records describe the source's server,
-/// and the SSH-config origin names the source's import, so neither is copied.
+/// and the SSH-config origin names the source's import, so neither is copied. An omitted
+/// monitoring mode means "unchanged", like `upsert` — not silently back to SSH.
 fn duplicate(source: &Host, input: HostInputDto) -> Host {
+    let monitoring_given = input.monitoring.is_some();
     let mut host = Host::from(input);
     host.password = host.password.or_else(|| source.password.clone());
     host.identity_file = host.identity_file.or_else(|| source.identity_file.clone());
     host.proxy_jump = host.proxy_jump.or_else(|| source.proxy_jump.clone());
     host.identities_only = source.identities_only;
+    if !monitoring_given {
+        host.monitoring = source.monitoring;
+        host.monitor_port = source.monitor_port;
+    }
     host
 }
 
@@ -192,6 +206,17 @@ fn check_duplicate_name(hosts: &[Host], name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Append `host` to the manual list, re-checking its name is still free against the
+/// list actually loaded from disk (`persist` runs this inside its load-mutate-save
+/// step). The cache-based check in `duplicate_host` catches an SSH-config import name,
+/// which never appears here, but only this check is race-free against a concurrent save
+/// that lands between it and the disk load.
+fn add_duplicate(hosts: &mut Vec<Host>, host: Host) -> Result<(), String> {
+    check_duplicate_name(hosts, &host.name)?;
+    hosts.push(host);
+    Ok(())
+}
+
 /// Drop the host named `name` from the manual list. A missing name is a no-op — the
 /// desired end state (absent) already holds (tech-gui.md §4.2).
 fn remove(hosts: &mut Vec<Host>, name: &str) {
@@ -200,20 +225,22 @@ fn remove(hosts: &mut Vec<Host>, name: &str) {
 
 /// Load the manual host list, apply `mutate`, and write it back off the async worker
 /// (parsing + atomic write are blocking I/O). `save_hosts` re-filters to manual, so
-/// SSH-config imports are never persisted (tech-gui.md §4.2).
-async fn persist(mutate: impl FnOnce(&mut Vec<Host>) + Send + 'static) -> Result<(), CommandError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut hosts = load_hosts()?;
-        mutate(&mut hosts);
-        save_hosts(&hosts)
+/// SSH-config imports are never persisted (tech-gui.md §4.2). `mutate` can reject the
+/// list it actually loaded from disk — e.g. `add_duplicate` re-checking a name that a
+/// caller's earlier, cache-only check can't see change underneath it.
+async fn persist(
+    mutate: impl FnOnce(&mut Vec<Host>) -> Result<(), String> + Send + 'static,
+) -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut hosts = load_hosts().map_err(|e| e.to_string())?;
+        mutate(&mut hosts)?;
+        save_hosts(&hosts).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| CommandError {
         message: format!("host save task failed: {e}"),
     })?
-    .map_err(|e| CommandError {
-        message: e.to_string(),
-    })
+    .map_err(|message| CommandError { message })
 }
 
 #[cfg(test)]
@@ -518,5 +545,39 @@ mod tests {
         assert!(check_duplicate_name(&hosts, "web-2").is_ok());
         let err = check_duplicate_name(&hosts, "web-1").unwrap_err();
         assert_eq!(err, "a host named 'web-1' already exists");
+    }
+
+    #[test]
+    fn a_duplicate_keeps_the_sources_monitoring_when_the_form_leaves_it_out() {
+        let mut source = source_host();
+        source.monitoring = MonitorMode::TcpPort;
+        source.monitor_port = Some(80);
+        let host = duplicate(&source, input("web-2"));
+        assert_eq!(host.monitoring, MonitorMode::TcpPort);
+        assert_eq!(host.monitor_port, Some(80));
+    }
+
+    #[test]
+    fn add_duplicate_rejects_a_second_same_named_host() {
+        let mut hosts = vec![source_host()];
+        let mut clash = source_host();
+        clash.hostname = "10.0.0.2".to_string();
+        let err = add_duplicate(&mut hosts, clash).unwrap_err();
+        assert_eq!(err, "a host named 'web-1' already exists");
+        assert_eq!(
+            hosts.len(),
+            1,
+            "the rejected duplicate must not be appended"
+        );
+    }
+
+    #[test]
+    fn add_duplicate_appends_a_free_name() {
+        let mut hosts = vec![source_host()];
+        let mut fresh = source_host();
+        fresh.name = "web-2".to_string();
+        assert!(add_duplicate(&mut hosts, fresh).is_ok());
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[1].name, "web-2");
     }
 }
