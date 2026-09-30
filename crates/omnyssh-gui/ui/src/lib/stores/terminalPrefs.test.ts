@@ -51,7 +51,7 @@ describe('terminal mouse-clipboard prefs', () => {
     const { copyOnSelect, rightClickPaste } = await fresh();
     await rightClickPaste.hydrate();
     expect(get(rightClickPaste)).toBe(false);
-    copyOnSelect.set(true); // user acts before hydrate resolves
+    copyOnSelect.set(true); // user acts before hydrate runs
     await copyOnSelect.hydrate();
     expect(get(copyOnSelect)).toBe(true);
   });

@@ -43,24 +43,44 @@ function mouse(type: string, button = 0): MouseEvent {
 }
 
 describe('attachMouseClipboard', () => {
-  it('copies the selection when a left-button drag ends', () => {
+  it('a drag started in the terminal and released on document copies', () => {
     const el = document.createElement('div');
     const term = fakeTerm('hello');
     attachMouseClipboard(term as never, el, true);
-    el.dispatchEvent(mouse('mouseup'));
+    el.dispatchEvent(mouse('mousedown'));
+    document.dispatchEvent(mouse('mouseup'));
     expect(writeText).toHaveBeenCalledWith('hello');
   });
 
   it('copies nothing without a selection, on another button, or when switched off', () => {
     const el = document.createElement('div');
     attachMouseClipboard(fakeTerm('') as never, el, true);
-    el.dispatchEvent(mouse('mouseup'));
+    el.dispatchEvent(mouse('mousedown'));
+    document.dispatchEvent(mouse('mouseup'));
     const el2 = document.createElement('div');
     attachMouseClipboard(fakeTerm('x') as never, el2, true);
-    el2.dispatchEvent(mouse('mouseup', 2));
+    el2.dispatchEvent(mouse('mousedown', 2));
+    document.dispatchEvent(mouse('mouseup'));
     copyOnSelect.set(false);
-    el2.dispatchEvent(mouse('mouseup'));
+    el2.dispatchEvent(mouse('mousedown'));
+    document.dispatchEvent(mouse('mouseup'));
     expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it('a mouseup on document without a preceding mousedown in the container copies nothing', () => {
+    const el = document.createElement('div');
+    attachMouseClipboard(fakeTerm('hello') as never, el, true);
+    document.dispatchEvent(mouse('mouseup'));
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed copy', async () => {
+    writeText.mockRejectedValue(new Error('denied'));
+    const el = document.createElement('div');
+    attachMouseClipboard(fakeTerm('hello') as never, el, true);
+    el.dispatchEvent(mouse('mousedown'));
+    document.dispatchEvent(mouse('mouseup'));
+    await vi.waitFor(() => expect(get(lastError)).toBe('Copy failed: denied'));
   });
 
   it('right-click pastes the clipboard through xterm and suppresses the menu', async () => {
@@ -98,15 +118,35 @@ describe('attachMouseClipboard', () => {
     await vi.waitFor(() => expect(get(lastError)).toBe('Paste failed: denied'));
   });
 
+  it('an empty clipboard pastes nothing', async () => {
+    readText.mockResolvedValue('');
+    const el = document.createElement('div');
+    const term = fakeTerm();
+    attachMouseClipboard(term as never, el, true);
+    el.dispatchEvent(mouse('contextmenu', 2));
+    await vi.waitFor(() => expect(readText).toHaveBeenCalled());
+    expect(term.paste).not.toHaveBeenCalled();
+  });
+
   it('the disposer removes both listeners', () => {
     readText.mockResolvedValue('x');
     const el = document.createElement('div');
     const dispose = attachMouseClipboard(fakeTerm('sel') as never, el, true);
     dispose();
-    el.dispatchEvent(mouse('mouseup'));
+    el.dispatchEvent(mouse('mousedown'));
+    document.dispatchEvent(mouse('mouseup'));
     const e = mouse('contextmenu', 2);
     el.dispatchEvent(e);
     expect(writeText).not.toHaveBeenCalled();
     expect(e.defaultPrevented).toBe(false);
+  });
+
+  it('the disposer drops a pending document listener', () => {
+    const el = document.createElement('div');
+    const dispose = attachMouseClipboard(fakeTerm('sel') as never, el, true);
+    el.dispatchEvent(mouse('mousedown'));
+    dispose();
+    document.dispatchEvent(mouse('mouseup'));
+    expect(writeText).not.toHaveBeenCalled();
   });
 });

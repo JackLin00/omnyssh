@@ -19,15 +19,29 @@ export function attachMouseClipboard(
   container: HTMLElement,
   canPaste: boolean
 ): () => void {
-  function onMouseUp(e: MouseEvent): void {
-    if (e.button !== 0 || !get(copyOnSelect) || !term.hasSelection()) return;
+  function onMouseUp(): void {
+    if (!get(copyOnSelect) || !term.hasSelection()) return;
     navigator.clipboard.writeText(term.getSelection()).catch((err) => {
       lastError.set(`Copy failed: ${message(err)}`);
     });
   }
 
+  // xterm tracks a selection drag on `document`, not the container — a drag released
+  // outside it (e.g. past the top edge to auto-scroll) must still count as a mouseup.
+  // Listen on document only while a left-button drag is in progress, one-shot so it
+  // never leaks past the release; a second press before release replaces it rather
+  // than stacking another listener.
+  function onMouseDown(e: MouseEvent): void {
+    if (e.button !== 0) return;
+    document.removeEventListener('mouseup', onMouseUp);
+    document.addEventListener('mouseup', onMouseUp, { once: true });
+  }
+
   function onContextMenu(e: MouseEvent): void {
     if (!canPaste || !get(rightClickPaste)) return; // the native menu stays
+    // xterm's own contextmenu handler runs first (it moves its textarea under the
+    // pointer, and on macOS selects the word); preventDefault on the ancestor here
+    // only suppresses the native menu.
     e.preventDefault();
     void (async () => {
       try {
@@ -41,10 +55,11 @@ export function attachMouseClipboard(
     })();
   }
 
-  container.addEventListener('mouseup', onMouseUp);
+  container.addEventListener('mousedown', onMouseDown);
   container.addEventListener('contextmenu', onContextMenu);
   return () => {
-    container.removeEventListener('mouseup', onMouseUp);
+    container.removeEventListener('mousedown', onMouseDown);
     container.removeEventListener('contextmenu', onContextMenu);
+    document.removeEventListener('mouseup', onMouseUp);
   };
 }
