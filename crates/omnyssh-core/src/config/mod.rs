@@ -3,11 +3,13 @@
 //! - [`app_config`]  — main `~/.config/omnyssh/config.toml`
 //! - [`ssh_config`]  — parser for `~/.ssh/config`
 //! - [`snippets`]    — `~/.config/omnyssh/snippets.toml`
+//! - [`serial_devices`] — `~/.config/omnyssh/serial.toml`
 //!
 //! Top-level functions in this module handle loading and persisting the
 //! host list (`hosts.toml`).
 
 pub mod app_config;
+pub mod serial_devices;
 pub mod snippets;
 pub mod ssh_config;
 

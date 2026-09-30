@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
 /// How long one read or one write attempt waits before the loop checks for
 /// new input again. Because it bounds writes too, a single stalled write
@@ -26,21 +27,27 @@ const IO_TIMEOUT: Duration = Duration::from_millis(20);
 /// thread — block for seconds or minutes on the caller's thread.
 const CLOSE_FLUSH_LIMIT: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Parity {
+    #[default]
     None,
     Odd,
     Even,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum StopBits {
+    #[default]
     One,
     Two,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FlowControl {
+    #[default]
     None,
     /// XON/XOFF.
     Software,
