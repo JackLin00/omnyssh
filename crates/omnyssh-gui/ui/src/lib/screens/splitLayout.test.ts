@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   arrange,
   clampRatio,
+  dropPreview,
+  dropSide,
+  movePane,
   neighbor,
+  paneAt,
   panes,
   remove,
   setRatio,
@@ -104,5 +108,82 @@ describe('arrange', () => {
         parent: { x: 0.5, y: 0, w: 0.5, h: 1 }
       }
     ]);
+  });
+});
+
+describe('movePane', () => {
+  // 1 | (2 / 3)
+  const three = split(split(pane(1), 1, 'row', 2), 2, 'column', 3);
+
+  it('puts the pane on the chosen side of the target, sharing it half and half', () => {
+    expect(movePane(three, 1, 3, 'top')).toEqual({
+      kind: 'split',
+      dir: 'column',
+      ratio: 0.5,
+      a: pane(2),
+      b: { kind: 'split', dir: 'column', ratio: 0.5, a: pane(1), b: pane(3) }
+    });
+    expect(movePane(three, 3, 1, 'left')).toEqual({
+      kind: 'split',
+      dir: 'row',
+      ratio: 0.5,
+      a: { kind: 'split', dir: 'row', ratio: 0.5, a: pane(3), b: pane(1) },
+      b: pane(2)
+    });
+    expect(movePane(three, 2, 1, 'bottom')).toMatchObject({
+      a: { kind: 'split', dir: 'column', a: pane(1), b: pane(2) },
+      b: pane(3)
+    });
+  });
+
+  it('works between the two panes of a single split', () => {
+    const two = split(pane(1), 1, 'row', 2);
+    expect(movePane(two, 1, 2, 'bottom')).toEqual({
+      kind: 'split',
+      dir: 'column',
+      ratio: 0.5,
+      a: pane(2),
+      b: pane(1)
+    });
+  });
+
+  it('leaves the layout alone for itself or an unknown pane', () => {
+    expect(movePane(three, 1, 1, 'top')).toBe(three);
+    expect(movePane(three, 9, 1, 'top')).toBe(three);
+    expect(movePane(three, 1, 9, 'top')).toBe(three);
+  });
+
+  it('keeps every pane', () => {
+    expect(panes(movePane(three, 1, 3, 'right')).sort()).toEqual([1, 2, 3]);
+  });
+});
+
+describe('dropSide', () => {
+  const rect = { x: 0.5, y: 0, w: 0.5, h: 1 };
+
+  it('is the edge nearest the pointer, measured relative to the pane', () => {
+    expect(dropSide(0.52, 0.5, rect)).toBe('left');
+    expect(dropSide(0.98, 0.5, rect)).toBe('right');
+    expect(dropSide(0.75, 0.05, rect)).toBe('top');
+    expect(dropSide(0.75, 0.95, rect)).toBe('bottom');
+  });
+});
+
+describe('dropPreview', () => {
+  it('is the half of the target on that side', () => {
+    const rect = { x: 0.5, y: 0, w: 0.5, h: 1 };
+    expect(dropPreview(rect, 'left')).toEqual({ x: 0.5, y: 0, w: 0.25, h: 1 });
+    expect(dropPreview(rect, 'right')).toEqual({ x: 0.75, y: 0, w: 0.25, h: 1 });
+    expect(dropPreview(rect, 'top')).toEqual({ x: 0.5, y: 0, w: 0.5, h: 0.5 });
+    expect(dropPreview(rect, 'bottom')).toEqual({ x: 0.5, y: 0.5, w: 0.5, h: 0.5 });
+  });
+});
+
+describe('paneAt', () => {
+  it('finds the pane under a point', () => {
+    const { panes: rects } = arrange(split(pane(1), 1, 'row', 2));
+    expect(paneAt(0.25, 0.5, rects)?.id).toBe(1);
+    expect(paneAt(0.75, 0.5, rects)?.id).toBe(2);
+    expect(paneAt(1.5, 0.5, rects)).toBeUndefined();
   });
 });

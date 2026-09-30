@@ -104,3 +104,62 @@ export function arrange(
     dividers: [{ path, dir: layout.dir, rect: line, parent: rect }, ...a.dividers, ...b.dividers]
   };
 }
+
+/** Where a dragged pane lands against its target. */
+export type DropSide = 'left' | 'right' | 'top' | 'bottom';
+
+/** Put pane `moved` on `side` of pane `target`, the two sharing target's space. */
+function place(layout: Layout, target: PaneId, side: DropSide, moved: PaneId): Layout {
+  if (layout.kind === 'pane') {
+    if (layout.id !== target) return layout;
+    const dir: SplitDir = side === 'left' || side === 'right' ? 'row' : 'column';
+    const first = side === 'left' || side === 'top';
+    const m: Layout = { kind: 'pane', id: moved };
+    return { kind: 'split', dir, ratio: 0.5, a: first ? m : layout, b: first ? layout : m };
+  }
+  const a = place(layout.a, target, side, moved);
+  const b = place(layout.b, target, side, moved);
+  return a === layout.a && b === layout.b ? layout : { ...layout, a, b };
+}
+
+/** Move pane `src` to `side` of pane `target`: its sibling takes its old place first. */
+export function movePane(layout: Layout, src: PaneId, target: PaneId, side: DropSide): Layout {
+  const ids = panes(layout);
+  if (src === target || !ids.includes(src) || !ids.includes(target)) return layout;
+  const rest = remove(layout, src);
+  return rest === null ? layout : place(rest, target, side, src);
+}
+
+/** The edge of `rect` nearest the point, relative to the rectangle's size. */
+export function dropSide(x: number, y: number, rect: Rect): DropSide {
+  const left = (x - rect.x) / rect.w;
+  const top = (y - rect.y) / rect.h;
+  const edges: [DropSide, number][] = [
+    ['left', left],
+    ['right', 1 - left],
+    ['top', top],
+    ['bottom', 1 - top]
+  ];
+  return edges.reduce((best, e) => (e[1] < best[1] ? e : best))[0];
+}
+
+/** The half of `rect` a drop on `side` would take. */
+export function dropPreview(rect: Rect, side: DropSide): Rect {
+  switch (side) {
+    case 'left':
+      return { ...rect, w: rect.w / 2 };
+    case 'right':
+      return { ...rect, x: rect.x + rect.w / 2, w: rect.w / 2 };
+    case 'top':
+      return { ...rect, h: rect.h / 2 };
+    case 'bottom':
+      return { ...rect, y: rect.y + rect.h / 2, h: rect.h / 2 };
+  }
+}
+
+/** The pane whose rectangle holds the point, if any. */
+export function paneAt(x: number, y: number, rects: PaneRect[]): PaneRect | undefined {
+  return rects.find(
+    ({ rect }) => x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+  );
+}
