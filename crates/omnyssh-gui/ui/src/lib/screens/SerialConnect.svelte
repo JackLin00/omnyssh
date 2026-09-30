@@ -38,7 +38,10 @@
   onMount(rescan);
 
   const baudRate = $derived(/^\d+$/.test(baud.trim()) ? Number(baud.trim()) : NaN);
-  const valid = $derived(port !== '' && Number.isInteger(baudRate) && baudRate > 0);
+  // The backend takes a u32 baud rate.
+  const valid = $derived(
+    port !== '' && Number.isInteger(baudRate) && baudRate > 0 && baudRate <= 0xffffffff
+  );
 
   function connect(): void {
     if (!valid) return;

@@ -3,10 +3,10 @@ import type { Status } from '$lib/theme';
 import type { SerialConfigDto } from '$lib/bindings';
 import type { EnterKey } from '$lib/screens/serialFormat';
 
-// The open terminal/SFTP tabs (tech-gui.md §2, §3.5). Spawners append a row here;
-// Stage 3 makes the sessions real (live PTY / SFTP). Ids come from one monotonic
-// space so a closed tab's id is never reused and terminal/SFTP ids never collide in
-// the frontend.
+// The open terminal/SFTP/serial tabs (tech-gui.md §2, §3.5). Spawners append a row
+// here; Stage 3 makes the sessions real (live PTY / SFTP / serial port). Ids come from
+// one monotonic space so a closed tab's id is never reused and terminal/SFTP/serial ids
+// never collide in the frontend.
 export type SessionKind = 'terminal' | 'sftp' | 'serial';
 export type SessionStatus = 'connecting' | 'connected' | 'failed' | 'unknown';
 
@@ -33,15 +33,17 @@ export interface Session {
   kind: SessionKind;
   hostName: string;
   status: SessionStatus;
-  /** The backend public session id, set once `terminal_open` resolves (tech-gui.md
-   *  §3.4). Undefined while connecting; the id crossing IPC is always this public id. */
+  /** The backend public session id, set once `terminal_open` / `serial_open` resolves
+   *  (tech-gui.md §3.4). Undefined while connecting; the id crossing IPC is always this
+   *  public id. */
   termId?: number;
   /** Set on serial tabs only; `hostName` then holds the tab label, e.g. `COM3 · 115200`. */
   serial?: SerialSessionOptions;
 }
 
-/** The visible session label: just the host name. The type (terminal/SFTP) is already
- *  carried by the row's type icon, so the text stays compact and readable at any width. */
+/** The visible session label: just the host name. The type (terminal/SFTP/serial) is
+ *  already carried by the row's type icon, so the text stays compact and readable at any
+ *  width. */
 export function sessionLabel(s: Session): string {
   return s.hostName;
 }
@@ -62,7 +64,8 @@ function createSessions() {
       update((list) => [...list, session]);
       return session;
     },
-    /** Record the backend public id once `terminal_open` resolves (tech-gui.md §3.4). */
+    /** Record the backend public id once `terminal_open` / `serial_open` resolves
+     *  (tech-gui.md §3.4). */
     setTermId(id: number, termId: number): void {
       update((list) => list.map((s) => (s.id === id ? { ...s, termId } : s)));
     },

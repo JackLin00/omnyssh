@@ -179,6 +179,11 @@
 
       if (opts.mode === 'terminal') {
         term.onData((data) => sendInput(ENCODER.encode(mapEnter(data, opts.enter))));
+        // onBinary carries raw 8-bit sequences (e.g. legacy mouse reporting) that must go
+        // byte-for-byte, not re-encoded, and never Enter-mapped.
+        term.onBinary((data) =>
+          sendInput(Uint8Array.from(data, (ch) => ch.charCodeAt(0) & 0xff))
+        );
       }
 
       resizeObserver = new ResizeObserver(() => scheduleFit());
@@ -187,6 +192,8 @@
       ready = true;
       if (active && get(dialogs).length === 0) term.focus();
     })().catch((err) => {
+      // A tab closed while its open was in flight has nothing left to report to.
+      if (destroyed) return;
       // The port could not be opened (missing, or held by another program).
       lastError.set(err instanceof Error ? err.message : String(err));
       sessions.setStatus(session.id, 'failed');

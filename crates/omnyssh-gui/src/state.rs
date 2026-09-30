@@ -26,8 +26,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Maps frontend-facing **public** session ids to the core's **inner** handles, and
 /// back for terminals (the bridge labels `terminal-exited` by inner PTY id, §3.4).
-/// A single monotonic id space keeps terminal — and, from Stage 3.2, SFTP — ids from
-/// ever colliding in the frontend.
+/// A single monotonic id space keeps terminal — and, from Stage 3.2, SFTP, and serial —
+/// ids from ever colliding in the frontend.
 #[derive(Default)]
 pub struct SessionRegistry {
     next: SessionId,
