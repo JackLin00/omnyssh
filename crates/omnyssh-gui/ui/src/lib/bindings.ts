@@ -172,6 +172,52 @@ async terminalPaste() : Promise<Result<null, CommandError>> {
 }
 },
 /**
+ * The serial ports present right now.
+ */
+async serialListPorts() : Promise<Result<SerialPortDto[], CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("serial_list_ports") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Open a serial port and return the public session id the write/close commands
+ * take. A missing or busy port fails here. Async so opening (which may block
+ * briefly in the driver) stays off the main thread.
+ */
+async serialOpen(config: SerialConfigDto, onOutput: TAURI_CHANNEL<TerminalBytes>, onExit: TAURI_CHANNEL<SerialExitDto>) : Promise<Result<number, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("serial_open", { config, onOutput, onExit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Send keystrokes to a serial port.
+ */
+async serialWrite(sessionId: number, data: number[]) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("serial_write", { sessionId, data }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Close a serial port. Idempotent.
+ */
+async serialClose(sessionId: number) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("serial_close", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Open an SFTP session for `host_name` (tech-gui.md §4.2). Awaits the core connect,
  * registers the manager under a fresh public id, and spawns the per-session
  * forwarder; the `sftp-connected` ack then arrives stamped with that id (§3.4).
@@ -523,6 +569,10 @@ export type FileEntryDto = { name: string; path: string; size: number; isDir: bo
  */
 export type FilePreview = { sessionId: number; path: string; content: string }
 /**
+ * Flow control, mirrors `omnyssh_core::serial::FlowControl`.
+ */
+export type FlowControlDto = "none" | "software" | "hardware"
+/**
  * A host as the frontend sees it — password and private-key material omitted
  * (tech-gui.md §3.4). `hasKey` reports whether an identity file is configured;
  * the key path itself never crosses the boundary.
@@ -602,6 +652,10 @@ export type MetricsUpdated = { hostName: string; metrics: MetricsDto }
  */
 export type MonitorModeDto = "ssh" | "tcpPort"
 /**
+ * Parity bit, mirrors `omnyssh_core::serial::Parity`.
+ */
+export type ParityDto = "none" | "odd" | "even"
+/**
  * A connection waits for the login password of `login` (`user@host`). Answered
  * with `answer_password`; the password only ever crosses inbound. `retry` says
  * the previous one was refused; `newHostKey` is the fingerprint of a host key
@@ -612,6 +666,19 @@ export type PasswordRequired = { requestId: number; hostName: string; login: str
  * A single process in the "top processes" panel (tech-gui.md §4.1).
  */
 export type ProcessDto = { name: string; cpuPercent: number; memPercent: number }
+/**
+ * The line settings a serial tab opens with.
+ */
+export type SerialConfigDto = { port: string; baudRate: number; dataBits: number; parity: ParityDto; stopBits: StopBitsDto; flowControl: FlowControlDto }
+/**
+ * Why a serial tab's port closed on its own (adapter unplugged, driver error).
+ * Sent once on the tab's exit channel; a user-initiated close sends nothing.
+ */
+export type SerialExitDto = { error: string }
+/**
+ * A serial port present on this machine.
+ */
+export type SerialPortDto = { name: string; description: string | null }
 /**
  * A service detected on a host with its quick-scan metrics (tech-gui.md §4.1).
  */
@@ -677,6 +744,10 @@ export type SnippetResult = { hostName: string; snippetName: string; ok: boolean
  * names are lowercase (`global`, `host`).
  */
 export type SnippetScopeDto = "global" | "host"
+/**
+ * Stop bits, mirrors `omnyssh_core::serial::StopBits`.
+ */
+export type StopBitsDto = "one" | "two"
 /**
  * Raw PTY output bytes for a terminal session's per-session `Channel` (tech-gui.md
  * §3.3/§3.6). Deliberately **not** `Serialize`: that dodges the blanket
