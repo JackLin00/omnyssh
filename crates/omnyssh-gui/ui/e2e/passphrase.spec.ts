@@ -40,6 +40,10 @@ async function boot(
           switch (cmd) {
             case 'list_hosts':
               return Promise.resolve(hosts);
+            // e2e's Desktop Chrome UA contains "Windows", so the dashboard's serial
+            // devices load runs here too; an empty list keeps it a no-op.
+            case 'list_serial_devices':
+              return Promise.resolve([]);
             case 'reload_hosts':
               if (lockedAtLaunch) {
                 // Both pollers hit the same locked key; a second key waits behind it.

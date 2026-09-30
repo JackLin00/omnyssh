@@ -1,6 +1,7 @@
 <script lang="ts">
   // Add / edit / duplicate a saved serial device. Validation lives in `deviceFromFields`;
   // the parent persists and reloads, and a rejected save shows inline without closing.
+  import { onMount } from 'svelte';
   import type { SerialDeviceDto } from '$lib/bindings';
   import Modal from '$lib/components/Modal.svelte';
   import { Button } from '$lib/theme';
@@ -27,6 +28,15 @@
   let fields = $state<SerialDeviceFields>({ ...initial });
   let error = $state<string | null>(null);
   let saving = $state(false);
+  let nameEl = $state<HTMLInputElement>();
+  let lineFieldsEl = $state<HTMLDivElement>();
+
+  // Add starts on the name, since it is the one thing every device needs typed by
+  // hand; edit starts on the port select, since the name is fixed.
+  onMount(() => {
+    if (mode === 'add') nameEl?.focus();
+    else lineFieldsEl?.querySelector('select')?.focus();
+  });
 
   async function save(): Promise<void> {
     const result = deviceFromFields(fields, taken);
@@ -66,9 +76,17 @@
     <div class="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-5 py-4">
       <label class={label}>
         <span>Name {mode === 'edit' ? '(fixed)' : ''}</span>
-        <input bind:value={fields.name} class={field} disabled={mode === 'edit'} placeholder="ESP32 devkit" />
+        <input
+          bind:this={nameEl}
+          bind:value={fields.name}
+          class={field}
+          disabled={mode === 'edit'}
+          placeholder="ESP32 devkit"
+        />
       </label>
-      <SerialLineFields bind:fields />
+      <div bind:this={lineFieldsEl} class="space-y-3.5">
+        <SerialLineFields bind:fields />
+      </div>
       <label class={label}>
         <span>Notes</span>
         <input bind:value={fields.notes} class={field} placeholder="Optional" />

@@ -18,7 +18,10 @@
 
   let ports = $state<SerialPortDto[]>([]);
   let error = $state<string | null>(null);
-  const missing = $derived(fields.port !== '' && !ports.some((p) => p.name === fields.port));
+  // Set once the first rescan settles (success or error): before that, an empty
+  // `ports` would otherwise flag every saved port "not connected" for a moment.
+  let scanned = $state(false);
+  const missing = $derived(scanned && fields.port !== '' && !ports.some((p) => p.name === fields.port));
 
   async function rescan(): Promise<void> {
     try {
@@ -28,6 +31,8 @@
       if (fields.port === '') fields.port = ports[0]?.name ?? '';
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+    } finally {
+      scanned = true;
     }
   }
   onMount(rescan);

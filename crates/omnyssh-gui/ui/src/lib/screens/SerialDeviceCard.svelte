@@ -73,6 +73,6 @@
     </button>
   </div>
   {#if device.notes}
-    <p class="text-xs text-muted">{device.notes}</p>
+    <p class="line-clamp-2 text-xs text-muted" title={device.notes}>{device.notes}</p>
   {/if}
 </Surface>

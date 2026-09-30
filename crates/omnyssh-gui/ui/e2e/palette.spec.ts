@@ -34,8 +34,13 @@ async function bootWithHosts(page: Page): Promise<void> {
   await page.addInitScript((hosts) => {
     let cbid = 0;
     (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
-      invoke: (cmd: string) =>
-        cmd === 'list_hosts' ? Promise.resolve(hosts) : Promise.resolve(null),
+      invoke: (cmd: string) => {
+        // e2e's Desktop Chrome UA contains "Windows", so the dashboard's serial
+        // devices load runs here too; an empty list keeps it a no-op.
+        if (cmd === 'list_hosts') return Promise.resolve(hosts);
+        if (cmd === 'list_serial_devices') return Promise.resolve([]);
+        return Promise.resolve(null);
+      },
       transformCallback: (cb: unknown) => {
         const id = ++cbid;
         (window as unknown as Record<string, unknown>)[`__cb${id}`] = cb;

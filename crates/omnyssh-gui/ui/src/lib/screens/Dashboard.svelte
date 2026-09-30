@@ -193,6 +193,10 @@
   const search =
     'min-w-0 rounded-full bg-surface-inset py-1.5 text-sm text-fg outline-none transition-all duration-200 ' +
     'placeholder:text-faint focus-visible:ring-2 focus-visible:ring-focus';
+
+  // Serial device cards only ever show on Windows, so the search only mentions them there.
+  const searchLabel = isWindows ? 'Search hosts and devices' : 'Search hosts';
+  const noMatchText = isWindows ? 'Nothing matches' : 'No hosts match';
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -207,8 +211,8 @@
           bind:this={searchInput}
           bind:value={query}
           type="text"
-          placeholder="Search hosts…"
-          aria-label="Search hosts"
+          placeholder="{searchLabel}…"
+          aria-label={searchLabel}
           disabled={!searchOpen}
           class="{search} {searchOpen
             ? 'mr-2 w-52 px-3 opacity-100'
@@ -220,8 +224,8 @@
         <button
           type="button"
           class={roundBtn}
-          title={searchOpen ? 'Close search' : 'Search hosts'}
-          aria-label={searchOpen ? 'Close search' : 'Search hosts'}
+          title={searchOpen ? 'Close search' : searchLabel}
+          aria-label={searchOpen ? 'Close search' : searchLabel}
           aria-expanded={searchOpen}
           onclick={toggleSearch}
         >
@@ -266,7 +270,7 @@
     </div>
   {:else if visibleCards.length === 0 && visibleDevices.length === 0}
     <div class="flex flex-col items-center justify-center gap-2 py-20 text-center">
-      <p class="text-sm text-muted">No hosts match “{query}”.</p>
+      <p class="text-sm text-muted">{noMatchText} “{query}”.</p>
     </div>
   {:else}
     <div class="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(19rem,1fr))]">
@@ -497,7 +501,9 @@
           {/if}
         </Surface>
       {/each}
-      {#each visibleDevices as device (device.name)}
+      <!-- Keyed by position: hand-edited serial.toml can hold two same-named devices,
+           and a name key would throw each_key_duplicate and blank the whole screen. -->
+      {#each visibleDevices as device, i (i)}
         <SerialDeviceCard
           {device}
           onOpen={(mode) => openDevice(device, mode)}

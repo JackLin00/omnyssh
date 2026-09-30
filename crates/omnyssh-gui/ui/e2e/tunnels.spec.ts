@@ -55,6 +55,10 @@ async function boot(page: Page, options: { rejectStart?: string } = {}): Promise
           switch (cmd) {
             case 'list_hosts':
               return Promise.resolve([...state.hosts]);
+            // e2e's Desktop Chrome UA contains "Windows", so the dashboard's serial
+            // devices load runs here too; an empty list keeps it a no-op.
+            case 'list_serial_devices':
+              return Promise.resolve([]);
             case 'reload_hosts':
               setTimeout(() => fire('hosts-loaded', [...state.hosts]), 0);
               return Promise.resolve(null);
