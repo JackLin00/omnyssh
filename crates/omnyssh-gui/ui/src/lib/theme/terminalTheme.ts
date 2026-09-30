@@ -6,6 +6,7 @@
 // for red/green/yellow and cool blue/violet accents to stay on the monochrome brand
 // tone. Both maps are tuned for AA-legible reading on their surface.
 import type { ITheme } from '@xterm/xterm';
+import type { ISearchDecorationOptions } from '@xterm/addon-search';
 import type { Theme } from '$lib/stores/theme';
 
 const dark: ITheme = {
@@ -61,4 +62,26 @@ const THEMES: Record<Theme, ITheme> = { dark, light };
 /** The xterm theme object for the app theme; applied to every open terminal on toggle. */
 export function xtermTheme(theme: Theme): ITheme {
   return THEMES[theme];
+}
+
+// Search highlights, for the same reason as the palette above: xterm draws them, not
+// CSS. Every match gets a quiet wash; the current one takes the warning yellow so it
+// stands out on either surface. The addon requires #RRGGBB.
+const SEARCH: Record<Theme, ISearchDecorationOptions> = {
+  dark: {
+    matchBackground: '#4a5058',
+    matchOverviewRuler: '#7a8088',
+    activeMatchBackground: '#8a6d1f',
+    activeMatchColorOverviewRuler: '#e8c15a'
+  },
+  light: {
+    matchBackground: '#dde2e8',
+    matchOverviewRuler: '#aeb7c2',
+    activeMatchBackground: '#f0d178',
+    activeMatchColorOverviewRuler: '#b7791f'
+  }
+};
+
+export function searchDecorations(t: Theme): ISearchDecorationOptions {
+  return SEARCH[t];
 }
