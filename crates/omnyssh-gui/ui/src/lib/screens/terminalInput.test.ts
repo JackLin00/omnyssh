@@ -157,6 +157,12 @@ describe('paneShortcut — Windows Terminal pane chords', () => {
     expect(paneShortcut(chord({ key: '_', code: 'Minus' }))).toBe('splitDown');
   });
 
+  it('matches the character too, for layouts that move + and - (German, French)', () => {
+    expect(paneShortcut(chord({ key: '+', code: 'BracketRight' }))).toBe('splitRight');
+    expect(paneShortcut(chord({ key: '_', code: 'Slash' }))).toBe('splitDown');
+    expect(paneShortcut(chord({ key: 'A', code: 'KeyA' }))).toBeNull();
+  });
+
   it('closes the pane on Ctrl+Shift+W', () => {
     expect(paneShortcut(press({ key: 'W', code: 'KeyW' }))).toBe('closePane');
   });

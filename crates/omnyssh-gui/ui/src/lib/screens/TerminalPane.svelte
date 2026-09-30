@@ -93,6 +93,7 @@
   }
 
   let container: HTMLDivElement;
+  let toolbar: HTMLDivElement;
   let term: Terminal | undefined;
   let fitAddon: FitAddon | undefined;
   let termId: number | undefined;
@@ -276,6 +277,14 @@
     }
   });
 
+  // Focus landing on a toolbar button (Tab) leaves the pane's focus alone: making the
+  // pane focused would hand the keyboard to xterm next frame and pull it off the button.
+  // A click still focuses the pane through pointerdown.
+  function focusIn(e: FocusEvent): void {
+    if (toolbar?.contains(e.target as Node)) return;
+    onFocus();
+  }
+
   const toolBtn =
     'grid h-6 w-6 place-items-center rounded bg-surface-inset text-muted transition ' +
     'hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
@@ -287,7 +296,7 @@
   class="group relative h-full w-full {framed ? 'p-0.5' : ''}"
   role="presentation"
   onpointerdown={onFocus}
-  onfocusin={onFocus}
+  onfocusin={focusIn}
 >
   <div
     class="h-full w-full rounded {framed && focused ? 'ring-1 ring-focus' : ''}"
@@ -295,6 +304,7 @@
     <div bind:this={container} class="h-full w-full" class:term-fade={scrolled}></div>
   </div>
   <div
+    bind:this={toolbar}
     class="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100"
   >
     <button type="button" class={toolBtn} title="Split right (Alt+Shift+=)" aria-label="Split right" onclick={() => onSplit('row')}>

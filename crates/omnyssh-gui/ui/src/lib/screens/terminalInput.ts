@@ -81,14 +81,15 @@ export function chunkBytes(data: Uint8Array, size: number = INPUT_CHUNK): Uint8A
 export type PaneAction = 'splitRight' | 'splitDown' | 'closePane';
 
 /** Windows Terminal's pane chords: Alt+Shift+= splits right, Alt+Shift+- splits down,
- *  Ctrl+Shift+W closes the pane. Matched by physical key, since Shift turns `=` into `+`
- *  and layouts move the characters, and on every event type, so no half of the chord
- *  reaches the shell; the caller acts on keydown only. */
+ *  Ctrl+Shift+W closes the pane. The splits match the physical key (Shift turns `=` into
+ *  `+`) or the character, so layouts that move `+`/`-` (German, French) work as in
+ *  Windows Terminal. Matched on every event type, so no half of the chord reaches the
+ *  shell; the caller acts on keydown only. */
 export function paneShortcut(e: KeyPress): PaneAction | null {
   if (e.isComposing || e.metaKey) return null;
   if (e.altKey && e.shiftKey && !e.ctrlKey) {
-    if (e.code === 'Equal') return 'splitRight';
-    if (e.code === 'Minus') return 'splitDown';
+    if (e.code === 'Equal' || e.key === '+' || e.key === '=') return 'splitRight';
+    if (e.code === 'Minus' || e.key === '-' || e.key === '_') return 'splitDown';
   }
   if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyW') return 'closePane';
   return null;

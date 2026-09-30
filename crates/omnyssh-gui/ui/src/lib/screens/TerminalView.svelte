@@ -69,6 +69,8 @@
     const row = d.dir === 'row';
     function move(ev: PointerEvent): void {
       const box = area.getBoundingClientRect();
+      // The tab was hidden mid-drag: there is nothing to measure against.
+      if (box.width === 0 || box.height === 0) return;
       const pos = row ? (ev.clientX - box.left) / box.width : (ev.clientY - box.top) / box.height;
       const start = row ? d.parent.x : d.parent.y;
       const size = row ? d.parent.w : d.parent.h;
@@ -79,10 +81,12 @@
       handle.removeEventListener('pointermove', move);
       handle.removeEventListener('pointerup', end);
       handle.removeEventListener('pointercancel', end);
+      handle.removeEventListener('lostpointercapture', end);
     }
     handle.addEventListener('pointermove', move);
     handle.addEventListener('pointerup', end);
     handle.addEventListener('pointercancel', end);
+    handle.addEventListener('lostpointercapture', end);
   }
 
   const pct = (n: number): string => `${n * 100}%`;
