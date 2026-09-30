@@ -43,6 +43,11 @@ dirs = { workspace = true }
 # glob(7) patterns in ssh_config `Include` directives
 glob = "0.3"
 
+# Local serial ports (COM ports) for the serial terminal and monitor. Without the
+# default `libudev` feature Linux builds need no extra system library; port listing
+# there falls back to sysfs. Windows lists ports through SetupAPI either way.
+serialport = { version = "4.10", default-features = false }
+
 # Terminal emulator — vt100 screen model (PTY is provided by russh channels)
 vt100 = { package = "vt100-omnyssh", version = "0.15" }
 
