@@ -62,6 +62,10 @@
   {:else if name === 'close'}
     <line x1="6" y1="6" x2="18" y2="18" />
     <line x1="18" y1="6" x2="6" y2="18" />
+  {:else if name === 'chevronUp'}
+    <polyline points="6 15 12 9 18 15" />
+  {:else if name === 'chevronDown'}
+    <polyline points="6 9 12 15 18 9" />
   {:else if name === 'collapse'}
     <polyline points="13 7 8 12 13 17" />
     <polyline points="18 7 13 12 18 17" />

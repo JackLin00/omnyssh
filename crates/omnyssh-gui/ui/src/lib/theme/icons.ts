@@ -31,4 +31,6 @@ export type IconName =
   | 'settings'
   | 'telegram'
   | 'star'
-  | 'tunnel';
+  | 'tunnel'
+  | 'chevronUp'
+  | 'chevronDown';
