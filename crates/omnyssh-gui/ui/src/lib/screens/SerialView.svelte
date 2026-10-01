@@ -298,7 +298,7 @@
     </div>
     <Button variant="ghost" title="Clear the output" onclick={clear}>Clear</Button>
   </div>
-  <div class="relative min-h-0 flex-1 px-2 pt-2">
+  <div class="relative min-h-0 flex-1 px-2 pt-2" style="background: {$terminalColors.background}">
     <div bind:this={container} class="h-full w-full"></div>
     {#if searchOpen && searchAddon}
       <div class="absolute right-3 top-2 z-20 max-w-[calc(100%-1.5rem)]">

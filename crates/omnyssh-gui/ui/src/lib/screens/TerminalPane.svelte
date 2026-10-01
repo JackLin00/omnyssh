@@ -362,11 +362,15 @@
     onFocus();
   }
 
+  // The toolbar/title-bar backgrounds and text are tinted from the terminal scheme
+  // (--term-bg/--term-fg set by TerminalView), not the app's own surface tokens, so the
+  // pane's chrome reads as part of the terminal rather than the app shell.
   const toolBtn =
-    'grid h-6 w-6 place-items-center rounded bg-surface-inset text-muted transition ' +
+    'grid h-6 w-6 place-items-center rounded text-muted transition ' +
     'hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+  const toolBtnStyle = 'background: color-mix(in srgb, var(--term-fg) 8%, var(--term-bg));';
   const titleBtn =
-    'grid h-5 w-5 place-items-center rounded text-muted transition hover:bg-surface hover:text-fg ' +
+    'grid h-5 w-5 place-items-center rounded transition hover:bg-surface hover:text-fg ' +
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
 
   /** The action's current shortcut, formatted for a title, or empty when unbound. */
@@ -399,7 +403,8 @@
       <div
         bind:this={titleBar}
         data-titlebar
-        class="flex h-6 shrink-0 cursor-grab items-center gap-1.5 border-b border-default bg-surface-inset px-1.5 text-xs active:cursor-grabbing"
+        class="flex h-6 shrink-0 cursor-grab items-center gap-1.5 border-b px-1.5 text-xs active:cursor-grabbing"
+        style="background: color-mix(in srgb, var(--term-fg) 8%, var(--term-bg)); border-color: color-mix(in srgb, var(--term-fg) 15%, var(--term-bg)); color: color-mix(in srgb, var(--term-fg) 70%, var(--term-bg));"
         role="group"
         aria-label="Pane {hostName}"
         onpointerdown={(e) => {
@@ -410,7 +415,7 @@
         }}
       >
         <StatusDot status={sessionStatusDot[status]} size={7} />
-        <span class="min-w-0 flex-1 truncate text-muted" title={title || hostName}>
+        <span class="min-w-0 flex-1 truncate" title={title || hostName}>
           {title || hostName}
         </span>
         <button type="button" class={titleBtn} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
@@ -431,13 +436,13 @@
       bind:this={toolbar}
       class="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100"
     >
-      <button type="button" class={toolBtn} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
+      <button type="button" class={toolBtn} style={toolBtnStyle} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
         <Icon name="splitRight" size={14} />
       </button>
-      <button type="button" class={toolBtn} title="Split down{hint('splitDown')}" aria-label="Split down" onclick={() => onSplit('column')}>
+      <button type="button" class={toolBtn} style={toolBtnStyle} title="Split down{hint('splitDown')}" aria-label="Split down" onclick={() => onSplit('column')}>
         <Icon name="splitDown" size={14} />
       </button>
-      <button type="button" class={toolBtn} title="Close pane{hint('closePane')}" aria-label="Close pane" onclick={onClose}>
+      <button type="button" class={toolBtn} style={toolBtnStyle} title="Close pane{hint('closePane')}" aria-label="Close pane" onclick={onClose}>
         <Icon name="close" size={14} />
       </button>
     </div>

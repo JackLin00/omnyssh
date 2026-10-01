@@ -6,6 +6,7 @@
   // whole life, hidden when another entity is active.
   import { onDestroy, untrack } from 'svelte';
   import { closeSession } from '$lib/stores/navigation';
+  import { terminalColors } from '$lib/stores/terminalScheme';
   import { sessions, combineStatus, type Session, type SessionStatus } from '$lib/stores/sessions';
   import TerminalPane from './TerminalPane.svelte';
   import QuickCommandBar from './QuickCommandBar.svelte';
@@ -192,10 +193,14 @@
   const pct = (n: number): string => `${n * 100}%`;
 </script>
 
-<!-- bg-surface fills behind the macOS traffic lights (no seam). Text selection stays
-     disabled app-wide (app.css); the terminal is the one selectable surface, handled
-     by xterm's own selection (not CSS). -->
-<div class="absolute inset-0 overflow-hidden bg-surface {active ? '' : 'hidden'}">
+<!-- The chosen terminal colour scheme fills behind the macOS traffic lights (no seam),
+     so the margins, split gaps and pane title bars read as one surface with the
+     terminal. Text selection stays disabled app-wide (app.css); the terminal is the one
+     selectable surface, handled by xterm's own selection (not CSS). -->
+<div
+  class="absolute inset-0 overflow-hidden {active ? '' : 'hidden'}"
+  style="--term-bg: {$terminalColors.background}; --term-fg: {$terminalColors.foreground}; background: var(--term-bg);"
+>
   <!-- Inset via this wrapper, not the xterm host: padding on the element xterm mounts
        into makes FitAddon over-size, sliding the last row under the status bar. The top
        inset clears the macOS traffic-light strip; the bottom gap clears the footer. -->
@@ -252,7 +257,9 @@
         </div>
       {/if}
       </div>
-      <QuickCommandBar enabled={canSend} onSend={sendToFocused} />
+      <div class="bg-surface">
+        <QuickCommandBar enabled={canSend} onSend={sendToFocused} />
+      </div>
     </div>
   </div>
 </div>
