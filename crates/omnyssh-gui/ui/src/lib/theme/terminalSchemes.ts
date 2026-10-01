@@ -32,16 +32,20 @@ export interface TerminalScheme {
 // - catppuccin: Catppuccin Mocha.json, Catppuccin Latte.json
 // - tokyonight: TokyoNight Night.json, TokyoNight Day.json
 // - onehalf: One Half Dark.json, One Half Light.json
-// - github: GitHub Dark.json, GitHub Light Default.json (the repo has no plain
-//   "GitHub Light.json"; "GitHub Light Default" is the light counterpart GitHub itself
-//   publishes alongside "GitHub Dark" -- see the Dark/Dark Dimmed/Dark High Contrast and
-//   Light Default/Light High Contrast/Colorblind families in that directory)
+// - github: GitHub Dark Default.json, GitHub Light Default.json -- the "Default" pair is
+//   GitHub's current Primer palette (what github.com and its terminal themes ship today);
+//   the repo has no plain "GitHub Light.json" and the plain "GitHub Dark.json" there is an
+//   older, less saturated palette, not the one this scheme is meant to preview
 // - gruvbox: Gruvbox Dark.json, Gruvbox Light.json
 // - solarized: iTerm2 Solarized Dark.json, iTerm2 Solarized Light.json (the repo has no
 //   plain "Solarized Dark/Light.json"; these "iTerm2 Solarized" files carry Ethan
 //   Schoonover's original Solarized values)
 // - rosepine: Rose Pine.json, Rose Pine Dawn.json
-// - nord: Nord.json (dark only, as published)
+// - nord: Nord.json for background/foreground/the normal ANSI eight/most brights, but
+//   cursor, selectionBackground and brightBlack come from nordtheme/alacritty's own port
+//   instead (github.com/nordtheme/alacritty, src/nord.yaml, branch main): Nord.json's
+//   values for those three (#eceff4, #eceff4, #596377) are not Nord's own canonical nord4/
+//   nord3 tones, so the project's own port is the more authoritative source for them
 // - dracula: Dracula.json (dark only, as published)
 // Every file above already had cursorColor and selectionBackground, so no fallback
 // substitution was needed.
@@ -113,11 +117,11 @@ export const TERMINAL_SCHEMES: readonly TerminalScheme[] = [
     darkName: 'Dark',
     lightName: 'Light',
     dark: {
-      background: '#101216', foreground: '#8b949e', cursor: '#c9d1d9', selectionBackground: '#3b5070',
-      black: '#000000', red: '#f78166', green: '#56d364', yellow: '#e3b341',
-      blue: '#6ca4f8', magenta: '#db61a2', cyan: '#2b7489', white: '#ffffff',
-      brightBlack: '#4d4d4d', brightRed: '#f78166', brightGreen: '#56d364', brightYellow: '#e3b341',
-      brightBlue: '#6ca4f8', brightMagenta: '#db61a2', brightCyan: '#2b7489', brightWhite: '#ffffff'
+      background: '#0d1117', foreground: '#e6edf3', cursor: '#2f81f7', selectionBackground: '#e6edf3',
+      black: '#484f58', red: '#ff7b72', green: '#3fb950', yellow: '#d29922',
+      blue: '#58a6ff', magenta: '#bc8cff', cyan: '#39c5cf', white: '#b1bac4',
+      brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364', brightYellow: '#e3b341',
+      brightBlue: '#79c0ff', brightMagenta: '#d2a8ff', brightCyan: '#56d4dd', brightWhite: '#ffffff'
     },
     light: {
       background: '#ffffff', foreground: '#1f2328', cursor: '#0969da', selectionBackground: '#1f2328',
@@ -193,10 +197,10 @@ export const TERMINAL_SCHEMES: readonly TerminalScheme[] = [
     darkName: 'Nord',
     lightName: null,
     dark: {
-      background: '#2e3440', foreground: '#d8dee9', cursor: '#eceff4', selectionBackground: '#eceff4',
+      background: '#2e3440', foreground: '#d8dee9', cursor: '#d8dee9', selectionBackground: '#4c566a',
       black: '#3b4252', red: '#bf616a', green: '#a3be8c', yellow: '#ebcb8b',
       blue: '#81a1c1', magenta: '#b48ead', cyan: '#88c0d0', white: '#e5e9f0',
-      brightBlack: '#596377', brightRed: '#bf616a', brightGreen: '#a3be8c', brightYellow: '#ebcb8b',
+      brightBlack: '#4c566a', brightRed: '#bf616a', brightGreen: '#a3be8c', brightYellow: '#ebcb8b',
       brightBlue: '#81a1c1', brightMagenta: '#b48ead', brightCyan: '#8fbcbb', brightWhite: '#eceff4'
     },
     light: null

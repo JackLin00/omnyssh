@@ -108,3 +108,26 @@ test('picking Catppuccin in Settings repaints a live terminal, and the pick surv
     'true'
   );
 });
+
+test('Nord (dark-only) keeps its own dark background even under the light app theme', async ({
+  page
+}) => {
+  await boot(page);
+
+  // The same sidebar toggle e2e/terminal.spec.ts's theme test uses.
+  await page.getByTitle('Switch to light theme').click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const nord = page.getByRole('button', { name: 'Nord' });
+  await nord.click();
+  await expect(nord).toHaveAttribute('aria-pressed', 'true');
+
+  await page.getByRole('button', { name: 'Dashboard', exact: true }).click();
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+  // Nord has no light variant (resolveScheme's dark-only fallback), so even under the
+  // light app theme the terminal keeps Nord's own dark background, #2e3440.
+  await expect.poll(() => paintedBg(page)).toBe('rgb(46, 52, 64)');
+});

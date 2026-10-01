@@ -153,7 +153,10 @@
         convertEol: true,
         cursorBlink: opts.mode === 'terminal',
         disableStdin: opts.mode === 'monitor',
-        minimumContrastRatio: 4.5, // unreadable colour pairs a program prints are lifted to legible
+        // 3, not xterm's higher presets: it rescues truly unreadable pairs a program
+        // prints while leaving each scheme's own published colours alone -- 4.5 visibly
+        // shifted Solarized Light's and Gruvbox's accent colours off their real hues.
+        minimumContrastRatio: 3,
         allowProposedApi: true // the search addon's match highlights are decorations
       });
       fitAddon = new FitAddon();

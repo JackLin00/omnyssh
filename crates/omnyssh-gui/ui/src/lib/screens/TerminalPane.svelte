@@ -209,7 +209,10 @@
         fontSize: 13,
         cursorBlink: true,
         scrollback: 5000,
-        minimumContrastRatio: 4.5, // unreadable colour pairs a program prints are lifted to legible
+        // 3, not xterm's higher presets: it rescues truly unreadable pairs a program
+        // prints while leaving each scheme's own published colours alone -- 4.5 visibly
+        // shifted Solarized Light's and Gruvbox's accent colours off their real hues.
+        minimumContrastRatio: 3,
         allowProposedApi: true // the search addon's match highlights are decorations
       });
       fitAddon = new FitAddon();
@@ -364,13 +367,18 @@
 
   // The toolbar/title-bar backgrounds and text are tinted from the terminal scheme
   // (--term-bg/--term-fg set by TerminalView), not the app's own surface tokens, so the
-  // pane's chrome reads as part of the terminal rather than the app shell.
+  // pane's chrome reads as part of the terminal rather than the app shell -- including on
+  // a dark-only scheme (Nord, Dracula) while the app theme itself is light, where the
+  // app's own `text-muted`/`hover:bg-surface` tokens would be unreadable against it. The
+  // shared `.term-btn` class below (not Tailwind utilities) carries that colour, since it
+  // must hold regardless of inherited `color`. `color-mix` needs WebView2 (Chromium 111+)
+  // or WebKitGTK 2.40+; older engines simply keep the plain scheme background/foreground.
   const toolBtn =
-    'grid h-6 w-6 place-items-center rounded text-muted transition ' +
-    'hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+    'term-btn grid h-6 w-6 place-items-center rounded transition ' +
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
   const toolBtnStyle = 'background: color-mix(in srgb, var(--term-fg) 8%, var(--term-bg));';
   const titleBtn =
-    'grid h-5 w-5 place-items-center rounded transition hover:bg-surface hover:text-fg ' +
+    'term-btn grid h-5 w-5 place-items-center rounded transition ' +
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
 
   /** The action's current shortcut, formatted for a title, or empty when unbound. */
@@ -389,9 +397,10 @@
   onfocusin={focusIn}
 >
   <div
-    class="flex h-full w-full flex-col overflow-hidden rounded {framed && focused
-      ? 'ring-1 ring-focus'
-      : ''}"
+    class="flex h-full w-full flex-col overflow-hidden rounded"
+    style={framed && focused
+      ? 'box-shadow: 0 0 0 1px color-mix(in srgb, var(--term-fg) 50%, transparent);'
+      : ''}
   >
     {#if titled}
       <!-- Drag the free area to move the pane; the buttons act as buttons. A mousedown
@@ -404,7 +413,7 @@
         bind:this={titleBar}
         data-titlebar
         class="flex h-6 shrink-0 cursor-grab items-center gap-1.5 border-b px-1.5 text-xs active:cursor-grabbing"
-        style="background: color-mix(in srgb, var(--term-fg) 8%, var(--term-bg)); border-color: color-mix(in srgb, var(--term-fg) 15%, var(--term-bg)); color: color-mix(in srgb, var(--term-fg) 70%, var(--term-bg));"
+        style="background: color-mix(in srgb, var(--term-fg) 8%, var(--term-bg)); border-color: color-mix(in srgb, var(--term-fg) 15%, var(--term-bg));"
         role="group"
         aria-label="Pane {hostName}"
         onpointerdown={(e) => {
@@ -415,7 +424,11 @@
         }}
       >
         <StatusDot status={sessionStatusDot[status]} size={7} />
-        <span class="min-w-0 flex-1 truncate" title={title || hostName}>
+        <span
+          class="min-w-0 flex-1 truncate"
+          style="color: var(--term-fg);"
+          title={title || hostName}
+        >
           {title || hostName}
         </span>
         <button type="button" class={titleBtn} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
@@ -463,5 +476,17 @@
   .term-fade {
     -webkit-mask-image: linear-gradient(to bottom, transparent, black 2.25rem);
     mask-image: linear-gradient(to bottom, transparent, black 2.25rem);
+  }
+
+  /* The title-bar and hover-toolbar buttons' colour, keyed to --term-fg/--term-bg rather
+     than the app's `text-muted`/`hover:bg-surface` tokens, so they stay legible when a
+     dark-only scheme (Nord, Dracula) is shown under a light app theme. focus-visible
+     keeps the app's own ring (Tailwind classes on the buttons themselves). */
+  .term-btn {
+    color: color-mix(in srgb, var(--term-fg) 70%, var(--term-bg));
+  }
+  .term-btn:hover {
+    background: color-mix(in srgb, var(--term-fg) 15%, var(--term-bg));
+    color: var(--term-fg);
   }
 </style>

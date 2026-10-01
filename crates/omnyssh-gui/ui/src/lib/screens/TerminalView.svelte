@@ -196,7 +196,10 @@
 <!-- The chosen terminal colour scheme fills behind the macOS traffic lights (no seam),
      so the margins, split gaps and pane title bars read as one surface with the
      terminal. Text selection stays disabled app-wide (app.css); the terminal is the one
-     selectable surface, handled by xterm's own selection (not CSS). -->
+     selectable surface, handled by xterm's own selection (not CSS). The scheme chrome
+     below (here and in TerminalPane) leans on `color-mix`, which needs WebView2
+     (Chromium 111+) or WebKitGTK 2.40+; an older engine just keeps the plain scheme
+     background/foreground instead of the mixed tint. -->
 <div
   class="absolute inset-0 overflow-hidden {active ? '' : 'hidden'}"
   style="--term-bg: {$terminalColors.background}; --term-fg: {$terminalColors.foreground}; background: var(--term-bg);"
@@ -242,7 +245,10 @@
             : `width: ${pct(d.rect.w)}`};"
           onpointerdown={(e) => startDrag(e, d)}
         >
-          <div class={d.dir === 'row' ? 'h-full border-l border-default' : 'w-full border-t border-default'}></div>
+          <div
+            class={d.dir === 'row' ? 'h-full border-l' : 'w-full border-t'}
+            style="border-color: color-mix(in srgb, var(--term-fg) 20%, var(--term-bg));"
+          ></div>
         </div>
       {/each}
       {#if preview}

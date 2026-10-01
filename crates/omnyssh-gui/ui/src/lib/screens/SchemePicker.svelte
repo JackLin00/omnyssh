@@ -32,15 +32,17 @@
         ? 'ring-2 ring-focus'
         : ''}"
       aria-pressed={$terminalScheme === s.id}
+      aria-label="{s.name}, {variantLabel(s, $theme)}"
       onclick={() => terminalScheme.set(s.id)}
     >
-      <div class="mb-2 flex items-baseline justify-between gap-2">
+      <div class="mb-2 flex items-baseline justify-between gap-2" aria-hidden="true">
         <span class="truncate text-sm font-medium">{s.name}</span>
         <span class="shrink-0 text-xs text-muted">{variantLabel(s, $theme)}</span>
       </div>
       <div
         class="mb-2 space-y-0.5 rounded p-2 font-mono text-[11px] leading-tight"
         style="background: {colors.background}; color: {colors.foreground};"
+        aria-hidden="true"
       >
         <div>
           <span style="color: {colors.green}">user@host</span>:<span style="color: {colors.blue}"
@@ -54,7 +56,7 @@
         <div style="color: {colors.yellow}">warning: deprecated flag</div>
         <div style="color: {colors.red}">error: connection refused</div>
       </div>
-      <div class="grid grid-cols-8 gap-0.5">
+      <div class="grid grid-cols-8 gap-0.5" aria-hidden="true">
         {#each ANSI as key (key)}
           <div class="h-3 w-full rounded-sm" style="background: {colors[key] as string};"></div>
         {/each}
