@@ -13,8 +13,7 @@
   import type { SearchAddon } from '@xterm/addon-search';
   import { Channel } from '@tauri-apps/api/core';
   import { Icon, StatusDot } from '$lib/theme';
-  import { theme } from '$lib/stores/theme';
-  import { xtermTheme } from '$lib/theme/terminalTheme';
+  import { terminalColors } from '$lib/stores/terminalScheme';
   import { sessionStatusDot, type SessionStatus } from '$lib/stores/sessions';
   import { registerPaneExit } from '$lib/stores/paneExits';
   import { terminalDidExit } from '$lib/ipc/router';
@@ -210,6 +209,7 @@
         fontSize: 13,
         cursorBlink: true,
         scrollback: 5000,
+        minimumContrastRatio: 4.5, // unreadable colour pairs a program prints are lifted to legible
         allowProposedApi: true // the search addon's match highlights are decorations
       });
       fitAddon = new FitAddon();
@@ -224,10 +224,10 @@
       term.onTitleChange((t) => (title = t));
 
       // The #1 theme-regression guard (§5.1): push the matching xterm theme to this
-      // terminal — including already-open ones — whenever the store flips. Its
-      // synchronous first call (pre-paint) also sets the initial theme.
-      themeUnsub = theme.subscribe((t) => {
-        if (term) term.options.theme = xtermTheme(t);
+      // terminal — including already-open ones — whenever the chosen scheme or the app
+      // theme flips. Its synchronous first call (pre-paint) also sets the initial theme.
+      themeUnsub = terminalColors.subscribe((c) => {
+        if (term) term.options.theme = c;
       });
 
       // Route raw output into xterm. The channel is typed `number[]`, but the raw path

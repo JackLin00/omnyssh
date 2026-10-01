@@ -12,8 +12,7 @@
   import type { SearchAddon } from '@xterm/addon-search';
   import { Channel } from '@tauri-apps/api/core';
   import { Button } from '$lib/theme';
-  import { theme } from '$lib/stores/theme';
-  import { xtermTheme } from '$lib/theme/terminalTheme';
+  import { terminalColors } from '$lib/stores/terminalScheme';
   import { sessions, type Session } from '$lib/stores/sessions';
   import { lastError } from '$lib/stores/notifications';
   import { dialogs } from '$lib/stores/dialogs';
@@ -154,6 +153,7 @@
         convertEol: true,
         cursorBlink: opts.mode === 'terminal',
         disableStdin: opts.mode === 'monitor',
+        minimumContrastRatio: 4.5, // unreadable colour pairs a program prints are lifted to legible
         allowProposedApi: true // the search addon's match highlights are decorations
       });
       fitAddon = new FitAddon();
@@ -193,8 +193,8 @@
         }
         return false;
       });
-      themeUnsub = theme.subscribe((t) => {
-        if (term) term.options.theme = xtermTheme(t);
+      themeUnsub = terminalColors.subscribe((c) => {
+        if (term) term.options.theme = c;
       });
 
       // The raw path delivers an ArrayBuffer despite the `number[]` type (see TerminalView).

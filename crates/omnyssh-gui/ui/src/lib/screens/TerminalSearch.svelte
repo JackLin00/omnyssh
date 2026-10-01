@@ -7,8 +7,9 @@
   import { get } from 'svelte/store';
   import type { ISearchOptions, SearchAddon } from '@xterm/addon-search';
   import { Icon } from '$lib/theme';
-  import { theme } from '$lib/stores/theme';
+  import { terminalColors } from '$lib/stores/terminalScheme';
   import { searchDecorations } from '$lib/theme/terminalTheme';
+  import { isDarkBackground } from '$lib/theme/terminalSchemes';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { matchTerminalAction } from './terminalShortcuts';
   import { formatResults, isValidRegex } from './terminalSearch';
@@ -34,12 +35,12 @@
     // Skip the subscription's own initial, synchronous call — nothing has been searched
     // yet, so there is nothing to re-search.
     let firstTheme = true;
-    const themeOff = theme.subscribe(() => {
+    const themeOff = terminalColors.subscribe(() => {
       if (firstTheme) {
         firstTheme = false;
         return;
       }
-      // The decorations baked into the last search are in the old theme's colours;
+      // The decorations baked into the last search are in the old scheme's colours;
       // re-run it so the highlights match the new one.
       if (query !== '' && !invalid) {
         addon.clearDecorations();
@@ -54,7 +55,13 @@
   });
 
   function options(incremental: boolean): ISearchOptions {
-    return { caseSensitive, regex, incremental, decorations: searchDecorations(get(theme)) };
+    const bg = get(terminalColors).background as string;
+    return {
+      caseSensitive,
+      regex,
+      incremental,
+      decorations: searchDecorations(isDarkBackground(bg) ? 'dark' : 'light')
+    };
   }
 
   function find(forward: boolean, incremental = false): void {
