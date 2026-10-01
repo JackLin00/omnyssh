@@ -6,7 +6,18 @@
 // key. Matching turns the event into the same string and compares.
 import type { KeyPress } from './terminalInput';
 
-export type TerminalAction = 'copy' | 'paste' | 'splitRight' | 'splitDown' | 'closePane' | 'find';
+/** The command bar's first nine buttons, each with its own chord. */
+export const QUICK_SLOTS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+export type QuickCommandAction = `quickCommand${(typeof QUICK_SLOTS)[number]}`;
+
+export type TerminalAction =
+  | 'copy'
+  | 'paste'
+  | 'splitRight'
+  | 'splitDown'
+  | 'closePane'
+  | 'find'
+  | QuickCommandAction;
 export type Chord = string;
 /** The chord bound to each action; null leaves the keys to the shell. */
 export type Bindings = Record<TerminalAction, Chord | null>;
@@ -18,21 +29,32 @@ export const TERMINAL_ACTIONS: readonly { action: TerminalAction; label: string 
   { action: 'splitRight', label: 'Split right' },
   { action: 'splitDown', label: 'Split down' },
   { action: 'closePane', label: 'Close pane' },
-  { action: 'find', label: 'Find' }
+  { action: 'find', label: 'Find' },
+  ...QUICK_SLOTS.map((n) => ({ action: `quickCommand${n}` as QuickCommandAction, label: `Quick command ${n}` }))
 ];
 
 /** Windows Terminal's chords. macOS copies and pastes with Cmd+C / Cmd+V through the
  *  Edit menu, so those two start unbound there. Find is Cmd+F on macOS, as in its own
  *  apps. */
 export function defaultBindings(mac: boolean): Bindings {
-  return {
+  const bindings: Bindings = {
     copy: mac ? null : 'Ctrl+Shift+C',
     paste: mac ? null : 'Ctrl+Shift+V',
     splitRight: 'Alt+Shift+Equal',
     splitDown: 'Alt+Shift+Minus',
     closePane: 'Ctrl+Shift+W',
     find: mac ? 'Meta+F' : 'Ctrl+Shift+F'
-  };
+  } as Bindings;
+  for (const n of QUICK_SLOTS) {
+    bindings[`quickCommand${n}` as QuickCommandAction] = `Alt+Digit${n}`;
+  }
+  return bindings;
+}
+
+/** The command bar slot an action fires (1–9), or null for any other action. */
+export function quickSlot(action: TerminalAction): number | null {
+  const m = /^quickCommand([1-9])$/.exec(action);
+  return m ? Number(m[1]) : null;
 }
 
 export interface ParsedChord {

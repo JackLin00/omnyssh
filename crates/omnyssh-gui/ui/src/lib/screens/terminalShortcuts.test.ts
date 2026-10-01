@@ -6,6 +6,7 @@ import {
   formatChord,
   matchTerminalAction,
   parseChord,
+  quickSlot,
   validateChord,
   type Bindings
 } from './terminalShortcuts';
@@ -178,5 +179,17 @@ describe('validateChord', () => {
     // Shift alongside Ctrl+Alt is no longer the AltGr shape, and Ctrl+Alt can never be
     // the bare-Ctrl-letter shape (that one requires no Alt).
     expect(validateChord('closePane', 'Ctrl+Alt+Shift+Q', defaults)).toEqual({ ok: true, warning: null });
+  });
+});
+
+describe('quick command slots', () => {
+  it('bind Alt+1…9 by default and name their slot', () => {
+    expect(defaults.quickCommand1).toBe('Alt+Digit1');
+    expect(defaults.quickCommand9).toBe('Alt+Digit9');
+    expect(
+      matchTerminalAction(press({ ctrlKey: false, shiftKey: false, altKey: true, key: '3', code: 'Digit3' }), defaults)
+    ).toBe('quickCommand3');
+    expect(quickSlot('quickCommand7')).toBe(7);
+    expect(quickSlot('copy')).toBeNull();
   });
 });
