@@ -37,11 +37,17 @@
   let focused = $state<PaneId>(1);
   let statuses = $state<Record<PaneId, SessionStatus>>({});
   let area: HTMLDivElement;
-  let paneRefs = $state<Record<PaneId, ReturnType<typeof TerminalPane> | undefined>>({});
+  // Raw: component instances aren't plain data, and nothing reads this reactively —
+  // only the imperative calls below ever touch it.
+  let paneRefs = $state.raw<Record<PaneId, ReturnType<typeof TerminalPane> | undefined>>({});
   const arranged = $derived(arrange(layout));
 
   function sendToFocused(bytes: Uint8Array): void {
-    paneRefs[focused]?.sendBytes(bytes);
+    const pane = paneRefs[focused];
+    pane?.sendBytes(bytes);
+    // A bar button leaves DOM focus on itself; give the keyboard back to the pane it
+    // just sent to, the same place a click or Tab into the terminal would.
+    pane?.focusTerminal();
   }
   const canSend = $derived(statuses[focused] === 'connected');
 

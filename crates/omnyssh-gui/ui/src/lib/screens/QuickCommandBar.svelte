@@ -15,8 +15,10 @@
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import {
     currentGroup,
+    loadQuickCommands,
     quickBarCollapsed,
     quickGroups,
+    quickLoadError,
     saveQuickGroups,
     selectedGroup
   } from '$lib/stores/quickCommands';
@@ -58,6 +60,17 @@
     if (bytes && bytes.length > 0) onSend(bytes);
   }
 
+  /** Keep the mousedown from moving DOM focus onto the button: a click sends the
+   *  command and the session should keep (or get back) the keyboard, not the button. */
+  function keepFocus(e: MouseEvent): void {
+    if (!editing) e.preventDefault();
+  }
+
+  const TRUNCATE_LEN = 80;
+  function truncate(message: string): string {
+    return message.length > TRUNCATE_LEN ? `${message.slice(0, TRUNCATE_LEN)}…` : message;
+  }
+
   async function persist(next: typeof $quickGroups): Promise<void> {
     await saveQuickGroups(next);
   }
@@ -85,6 +98,18 @@
   <div class="flex shrink-0 justify-end border-t border-default px-2 py-0.5">
     <button type="button" class={iconBtn} title="Show quick commands" aria-label="Show quick commands" onclick={() => quickBarCollapsed.set(false)}>
       <Icon name="chevronUp" size={14} />
+    </button>
+  </div>
+{:else if $quickLoadError}
+  <!-- A file that failed to load must not be offered for editing: that would save a
+       blank or partial list over whatever is actually on disk. -->
+  <div class="flex shrink-0 items-center gap-2 border-t border-default px-2 py-1.5 text-xs" role="toolbar" aria-label="Quick commands">
+    <span class="min-w-0 flex-1 truncate text-status-crit" title={$quickLoadError}>
+      quick_commands.toml could not be read: {truncate($quickLoadError)}
+    </span>
+    <button type="button" class={btn} onclick={() => loadQuickCommands()}>Retry</button>
+    <button type="button" class={iconBtn} title="Hide quick commands" aria-label="Hide quick commands" onclick={() => quickBarCollapsed.set(true)}>
+      <Icon name="chevronDown" size={14} />
     </button>
   </div>
 {:else}
@@ -126,6 +151,7 @@
               class={btn}
               disabled={!enabled && !editing}
               title="{cmd.kind === 'hex' ? cmd.payload : cmd.payload || '(ending only)'}{hint(i)}"
+              onmousedown={keepFocus}
               onclick={(e) => (editing ? (dialog = { kind: 'editCommand', index: i, command: cmd }) : run(cmd, e))}
             >
               {cmd.label}
@@ -204,6 +230,7 @@
           onclick={async () => {
             try {
               await persist(deleteGroup($quickGroups, name));
+              if ($selectedGroup === name) selectedGroup.set('');
             } catch (e) {
               lastError.set(e instanceof Error ? e.message : String(e));
             }

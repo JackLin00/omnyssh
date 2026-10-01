@@ -35,7 +35,8 @@ export const TERMINAL_ACTIONS: readonly { action: TerminalAction; label: string 
 
 /** Windows Terminal's chords. macOS copies and pastes with Cmd+C / Cmd+V through the
  *  Edit menu, so those two start unbound there. Find is Cmd+F on macOS, as in its own
- *  apps. */
+ *  apps. The quick command slots default to Cmd+1…9 there too: Option+digit types a
+ *  character on many Mac keyboard layouts, so Alt+digit would not reach them. */
 export function defaultBindings(mac: boolean): Bindings {
   const bindings: Bindings = {
     copy: mac ? null : 'Ctrl+Shift+C',
@@ -46,7 +47,7 @@ export function defaultBindings(mac: boolean): Bindings {
     find: mac ? 'Meta+F' : 'Ctrl+Shift+F'
   } as Bindings;
   for (const n of QUICK_SLOTS) {
-    bindings[`quickCommand${n}` as QuickCommandAction] = `Alt+Digit${n}`;
+    bindings[`quickCommand${n}` as QuickCommandAction] = `${mac ? 'Meta' : 'Alt'}+Digit${n}`;
   }
   return bindings;
 }

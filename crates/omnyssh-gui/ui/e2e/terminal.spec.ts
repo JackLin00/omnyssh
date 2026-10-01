@@ -11,9 +11,13 @@ const HOSTS = [
   { name: 'db-1', hostname: 'db-1.example.com', user: 'root', port: 22, tags: [], source: 'manual', hasKey: false, localForwards: [], tunnelAutostart: false, forwardAgent: false }
 ];
 
-async function boot(page: Page, quickGroups: unknown[] = []): Promise<void> {
+async function boot(
+  page: Page,
+  quickGroups: unknown[] = [],
+  holdConnect = false
+): Promise<void> {
   await page.addInitScript(
-    ({ hosts, quickGroups }) => {
+    ({ hosts, quickGroups, holdConnect }) => {
       let cbid = 0;
       let groups = quickGroups;
       const win = window as unknown as Record<string, unknown>;
@@ -23,6 +27,12 @@ async function boot(page: Page, quickGroups: unknown[] = []): Promise<void> {
       // Backend session id -> its output channel id, so terminal_write can echo.
       const sessionChannel: Record<number, number> = {};
       let nextSession = 0;
+      // Held back with `holdConnect`, so a test can keep a pane "connecting" until it
+      // calls `__releaseConnect`.
+      const pendingPrompts: number[] = [];
+      (win as { __releaseConnect?: () => void }).__releaseConnect = () => {
+        for (const chId of pendingPrompts.splice(0)) sendToChannel(chId, 'omnyssh-ready> ');
+      };
 
       function sendToChannel(chId: number, text: string): void {
         const cb = win[`__cb${chId}`] as ((m: unknown) => void) | undefined;
@@ -63,8 +73,11 @@ async function boot(page: Page, quickGroups: unknown[] = []): Promise<void> {
               const chId = (args.onOutput as { id: number }).id;
               const sid = ++nextSession;
               sessionChannel[sid] = chId;
-              // A shell prompt proves the streamed output renders + flips status to connected.
-              setTimeout(() => sendToChannel(chId, 'omnyssh-ready> '), 0);
+              // A shell prompt proves the streamed output renders + flips status to
+              // connected; held back instead when a test wants the pane to stay
+              // "connecting" until it releases it.
+              if (holdConnect) pendingPrompts.push(chId);
+              else setTimeout(() => sendToChannel(chId, 'omnyssh-ready> '), 0);
               return Promise.resolve(sid);
             }
             case 'terminal_write': {
@@ -107,7 +120,7 @@ async function boot(page: Page, quickGroups: unknown[] = []): Promise<void> {
         }
       };
     },
-    { hosts: HOSTS, quickGroups }
+    { hosts: HOSTS, quickGroups, holdConnect }
   );
 
   await page.goto('/');
@@ -392,7 +405,20 @@ test.describe('quick command bar', () => {
     }
   ];
 
-  test('click, Shift+click, hex and Alt+1 send the right bytes; editing adds a command; collapsing hides the bar', async ({
+  test('bar buttons are disabled while the pane is still connecting', async ({ page }) => {
+    await boot(page, QUICK_GROUPS, true); // holdConnect: stays "connecting" until released
+    await page.getByTitle('sh on web-1').click();
+
+    const hiButton = page.getByRole('button', { name: 'hi', exact: true });
+    await expect(hiButton).toBeVisible();
+    await expect(hiButton).toBeDisabled();
+
+    await page.evaluate(() => (window as unknown as { __releaseConnect: () => void }).__releaseConnect());
+    await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+    await expect(hiButton).toBeEnabled();
+  });
+
+  test('click, Shift+click, hex and Alt+1 send the right bytes, and a click leaves the keyboard with the terminal', async ({
     page
   }) => {
     await boot(page, QUICK_GROUPS);
@@ -402,27 +428,58 @@ test.describe('quick command bar', () => {
     const hiButton = page.getByRole('button', { name: 'hi', exact: true });
     await expect(hiButton).toBeVisible();
 
-    // A click sends the payload plus its ending.
+    // A click sends the payload plus its ending, and gives the keyboard back to the
+    // terminal rather than leaving it on the button: Alt+1 right after, with no
+    // explicit focus, still reaches the session.
     await hiButton.click();
     await expect.poll(() => writes(page)).toEqual([[104, 105, 13]]);
+    await page.keyboard.press('Alt+1');
+    await expect.poll(() => writes(page)).toEqual([[104, 105, 13], [104, 105, 13]]);
 
-    // Shift+click leaves a text command's ending off.
+    // Shift+click leaves a text command's ending off, and also returns the keyboard to
+    // the terminal: pressing Enter now sends just its CR, not the whole command again
+    // (which is what would happen if focus were stuck on the button).
     await hiButton.click({ modifiers: ['Shift'] });
-    await expect.poll(() => writes(page)).toEqual([[104, 105, 13], [104, 105]]);
+    await expect.poll(() => writes(page)).toEqual([[104, 105, 13], [104, 105, 13], [104, 105]]);
+    await page.keyboard.press('Enter');
+    await expect.poll(() => writes(page)).toEqual([
+      [104, 105, 13],
+      [104, 105, 13],
+      [104, 105],
+      [13]
+    ]);
 
     // A hex command sends its bytes.
     await page.getByRole('button', { name: 'bytes', exact: true }).click();
-    await expect.poll(() => writes(page)).toEqual([[104, 105, 13], [104, 105], [65, 66]]);
-
-    // Alt+1 fires the first command at the focused pane.
-    await page.locator('.xterm-helper-textarea').focus();
-    await page.keyboard.press('Alt+1');
     await expect.poll(() => writes(page)).toEqual([
       [104, 105, 13],
+      [104, 105, 13],
       [104, 105],
-      [65, 66],
-      [104, 105, 13]
+      [13],
+      [65, 66]
     ]);
+  });
+
+  test('Alt+5, unbound to any command, reaches the shell instead of being swallowed', async ({
+    page
+  }) => {
+    await boot(page, QUICK_GROUPS); // only 2 commands: slot 5 is empty
+    await page.getByTitle('sh on web-1').click();
+    await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+    await page.locator('.xterm-helper-textarea').focus();
+    await page.keyboard.press('Alt+5');
+    // xterm's own Alt handling: ESC followed by the character.
+    await expect.poll(() => writes(page)).toEqual([[27, 53]]);
+  });
+
+  test('editing adds a command; collapsing hides the bar', async ({ page }) => {
+    await boot(page, QUICK_GROUPS);
+    await page.getByTitle('sh on web-1').click();
+    await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+    const hiButton = page.getByRole('button', { name: 'hi', exact: true });
+    await expect(hiButton).toBeVisible();
 
     // Edit mode: add a command, which is saved through the backend and shows up as a
     // new button.
@@ -582,4 +639,82 @@ test.describe('on macOS', () => {
     await page.keyboard.press('Control+Shift+C');
     expect(await copied(page)).toEqual([]);
   });
+});
+
+// Minimal stub for an ad-hoc serial tab (sidebar "Serial" spawner → `SerialConnect`):
+// a port to auto-fill the dialog, `serial_open` capturing the output/exit channels
+// (unused here — the device stays silent), and `serial_write` recording what the bar
+// sends. No hosts: the dashboard isn't this test's concern.
+async function bootSerial(page: Page, quickGroups: unknown[] = []): Promise<void> {
+  await page.addInitScript(
+    ({ quickGroups }) => {
+      let cbid = 0;
+      let groups = quickGroups;
+      const win = window as unknown as Record<string, unknown>;
+
+      (win as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
+        invoke: (cmd: string, args: Record<string, unknown>) => {
+          switch (cmd) {
+            case 'list_hosts':
+            case 'list_serial_devices':
+              return Promise.resolve([]);
+            case 'list_quick_commands':
+              return Promise.resolve(groups);
+            case 'save_quick_commands':
+              groups = args.groups as unknown[];
+              return Promise.resolve(null);
+            case 'reload_hosts':
+              return Promise.resolve(null);
+            case 'serial_list_ports':
+              return Promise.resolve([{ name: 'COM3', description: null }]);
+            case 'serial_open':
+              return Promise.resolve(1);
+            case 'serial_write': {
+              const { data } = args as { data: number[] };
+              ((win.__serialWrites ??= []) as number[][]).push(data);
+              return Promise.resolve(null);
+            }
+            case 'serial_close':
+              return Promise.resolve(null);
+            case 'plugin:event|listen':
+              return Promise.resolve(++cbid);
+            default:
+              return Promise.resolve(null);
+          }
+        },
+        transformCallback: (cb: unknown) => {
+          const id = ++cbid;
+          win[`__cb${id}`] = cb;
+          return id;
+        },
+        unregisterCallback: (id: number) => {
+          delete win[`__cb${id}`];
+        }
+      };
+    },
+    { quickGroups }
+  );
+
+  await page.goto('/');
+}
+
+const serialWrites = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __serialWrites?: number[][] }).__serialWrites ?? []);
+
+test('a serial tab in monitor mode sends a quick command to the port', async ({ page }) => {
+  await bootSerial(page, [
+    { name: 'Ops', commands: [{ label: 'ping', kind: 'hex', payload: '55 AA', ending: 'none' }] }
+  ]);
+
+  await page.getByRole('button', { name: 'Serial', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  // The port auto-fills from `serial_list_ports`; Monitor is the default mode.
+  await page.getByRole('button', { name: 'Open', exact: true }).click();
+
+  await expect(page.locator('.xterm')).toBeVisible();
+  const pingButton = page.getByRole('button', { name: 'ping', exact: true });
+  await expect(pingButton).toBeEnabled();
+
+  await pingButton.click();
+  await expect.poll(() => serialWrites(page)).toEqual([[0x55, 0xaa]]);
 });

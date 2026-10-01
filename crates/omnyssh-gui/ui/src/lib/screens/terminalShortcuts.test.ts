@@ -192,4 +192,13 @@ describe('quick command slots', () => {
     expect(quickSlot('quickCommand7')).toBe(7);
     expect(quickSlot('copy')).toBeNull();
   });
+
+  it('bind Cmd+1…9 by default on macOS, since Option+digit types a character there', () => {
+    const mac = defaultBindings(true);
+    expect(mac.quickCommand1).toBe('Meta+Digit1');
+    expect(mac.quickCommand9).toBe('Meta+Digit9');
+    expect(
+      matchTerminalAction(press({ ctrlKey: false, shiftKey: false, metaKey: true, key: '5', code: 'Digit5' }), mac)
+    ).toBe('quickCommand5');
+  });
 });

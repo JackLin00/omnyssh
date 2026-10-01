@@ -17,12 +17,7 @@ export function parseHex(s: string): Uint8Array | null {
 }
 
 function concat(a: Uint8Array, b: number[]): Uint8Array {
-  // Build with `a`'s own constructor, not the bare global: under a jsdom test
-  // environment, `TextEncoder` returns a different `Uint8Array` realm than
-  // the one `new Uint8Array(...)` would construct, and a mismatch there
-  // makes `toEqual` fail despite identical bytes.
-  const Ctor = a.constructor as Uint8ArrayConstructor;
-  const out = new Ctor(a.length + b.length);
+  const out = new Uint8Array(a.length + b.length);
   out.set(a);
   out.set(b, a.length);
   return out;

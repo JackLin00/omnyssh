@@ -112,6 +112,12 @@
     sendInput(bytes);
   }
 
+  /** Give this pane's xterm the keyboard back (after a command bar button, which would
+   *  otherwise leave focus parked on the button itself). */
+  export function focusTerminal(): void {
+    term?.focus();
+  }
+
   function runAction(action: TerminalAction): void {
     if (!term) return;
     const slot = quickSlot(action);
@@ -261,6 +267,10 @@
         // find bar, is harmless).
         const action = matchTerminalAction(e, get(terminalShortcuts));
         if (action) {
+          // An empty command bar slot takes no key of its own: let Alt+N reach the
+          // shell (xterm's own Alt handling) rather than swallowing it for nothing.
+          const slot = quickSlot(action);
+          if (slot !== null && !quickCommandBytes(slot)?.length) return true;
           e.preventDefault();
           if (e.type === 'keydown' && (action === 'copy' || action === 'find' || !e.repeat)) {
             runAction(action);

@@ -2,7 +2,6 @@ import { derived, get, writable, type Writable } from 'svelte/store';
 import type { QuickGroupDto } from '$lib/bindings';
 import { listQuickCommands, saveQuickCommands } from '$lib/ipc/commands';
 import { commandBytes } from '$lib/screens/quickCommand';
-import { lastError } from './notifications';
 
 // The quick command groups (quick_commands.toml) behind the terminal and serial tabs'
 // command bar, plus two UI prefs: the group the bar shows and whether it is collapsed.
@@ -19,6 +18,22 @@ function persisted<T>(localKey: string, storeKey: string, fallback: T, parse: (r
   }
   const store = writable<T>(initial);
   let interacted = false;
+  // Two `set` calls in the same tick must reach the backend in order, like
+  // `terminalShortcuts`'s store does: a bare `void persistStore(next)` per call races
+  // the dynamic `import()` and can let an earlier write land after a later one.
+  let persistChain: Promise<void> = Promise.resolve();
+  function schedulePersist(value: T): void {
+    persistChain = persistChain.then(async () => {
+      try {
+        const { load } = await import('@tauri-apps/plugin-store');
+        const s = await load(STORE_FILE);
+        await s.set(storeKey, value);
+        await s.save();
+      } catch {
+        // Not under Tauri: the mirror suffices.
+      }
+    });
+  }
   function apply(value: T, user: boolean): void {
     store.set(value);
     try {
@@ -28,16 +43,7 @@ function persisted<T>(localKey: string, storeKey: string, fallback: T, parse: (r
     }
     if (user) {
       interacted = true;
-      void (async () => {
-        try {
-          const { load } = await import('@tauri-apps/plugin-store');
-          const s = await load(STORE_FILE);
-          await s.set(storeKey, value);
-          await s.save();
-        } catch {
-          // Not under Tauri: the mirror suffices.
-        }
-      })();
+      schedulePersist(value);
     }
   }
   return {
@@ -48,7 +54,11 @@ function persisted<T>(localKey: string, storeKey: string, fallback: T, parse: (r
         const { load } = await import('@tauri-apps/plugin-store');
         const s = await load(STORE_FILE);
         const saved = await s.get<T>(storeKey);
-        if (!interacted && saved !== undefined && saved !== null) apply(saved, false);
+        // A shape that doesn't match the fallback (a stale or corrupted store write)
+        // is not applied — the mirrored value stays rather than wedging the UI prefs.
+        if (!interacted && saved !== undefined && saved !== null && typeof saved === typeof fallback) {
+          apply(saved, false);
+        }
       } catch {
         // Store unreachable: keep the mirrored value.
       }
@@ -78,12 +88,18 @@ export const currentGroup = derived([quickGroups, selectedGroup], ([groups, name
   groups.find((g) => g.name === name) ?? groups[0] ?? null
 );
 
+/** Set when the last load failed (a malformed `quick_commands.toml`), cleared on the
+ *  next successful one. The bar reads this to refuse to offer editing — saving over a
+ *  file it couldn't parse would lose whatever is actually on disk. */
+export const quickLoadError: Writable<string | null> = writable(null);
+
 export async function loadQuickCommands(): Promise<void> {
   try {
     const groups = await listQuickCommands();
     quickGroups.set(Array.isArray(groups) ? groups : []);
+    quickLoadError.set(null);
   } catch (e) {
-    lastError.set(e instanceof Error ? e.message : String(e));
+    quickLoadError.set(e instanceof Error ? e.message : String(e));
   }
 }
 

@@ -172,6 +172,8 @@
       term.attachCustomKeyEventHandler((e) => {
         const action = matchTerminalAction(e, get(terminalShortcuts));
         const slot = action ? quickSlot(action) : null;
+        // An empty command bar slot takes no key of its own: let it reach the device.
+        if (slot !== null && !quickCommandBytes(slot)?.length) return true;
         const handled =
           action === 'copy' ||
           action === 'find' ||
@@ -271,7 +273,7 @@
 </script>
 
 <div
-  class="absolute inset-0 flex-col overflow-hidden bg-surface pt-[var(--titlebar-h)] {active
+  class="absolute inset-0 flex-col overflow-hidden bg-surface pb-4 pt-[var(--titlebar-h)] {active
     ? 'flex'
     : 'hidden'}"
 >
@@ -296,7 +298,7 @@
     </div>
     <Button variant="ghost" title="Clear the output" onclick={clear}>Clear</Button>
   </div>
-  <div class="relative min-h-0 flex-1 px-2 pb-4 pt-2">
+  <div class="relative min-h-0 flex-1 px-2 pt-2">
     <div bind:this={container} class="h-full w-full"></div>
     {#if searchOpen && searchAddon}
       <div class="absolute right-3 top-2 z-20 max-w-[calc(100%-1.5rem)]">
@@ -304,5 +306,13 @@
       </div>
     {/if}
   </div>
-  <QuickCommandBar enabled={canSend} onSend={(b) => sendInput(b)} />
+  <QuickCommandBar
+    enabled={canSend}
+    onSend={(b) => {
+      sendInput(b);
+      // A bar button leaves DOM focus on itself; give the keyboard back to the
+      // terminal, the same place a click into it would.
+      term?.focus();
+    }}
+  />
 </div>

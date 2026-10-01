@@ -64,7 +64,10 @@ describe('quick commands store', () => {
   it('gives the bytes of the current group\'s Nth command', async () => {
     const s = await fresh();
     await s.loadQuickCommands();
-    expect(s.quickCommandBytes(1)).toEqual(new TextEncoder().encode('ls\r'));
+    // Compared as plain arrays: under jsdom, `TextEncoder` and a literal `new
+    // Uint8Array(...)` construct in different realms, so `toEqual` on the typed
+    // arrays themselves can fail despite identical bytes.
+    expect(Array.from(s.quickCommandBytes(1)!)).toEqual([0x6c, 0x73, 0x0d]);
     expect(s.quickCommandBytes(2)).toBeNull();
   });
 
@@ -73,5 +76,15 @@ describe('quick commands store', () => {
     s.quickBarCollapsed.set(true);
     s = await fresh();
     expect(get(s.quickBarCollapsed)).toBe(true);
+  });
+
+  it('sets quickLoadError on a failed load and clears it on the next successful one', async () => {
+    list.mockRejectedValueOnce(new Error('Failed to parse quick_commands.toml'));
+    const s = await fresh();
+    await s.loadQuickCommands();
+    expect(get(s.quickLoadError)).toBe('Failed to parse quick_commands.toml');
+
+    await s.loadQuickCommands();
+    expect(get(s.quickLoadError)).toBeNull();
   });
 });
