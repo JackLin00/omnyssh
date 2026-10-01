@@ -7,6 +7,7 @@
   import type { UpdateConfigDto } from '$lib/bindings';
   import { Surface, Icon } from '$lib/theme';
   import ShortcutSettings from './ShortcutSettings.svelte';
+  import SchemePicker from './SchemePicker.svelte';
   import { theme } from '$lib/stores/theme';
   import { streamerMode } from '$lib/stores/streamer';
   import { copyOnSelect, rightClickPaste } from '$lib/stores/terminalPrefs';
@@ -159,6 +160,12 @@
           () => rightClickPaste.toggle()
         )}
       </div>
+    </Surface>
+
+    <!-- Terminal colors -->
+    <Surface class="p-5">
+      <h2 class="mb-3 text-sm font-semibold">Terminal colors</h2>
+      <SchemePicker />
     </Surface>
 
     <!-- Keyboard shortcuts -->

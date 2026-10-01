@@ -7,6 +7,7 @@
   import { sidebarCollapsed } from '$lib/stores/ui';
   import { streamerMode } from '$lib/stores/streamer';
   import { copyOnSelect, rightClickPaste } from '$lib/stores/terminalPrefs';
+  import { terminalScheme } from '$lib/stores/terminalScheme';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { loadQuickCommands, quickBarCollapsed, selectedGroup } from '$lib/stores/quickCommands';
   import { refreshInterval, driveMetricsRefresh } from '$lib/stores/settings';
@@ -27,6 +28,7 @@
     void trayBehavior.hydrate();
     void copyOnSelect.hydrate();
     void rightClickPaste.hydrate();
+    void terminalScheme.hydrate();
     void terminalShortcuts.hydrate();
     void selectedGroup.hydrate();
     void quickBarCollapsed.hydrate();
