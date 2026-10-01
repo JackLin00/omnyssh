@@ -46,6 +46,11 @@ pub fn serial_devices_config_path() -> Option<PathBuf> {
     app_config_dir().map(|d| d.join("serial.toml"))
 }
 
+/// Returns the path to the saved quick commands file.
+pub fn quick_commands_config_path() -> Option<PathBuf> {
+    app_config_dir().map(|d| d.join("quick_commands.toml"))
+}
+
 /// Removes rolling log files in `log_dir` older than `max_age_days`.
 ///
 /// Best-effort and fault-tolerant: a missing directory, an unreadable entry,
