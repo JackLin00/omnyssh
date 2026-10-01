@@ -11,10 +11,11 @@ const HOSTS = [
   { name: 'db-1', hostname: 'db-1.example.com', user: 'root', port: 22, tags: [], source: 'manual', hasKey: false, localForwards: [], tunnelAutostart: false, forwardAgent: false }
 ];
 
-async function boot(page: Page): Promise<void> {
+async function boot(page: Page, quickGroups: unknown[] = []): Promise<void> {
   await page.addInitScript(
-    ({ hosts }) => {
+    ({ hosts, quickGroups }) => {
       let cbid = 0;
+      let groups = quickGroups;
       const win = window as unknown as Record<string, unknown>;
       const listeners: Record<string, number[]> = {};
       // Per-channel outgoing index — the real Channel enforces message ordering.
@@ -51,6 +52,11 @@ async function boot(page: Page): Promise<void> {
             // devices load runs here too; an empty list keeps it a no-op.
             case 'list_serial_devices':
               return Promise.resolve([]);
+            case 'list_quick_commands':
+              return Promise.resolve(groups);
+            case 'save_quick_commands':
+              groups = args.groups as unknown[];
+              return Promise.resolve(null);
             case 'reload_hosts':
               return Promise.resolve(null);
             case 'terminal_open': {
@@ -101,7 +107,7 @@ async function boot(page: Page): Promise<void> {
         }
       };
     },
-    { hosts: HOSTS }
+    { hosts: HOSTS, quickGroups }
   );
 
   await page.goto('/');
@@ -373,6 +379,69 @@ test('a pane exiting mid-drag ends the move, with no dangling preview or leaked 
   await expect(findInput).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(findInput).toHaveCount(0);
+});
+
+test.describe('quick command bar', () => {
+  const QUICK_GROUPS = [
+    {
+      name: 'Ops',
+      commands: [
+        { label: 'hi', kind: 'text', payload: 'hi', ending: 'cr' },
+        { label: 'bytes', kind: 'hex', payload: '41 42', ending: 'none' }
+      ]
+    }
+  ];
+
+  test('click, Shift+click, hex and Alt+1 send the right bytes; editing adds a command; collapsing hides the bar', async ({
+    page
+  }) => {
+    await boot(page, QUICK_GROUPS);
+    await page.getByTitle('sh on web-1').click();
+    await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+    const hiButton = page.getByRole('button', { name: 'hi', exact: true });
+    await expect(hiButton).toBeVisible();
+
+    // A click sends the payload plus its ending.
+    await hiButton.click();
+    await expect.poll(() => writes(page)).toEqual([[104, 105, 13]]);
+
+    // Shift+click leaves a text command's ending off.
+    await hiButton.click({ modifiers: ['Shift'] });
+    await expect.poll(() => writes(page)).toEqual([[104, 105, 13], [104, 105]]);
+
+    // A hex command sends its bytes.
+    await page.getByRole('button', { name: 'bytes', exact: true }).click();
+    await expect.poll(() => writes(page)).toEqual([[104, 105, 13], [104, 105], [65, 66]]);
+
+    // Alt+1 fires the first command at the focused pane.
+    await page.locator('.xterm-helper-textarea').focus();
+    await page.keyboard.press('Alt+1');
+    await expect.poll(() => writes(page)).toEqual([
+      [104, 105, 13],
+      [104, 105],
+      [65, 66],
+      [104, 105, 13]
+    ]);
+
+    // Edit mode: add a command, which is saved through the backend and shows up as a
+    // new button.
+    await page.getByRole('button', { name: 'Edit quick commands' }).click();
+    await page.getByRole('button', { name: 'Add quick command' }).click();
+    await page.getByLabel('Label').fill('list');
+    await page.getByLabel('Text', { exact: true }).fill('ls');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'list', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Done editing' }).click();
+
+    // Collapsing hides the bar but for the button that expands it again.
+    await page.getByRole('button', { name: 'Hide quick commands' }).click();
+    await expect(hiButton).toHaveCount(0);
+    const expandButton = page.getByRole('button', { name: 'Show quick commands' });
+    await expect(expandButton).toBeVisible();
+    await expandButton.click();
+    await expect(hiButton).toBeVisible();
+  });
 });
 
 // Windows and Linux copy with Ctrl+Shift+C. The Desktop Chrome device reports a Windows

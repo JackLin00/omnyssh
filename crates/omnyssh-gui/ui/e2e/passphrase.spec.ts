@@ -44,6 +44,10 @@ async function boot(
             // devices load runs here too; an empty list keeps it a no-op.
             case 'list_serial_devices':
               return Promise.resolve([]);
+            case 'list_quick_commands':
+              return Promise.resolve([]);
+            case 'save_quick_commands':
+              return Promise.resolve(null);
             case 'reload_hosts':
               if (lockedAtLaunch) {
                 // Both pollers hit the same locked key; a second key waits behind it.

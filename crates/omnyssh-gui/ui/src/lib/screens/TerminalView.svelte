@@ -8,6 +8,7 @@
   import { closeSession } from '$lib/stores/navigation';
   import { sessions, combineStatus, type Session, type SessionStatus } from '$lib/stores/sessions';
   import TerminalPane from './TerminalPane.svelte';
+  import QuickCommandBar from './QuickCommandBar.svelte';
   import {
     arrange,
     clampRatio,
@@ -36,7 +37,13 @@
   let focused = $state<PaneId>(1);
   let statuses = $state<Record<PaneId, SessionStatus>>({});
   let area: HTMLDivElement;
+  let paneRefs = $state<Record<PaneId, ReturnType<typeof TerminalPane> | undefined>>({});
   const arranged = $derived(arrange(layout));
+
+  function sendToFocused(bytes: Uint8Array): void {
+    paneRefs[focused]?.sendBytes(bytes);
+  }
+  const canSend = $derived(statuses[focused] === 'connected');
 
   // The tab's dot in the sidebar sums up its panes. `setStatus` hands this tab a new
   // session object, so the id is read untracked: tracking it would re-run this forever.
@@ -57,6 +64,7 @@
     const next = neighbor(layout, id);
     const rest = remove(layout, id);
     delete statuses[id];
+    delete paneRefs[id];
     if (rest === null) {
       closeSession(session.id);
       return;
@@ -186,7 +194,8 @@
        into makes FitAddon over-size, sliding the last row under the status bar. The top
        inset clears the macOS traffic-light strip; the bottom gap clears the footer. -->
   <div class="h-full w-full" style="padding: max(var(--titlebar-h), 0.75rem) 0.5rem 1rem;">
-    <div bind:this={area} class="relative h-full w-full">
+    <div class="flex h-full w-full flex-col">
+      <div bind:this={area} class="relative min-h-0 w-full flex-1">
       {#each arranged.panes as p (p.id)}
         <div
           class="absolute {moving?.id === p.id ? 'opacity-50' : ''}"
@@ -194,6 +203,7 @@
           style="left: {pct(p.rect.x)}; top: {pct(p.rect.y)}; width: {pct(p.rect.w)}; height: {pct(p.rect.h)};"
         >
           <TerminalPane
+            bind:this={paneRefs[p.id]}
             hostName={session.hostName}
             {active}
             focused={focused === p.id}
@@ -235,6 +245,8 @@
           <div class="absolute inset-0 bg-accent opacity-20"></div>
         </div>
       {/if}
+      </div>
+      <QuickCommandBar enabled={canSend} onSend={sendToFocused} />
     </div>
   </div>
 </div>

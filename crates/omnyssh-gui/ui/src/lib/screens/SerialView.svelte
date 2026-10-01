@@ -20,12 +20,14 @@
   import { serialOpen, serialWrite, serialClose } from '$lib/ipc/commands';
   import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
   import { chunkBytes } from './terminalInput';
-  import { matchTerminalAction } from './terminalShortcuts';
+  import { matchTerminalAction, quickSlot } from './terminalShortcuts';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
+  import { quickCommandBytes } from '$lib/stores/quickCommands';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
   import type { SerialExitDto, TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
   import { HIGHLIGHT_LIMIT } from './terminalSearch';
+  import QuickCommandBar from './QuickCommandBar.svelte';
 
   let { session, active }: { session: Session; active: boolean } = $props();
   // SerialConnect always spawns serial tabs with their options, fixed for the tab's life.
@@ -56,6 +58,7 @@
   let destroyed = false;
   let failed = false;
   let ready = $state(false);
+  let canSend = $state(false);
   let display = $state<SerialDisplay>('text');
   const formatter = new SerialFormatter('text');
   const history = new ByteHistory(HISTORY_LIMIT);
@@ -168,16 +171,23 @@
       // selection, or reopening/reselecting the find bar, is harmless).
       term.attachCustomKeyEventHandler((e) => {
         const action = matchTerminalAction(e, get(terminalShortcuts));
+        const slot = action ? quickSlot(action) : null;
         const handled =
           action === 'copy' ||
           action === 'find' ||
-          (action === 'paste' && opts.mode === 'terminal');
+          (action === 'paste' && opts.mode === 'terminal') ||
+          slot !== null;
         if (!handled) return true;
         e.preventDefault();
         if (e.type === 'keydown' && term) {
           if (action === 'copy') copySelection(term);
           else if (action === 'find') openSearch();
-          else if (!e.repeat) void pasteClipboard(term);
+          else if (slot !== null) {
+            if (!e.repeat) {
+              const bytes = quickCommandBytes(slot);
+              if (bytes && bytes.length > 0) sendInput(bytes);
+            }
+          } else if (!e.repeat) void pasteClipboard(term);
         }
         return false;
       });
@@ -197,6 +207,7 @@
         if (destroyed) return;
         // Keep the tab and its output: the log up to the failure is what matters.
         failed = true;
+        canSend = false;
         sessions.setStatus(session.id, 'failed');
         lastError.set(`${opts.config.port}: ${msg.error}`);
       };
@@ -209,7 +220,10 @@
       }
       serialId = id;
       sessions.setTermId(session.id, id);
-      if (!failed) sessions.setStatus(session.id, 'connected');
+      if (!failed) {
+        sessions.setStatus(session.id, 'connected');
+        canSend = true;
+      }
 
       if (opts.mode === 'terminal') {
         term.onData((data) => sendInput(ENCODER.encode(mapEnter(data, opts.enter))));
@@ -231,6 +245,7 @@
       // The port could not be opened (missing, or held by another program).
       lastError.set(err instanceof Error ? err.message : String(err));
       sessions.setStatus(session.id, 'failed');
+      canSend = false;
     });
   });
 
@@ -289,4 +304,5 @@
       </div>
     {/if}
   </div>
+  <QuickCommandBar enabled={canSend} onSend={(b) => sendInput(b)} />
 </div>

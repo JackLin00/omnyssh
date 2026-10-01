@@ -30,8 +30,9 @@
   import { shouldFadeTop } from './terminalFade';
   import { chunkBytes, layoutFallback } from './terminalInput';
   import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
-  import { matchTerminalAction, formatChord, type TerminalAction } from './terminalShortcuts';
+  import { matchTerminalAction, formatChord, quickSlot, type TerminalAction } from './terminalShortcuts';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
+  import { quickCommandBytes } from '$lib/stores/quickCommands';
   import { isMac } from '$lib/platform';
   import type { SplitDir } from './splitLayout';
   import type { TerminalBytes } from '$lib/bindings';
@@ -106,8 +107,19 @@
     });
   }
 
+  /** Send bytes to this pane's shell, in order with typed input (the command bar). */
+  export function sendBytes(bytes: Uint8Array): void {
+    sendInput(bytes);
+  }
+
   function runAction(action: TerminalAction): void {
     if (!term) return;
+    const slot = quickSlot(action);
+    if (slot !== null) {
+      const bytes = quickCommandBytes(slot);
+      if (bytes && bytes.length > 0) sendInput(bytes);
+      return;
+    }
     if (action === 'copy') copySelection(term);
     else if (action === 'paste') void pasteClipboard(term);
     else if (action === 'find') openSearch();

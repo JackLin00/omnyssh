@@ -39,6 +39,10 @@ async function boot(page: Page, snippetsFixture = SNIPPETS): Promise<void> {
             // devices load runs here too; an empty list keeps it a no-op.
             case 'list_serial_devices':
               return Promise.resolve([]);
+            case 'list_quick_commands':
+              return Promise.resolve([]);
+            case 'save_quick_commands':
+              return Promise.resolve(null);
             case 'list_snippets':
               // Return a fresh copy, as the real `list_snippets` (a freshly collected
               // Vec) does — a live-mutated reference wouldn't re-trigger the store.

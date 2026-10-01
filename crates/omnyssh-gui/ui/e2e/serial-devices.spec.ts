@@ -40,6 +40,10 @@ async function boot(page: Page, devices: Device[] = []): Promise<void> {
               return Promise.resolve(ports);
             case 'list_serial_devices':
               return Promise.resolve([...state.devices]);
+            case 'list_quick_commands':
+              return Promise.resolve([]);
+            case 'save_quick_commands':
+              return Promise.resolve(null);
             case 'save_serial_device': {
               const d = args.device as Device;
               const i = state.devices.findIndex((x) => x.name === d.name);

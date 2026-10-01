@@ -39,6 +39,8 @@ async function bootWithHosts(page: Page): Promise<void> {
         // devices load runs here too; an empty list keeps it a no-op.
         if (cmd === 'list_hosts') return Promise.resolve(hosts);
         if (cmd === 'list_serial_devices') return Promise.resolve([]);
+        if (cmd === 'list_quick_commands') return Promise.resolve([]);
+        if (cmd === 'save_quick_commands') return Promise.resolve(null);
         return Promise.resolve(null);
       },
       transformCallback: (cb: unknown) => {
