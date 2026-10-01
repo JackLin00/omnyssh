@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use omnyssh_core::config::app_config::UpdateConfig;
+use omnyssh_core::config::quick_commands::{Ending, PayloadKind, QuickCommand, QuickGroup};
 use omnyssh_core::config::serial_devices::{LineEnding, SerialDevice};
 use omnyssh_core::config::snippets::{Snippet, SnippetScope};
 use omnyssh_core::event::{
@@ -768,6 +769,98 @@ impl From<KeySetupStep> for KeySetupStepDto {
             index: step as u8,
             total: KeySetupStep::all_steps().len() as u8,
             description: step.description().to_string(),
+        }
+    }
+}
+
+/// How a quick command's payload is read, mirrors `PayloadKind`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum PayloadKindDto {
+    Text,
+    Hex,
+}
+
+/// What a quick command sends after its payload, mirrors `Ending`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum EndingDto {
+    None,
+    Cr,
+    Lf,
+    Crlf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickCommandDto {
+    pub label: String,
+    pub kind: PayloadKindDto,
+    pub payload: String,
+    pub ending: EndingDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickGroupDto {
+    pub name: String,
+    pub commands: Vec<QuickCommandDto>,
+}
+
+impl From<&QuickCommand> for QuickCommandDto {
+    fn from(c: &QuickCommand) -> Self {
+        Self {
+            label: c.label.clone(),
+            kind: match c.kind {
+                PayloadKind::Text => PayloadKindDto::Text,
+                PayloadKind::Hex => PayloadKindDto::Hex,
+            },
+            payload: c.payload.clone(),
+            ending: match c.ending {
+                Ending::None => EndingDto::None,
+                Ending::Cr => EndingDto::Cr,
+                Ending::Lf => EndingDto::Lf,
+                Ending::Crlf => EndingDto::Crlf,
+            },
+        }
+    }
+}
+
+impl From<QuickCommandDto> for QuickCommand {
+    /// The label is trimmed.
+    fn from(dto: QuickCommandDto) -> Self {
+        Self {
+            label: dto.label.trim().to_string(),
+            kind: match dto.kind {
+                PayloadKindDto::Text => PayloadKind::Text,
+                PayloadKindDto::Hex => PayloadKind::Hex,
+            },
+            payload: dto.payload,
+            ending: match dto.ending {
+                EndingDto::None => Ending::None,
+                EndingDto::Cr => Ending::Cr,
+                EndingDto::Lf => Ending::Lf,
+                EndingDto::Crlf => Ending::Crlf,
+            },
+        }
+    }
+}
+
+impl From<&QuickGroup> for QuickGroupDto {
+    fn from(g: &QuickGroup) -> Self {
+        Self {
+            name: g.name.clone(),
+            commands: g.commands.iter().map(QuickCommandDto::from).collect(),
+        }
+    }
+}
+
+impl From<QuickGroupDto> for QuickGroup {
+    /// The name is trimmed.
+    fn from(dto: QuickGroupDto) -> Self {
+        Self {
+            name: dto.name.trim().to_string(),
+            commands: dto.commands.into_iter().map(QuickCommand::from).collect(),
         }
     }
 }

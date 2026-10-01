@@ -270,6 +270,28 @@ async deleteSerialDevice(name: string) : Promise<Result<null, CommandError>> {
 }
 },
 /**
+ * Every group with its commands.
+ */
+async listQuickCommands() : Promise<Result<QuickGroupDto[], CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_quick_commands") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Replace every group with `groups`, after checking them.
+ */
+async saveQuickCommands(groups: QuickGroupDto[]) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_quick_commands", { groups }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Open an SFTP session for `host_name` (tech-gui.md §4.2). Awaits the core connect,
  * registers the manager under a fresh public id, and spawns the per-session
  * forwarder; the `sftp-connected` ack then arrives stamped with that id (§3.4).
@@ -607,6 +629,10 @@ export type CommandError = { message: string }
  */
 export type ConnectionStatusDto = { kind: "unknown" } | { kind: "connecting" } | { kind: "connected" } | { kind: "failed"; message: string }
 /**
+ * What a quick command sends after its payload, mirrors `Ending`.
+ */
+export type EndingDto = "none" | "cr" | "lf" | "crlf"
+/**
  * A background error surfaced to the user.
  */
 export type Error = { message: string }
@@ -719,9 +745,15 @@ export type ParityDto = "none" | "odd" | "even"
  */
 export type PasswordRequired = { requestId: number; hostName: string; login: string; retry: boolean; newHostKey: string | null }
 /**
+ * How a quick command's payload is read, mirrors `PayloadKind`.
+ */
+export type PayloadKindDto = "text" | "hex"
+/**
  * A single process in the "top processes" panel (tech-gui.md §4.1).
  */
 export type ProcessDto = { name: string; cpuPercent: number; memPercent: number }
+export type QuickCommandDto = { label: string; kind: PayloadKindDto; payload: string; ending: EndingDto }
+export type QuickGroupDto = { name: string; commands: QuickCommandDto[] }
 /**
  * The line settings a serial tab opens with.
  */

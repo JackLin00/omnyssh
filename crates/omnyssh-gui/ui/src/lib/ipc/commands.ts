@@ -7,6 +7,7 @@ import type {
   FileEntryDto,
   HostDto,
   HostInputDto,
+  QuickGroupDto,
   SerialConfigDto,
   SerialDeviceDto,
   SerialExitDto,
@@ -156,6 +157,19 @@ export async function saveSerialDevice(device: SerialDeviceDto): Promise<void> {
 /** Delete a saved serial device; a missing name is a no-op. */
 export async function deleteSerialDevice(name: string): Promise<void> {
   const res = await commands.deleteSerialDevice(name);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Every quick command group. */
+export async function listQuickCommands(): Promise<QuickGroupDto[]> {
+  const res = await commands.listQuickCommands();
+  if (res.status === 'error') throw new Error(res.error.message);
+  return res.data;
+}
+
+/** Replace every quick command group. */
+export async function saveQuickCommands(groups: QuickGroupDto[]): Promise<void> {
+  const res = await commands.saveQuickCommands(groups);
   if (res.status === 'error') throw new Error(res.error.message);
 }
 

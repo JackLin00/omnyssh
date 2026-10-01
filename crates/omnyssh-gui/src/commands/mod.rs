@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod hosts;
 pub mod keysetup;
+pub mod quick_commands;
 pub mod serial;
 pub mod sftp;
 pub mod snippets;
