@@ -7,10 +7,12 @@
   // preference — so the combo being pressed can never hide the window out from under
   // the recorder; `applyGlobalHotkey()` on the way out re-registers whatever the
   // preference ends up holding, recorded or unchanged.
+  import { get } from 'svelte/store';
   import { isMac } from '$lib/platform';
   import { chordFromEvent, formatChord, parseChord } from './terminalShortcuts';
   import {
     applyGlobalHotkey,
+    chordToAccelerator,
     DEFAULT_HOTKEY,
     globalHotkey,
     globalHotkeyError
@@ -25,19 +27,25 @@
     void setGlobalHotkey(null);
   }
 
-  /** Recording ends with nothing recorded: the preference never changed, so nothing
-   *  re-applies it on its own — ask for that directly. */
+  /** Recording ends with nothing recorded (Esc, a click elsewhere, losing focus to
+   *  another app): the preference never changed, so nothing re-applies it on its
+   *  own — ask for that directly. */
   function cancelRecording(): void {
     recording = false;
     void applyGlobalHotkey();
   }
 
-  /** Recording ends with a new chord: persisting it changes the store, which the
-   *  layout's subscription re-applies on its own — asking again here would just
-   *  register the same accelerator twice. */
+  /** Recording ends with a chord. Re-recording the one already stored leaves the
+   *  store at the same value — a `writable` does not notify subscribers of a set
+   *  that does not change anything — so the layout's subscription would never
+   *  re-apply it and the hotkey would stay unregistered from `enterRecording`;
+   *  apply directly in that case. A genuinely new chord persists as usual and the
+   *  layout's subscription re-applies it; asking again here would just register
+   *  the same accelerator twice. */
   function commitRecording(chord: string): void {
     recording = false;
-    globalHotkey.set(chord);
+    if (chord === get(globalHotkey)) void applyGlobalHotkey();
+    else globalHotkey.set(chord);
   }
 
   function onKeydown(e: KeyboardEvent): void {
@@ -52,6 +60,7 @@
     if (!chord) return; // a lone modifier: keep listening
     const p = parseChord(chord);
     if (!p?.ctrl && !p?.alt && !p?.meta) return; // needs a real modifier: keep listening
+    if (chordToAccelerator(chord) === null) return; // not a key the backend can register: keep listening
     commitRecording(chord);
   }
 
@@ -61,13 +70,26 @@
     cancelRecording();
   }
 
+  /** Switching to another app mid-recording leaves the window blurred with the
+   *  hotkey unregistered until something re-applies it; treat it as a cancel. */
+  function onWindowBlur(): void {
+    if (!recording) return;
+    cancelRecording();
+  }
+
+  // Leaving the page mid-recording (e.g. navigating away from Settings) must not
+  // leave the hotkey unregistered behind it.
+  $effect(() => () => {
+    if (recording) void applyGlobalHotkey();
+  });
+
   const btn =
     'rounded-full border border-default px-3 py-1 text-xs text-muted transition hover:border-strong ' +
     'hover:text-fg disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none ' +
     'focus-visible:ring-2 focus-visible:ring-focus';
 </script>
 
-<svelte:window onkeydowncapture={onKeydown} onpointerdowncapture={onPointerDown} />
+<svelte:window onkeydowncapture={onKeydown} onpointerdowncapture={onPointerDown} onblur={onWindowBlur} />
 
 <div bind:this={rowEl}>
   <div class="flex items-center justify-between gap-4">
@@ -90,7 +112,7 @@
         type="button"
         class={btn}
         aria-pressed={recording}
-        aria-label={recording ? 'Cancel global hotkey recording' : 'Change the global hotkey'}
+        aria-label="Change show/hide shortcut"
         onclick={() => (recording ? cancelRecording() : enterRecording())}
       >
         {recording ? 'Cancel' : 'Change'}
@@ -116,6 +138,6 @@
     </div>
   </div>
   {#if $globalHotkeyError}
-    <p class="mt-1 text-right text-xs text-status-crit">{$globalHotkeyError}</p>
+    <p role="alert" class="mt-1 text-right text-xs text-status-crit">{$globalHotkeyError}</p>
   {/if}
 </div>

@@ -281,8 +281,18 @@ fn main() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
+                    // On X11 global-hotkey calls this handler from its own event thread
+                    // while holding the plugin's internal shortcut-table mutex (the same
+                    // one `register`/`unregister_all` lock on the main thread). `on_hotkey`
+                    // reads window state, which on this backend round-trips through the
+                    // main thread; running it here, on the event thread, while that mutex
+                    // is held would block waiting on a main thread that could itself be
+                    // blocked in `set_global_hotkey` waiting on the same mutex — a
+                    // deadlock. Hand off to the main thread and return immediately instead,
+                    // so the event thread never blocks with the mutex held.
                     if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        commands::hotkey::on_hotkey(app);
+                        let handle = app.clone();
+                        let _ = app.run_on_main_thread(move || commands::hotkey::on_hotkey(&handle));
                     }
                 })
                 .build(),

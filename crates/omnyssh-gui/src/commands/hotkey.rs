@@ -30,13 +30,18 @@ fn toggle(visible: bool, minimized: bool, focused: bool, tray_hides: bool) -> To
 }
 
 /// Called from the plugin's handler on every `Pressed` event (never `Released`,
-/// which would otherwise toggle twice per key press).
+/// which would otherwise toggle twice per key press), already dispatched onto the
+/// main thread (see the handler in `main.rs` for why).
 pub fn on_hotkey(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
     let visible = window.is_visible().unwrap_or(false);
     let minimized = window.is_minimized().unwrap_or(false);
+    // On X11 a key grab can land while the window manager still reports some other
+    // window focused — observed, not yet reliably reproduced — which could make this
+    // always read as unfocused and the hotkey always Show there. Untested; left as a
+    // follow-up rather than guessed at here.
     let focused = window.is_focused().unwrap_or(false);
     match toggle(visible, minimized, focused, crate::tray::hides_to_tray()) {
         Toggle::Show => crate::tray::reveal(app),
@@ -55,17 +60,35 @@ pub fn on_hotkey(app: &AppHandle) {
 #[tauri::command]
 #[specta::specta]
 pub fn set_global_hotkey(app: AppHandle, accelerator: Option<String>) -> Result<(), CommandError> {
-    let error = |e: &dyn std::fmt::Display| CommandError {
-        message: e.to_string(),
-    };
     let shortcuts = app.global_shortcut();
-    shortcuts.unregister_all().map_err(|e| error(&e))?;
-    if let Some(accelerator) = accelerator {
-        shortcuts
-            .register(accelerator.as_str())
-            .map_err(|e| error(&e))?;
+    shortcuts.unregister_all().map_err(|e| CommandError {
+        message: e.to_string(),
+    })?;
+    let Some(accelerator) = accelerator else {
+        return Ok(()); // turning it off always succeeds, Wayland included
+    };
+    if crate::tray::is_wayland(&app) {
+        return Err(CommandError {
+            message: "Global shortcuts aren't available in Wayland sessions".into(),
+        });
     }
-    Ok(())
+    shortcuts
+        .register(accelerator.as_str())
+        .map_err(|e| registration_error(&accelerator, e))
+}
+
+/// `global-hotkey`'s own message for a key combo already held elsewhere names the raw
+/// `HotKey` struct via its `Debug` form rather than anything a person reading Settings
+/// would recognize; every other error keeps its own message.
+fn registration_error(accelerator: &str, e: impl std::fmt::Display) -> CommandError {
+    let message = e.to_string();
+    if message.to_lowercase().contains("already registered") {
+        CommandError {
+            message: format!("{accelerator} is already used by another program"),
+        }
+    } else {
+        CommandError { message }
+    }
 }
 
 #[cfg(test)]
@@ -106,5 +129,20 @@ mod tests {
         // A code the parser has no entry for (unlike the handful terminalShortcuts.ts
         // can produce) must be rejected, not silently registered as something else.
         assert!(Shortcut::from_str("Control+ContextMenu").is_err());
+    }
+
+    #[test]
+    fn an_already_registered_error_reads_as_the_accelerator_in_use() {
+        // The real message, `global_hotkey::Error::AlreadyRegistered`'s Display, names
+        // the raw `HotKey` struct via `{:?}` rather than anything readable.
+        let raw = "HotKey already registered: HotKey { mods: CONTROL, key: Space, id: 123 }";
+        assert_eq!(
+            registration_error("Control+Space", raw).message,
+            "Control+Space is already used by another program"
+        );
+        assert_eq!(
+            registration_error("Control+Space", "some other failure").message,
+            "some other failure"
+        );
     }
 }

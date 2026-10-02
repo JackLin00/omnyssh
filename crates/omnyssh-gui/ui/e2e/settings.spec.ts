@@ -30,9 +30,15 @@ async function boot(
       const listeners: Record<string, number[]> = {};
       const state = {
         hosts: hosts.map((h) => ({ ...h })),
-        updateConfig: { checkOnStartup: true, skipVersion: '' } as Record<string, unknown>
+        updateConfig: { checkOnStartup: true, skipVersion: '' } as Record<string, unknown>,
+        // Mutable so a test can flip the backend from erroring to succeeding mid-flow
+        // (via `__setHotkeyError` below) without a fresh boot.
+        hotkeyError: hotkeyError as string | undefined
       };
       const win = window as unknown as Record<string, unknown>;
+      win.__setHotkeyError = (message: string | undefined) => {
+        state.hotkeyError = message;
+      };
 
       function fire(event: string, payload: unknown): void {
         for (const id of listeners[event] ?? []) {
@@ -75,7 +81,9 @@ async function boot(
               return Promise.resolve({ ...traySupport });
             case 'set_global_hotkey':
               ((win.__hotkey ??= []) as unknown[]).push(args.accelerator ?? null);
-              return hotkeyError ? Promise.reject({ message: hotkeyError }) : Promise.resolve(null);
+              return state.hotkeyError
+                ? Promise.reject({ message: state.hotkeyError })
+                : Promise.resolve(null);
             case 'plugin:event|listen': {
               const { event, handler } = args as { event: string; handler: number };
               (listeners[event] ||= []).push(handler);
@@ -216,6 +224,15 @@ test('under Wayland the window closes to the tray but cannot minimize into it', 
 const hotkeyCalls = (page: Page) =>
   page.evaluate(() => (window as unknown as { __hotkey?: unknown[] }).__hotkey ?? []);
 
+const setHotkeyError = (page: Page, message: string | undefined) =>
+  page.evaluate(
+    (m) =>
+      (window as unknown as { __setHotkeyError: (m: string | undefined) => void }).__setHotkeyError(
+        m
+      ),
+    message
+  );
+
 test('the global hotkey registers on start, re-registers once recorded, and can be turned off', async ({
   page
 }) => {
@@ -224,7 +241,7 @@ test('the global hotkey registers on start, re-registers once recorded, and can 
   await expect.poll(() => hotkeyCalls(page)).toEqual(['Control+Space']);
 
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('button', { name: 'Change the global hotkey' }).click();
+  await page.getByRole('button', { name: 'Change show/hide shortcut' }).click();
 
   // Recording unregisters first, so the combo being pressed can't hide the window.
   await expect.poll(() => hotkeyCalls(page)).toEqual(['Control+Space', null]);
@@ -247,11 +264,43 @@ test('the global hotkey registers on start, re-registers once recorded, and can 
   await expect(page.getByText('Off', { exact: true })).toBeVisible();
 });
 
-test('a rejected global hotkey shows the backend error', async ({ page }) => {
+// A `writable` store never notifies on a `set` that doesn't change its value, so
+// recording the chord already stored needs its own re-registration path — otherwise
+// it would stay unregistered from the moment recording unregistered it going in.
+test('recording the hotkey already stored still re-registers it', async ({ page }) => {
+  await boot(page, { fireUpdateOnBoot: false });
+  await expect.poll(() => hotkeyCalls(page)).toEqual(['Control+Space']);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Change show/hide shortcut' }).click();
+  await expect.poll(() => hotkeyCalls(page)).toEqual(['Control+Space', null]);
+
+  await page.keyboard.down('Control');
+  await page.keyboard.press('Space');
+  await page.keyboard.up('Control');
+
+  await expect
+    .poll(() => hotkeyCalls(page))
+    .toEqual(['Control+Space', null, 'Control+Space']);
+});
+
+test('a rejected global hotkey shows the backend error, cleared once a re-recording succeeds', async ({
+  page
+}) => {
   await boot(page, { fireUpdateOnBoot: false, hotkeyError: 'Control+Space is already in use' });
 
   await page.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByText('Control+Space is already in use')).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveText('Control+Space is already in use');
+
+  // The backend now accepts it; re-recording the same chord still re-registers (the
+  // case above) and this time succeeds, clearing the error.
+  await setHotkeyError(page, undefined);
+  await page.getByRole('button', { name: 'Change show/hide shortcut' }).click();
+  await page.keyboard.down('Control');
+  await page.keyboard.press('Space');
+  await page.keyboard.up('Control');
+
+  await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
 test.describe('on macOS', () => {

@@ -66,6 +66,19 @@ pub(crate) fn hides_to_tray() -> bool {
     behavior().minimizes_to_tray()
 }
 
+/// Whether this is a native Wayland session — global-hotkey's X11 backend cannot grab
+/// keys there. Read by `set_global_hotkey`, which refuses to register on one instead of
+/// silently doing nothing. Always false off Linux.
+#[cfg(target_os = "linux")]
+pub(crate) fn is_wayland(app: &AppHandle) -> bool {
+    wayland(app)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn is_wayland(_app: &AppHandle) -> bool {
+    false
+}
+
 fn set_behavior(behavior: Behavior) {
     *BEHAVIOR.lock().unwrap_or_else(PoisonError::into_inner) = behavior;
 }
