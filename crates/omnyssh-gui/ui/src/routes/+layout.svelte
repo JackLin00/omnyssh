@@ -12,6 +12,7 @@
   import { loadQuickCommands, quickBarCollapsed, selectedGroup } from '$lib/stores/quickCommands';
   import { refreshInterval, driveMetricsRefresh } from '$lib/stores/settings';
   import { trayBehavior, driveTray } from '$lib/stores/tray';
+  import { globalHotkey, applyGlobalHotkey } from '$lib/stores/globalHotkey';
   import { lastError } from '$lib/stores/notifications';
 
   let { children } = $props();
@@ -43,6 +44,17 @@
       (b) => setTrayBehavior(b.minimizeToTray, b.closeToTray),
       (message) => lastError.set(message)
     );
+    // Applied once hydration settles on a final value, then again on every later
+    // change; the flag keeps the subscription's own immediate fire (with the
+    // pre-hydrate mirrored value) from applying twice alongside it.
+    let hotkeyHydrated = false;
+    const stopHotkey = globalHotkey.subscribe(() => {
+      if (hotkeyHydrated) void applyGlobalHotkey();
+    });
+    void globalHotkey.hydrate().then(() => {
+      hotkeyHydrated = true;
+      void applyGlobalHotkey();
+    });
     // No-op outside Tauri (e.g. a plain `vite preview`); the shell still mounts.
     // Dispose even if the layout unmounts before the subscription resolves. Start
     // the pollers only once listeners are attached, so no status event is missed.
@@ -58,6 +70,7 @@
       stop?.();
       stopRefresh();
       stopTray();
+      stopHotkey();
     };
   });
 </script>
