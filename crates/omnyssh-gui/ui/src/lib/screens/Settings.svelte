@@ -8,6 +8,7 @@
   import { Surface, Icon } from '$lib/theme';
   import ShortcutSettings from './ShortcutSettings.svelte';
   import SchemePicker from './SchemePicker.svelte';
+  import GlobalHotkeySetting from './GlobalHotkeySetting.svelte';
   import { theme } from '$lib/stores/theme';
   import { streamerMode } from '$lib/stores/streamer';
   import { copyOnSelect, rightClickPaste } from '$lib/stores/terminalPrefs';
@@ -231,6 +232,9 @@
             No icon in sight? Opening OmnySSH again brings the window back.
           </p>
         {/if}
+        <div class="border-t border-default pt-4">
+          <GlobalHotkeySetting />
+        </div>
       </div>
     </Surface>
 

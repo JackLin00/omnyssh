@@ -21,10 +21,11 @@ async function boot(
   opts: {
     fireUpdateOnBoot: boolean;
     traySupport?: { available: boolean; minimize: boolean };
+    hotkeyError?: string;
   }
 ): Promise<void> {
   await page.addInitScript(
-    ({ hosts, update, fireUpdateOnBoot, traySupport }) => {
+    ({ hosts, update, fireUpdateOnBoot, traySupport, hotkeyError }) => {
       let cbid = 0;
       const listeners: Record<string, number[]> = {};
       const state = {
@@ -72,6 +73,9 @@ async function boot(
             case 'set_tray_behavior':
               ((win.__tray ??= []) as unknown[]).push({ ...args });
               return Promise.resolve({ ...traySupport });
+            case 'set_global_hotkey':
+              ((win.__hotkey ??= []) as unknown[]).push(args.accelerator ?? null);
+              return hotkeyError ? Promise.reject({ message: hotkeyError }) : Promise.resolve(null);
             case 'plugin:event|listen': {
               const { event, handler } = args as { event: string; handler: number };
               (listeners[event] ||= []).push(handler);
@@ -92,7 +96,8 @@ async function boot(
       hosts: HOSTS,
       update: UPDATE,
       fireUpdateOnBoot: opts.fireUpdateOnBoot,
-      traySupport: opts.traySupport ?? { available: true, minimize: true }
+      traySupport: opts.traySupport ?? { available: true, minimize: true },
+      hotkeyError: opts.hotkeyError
     }
   );
   await page.goto('/');
@@ -206,6 +211,47 @@ test('under Wayland the window closes to the tray but cannot minimize into it', 
   await expect(page.getByRole('switch', { name: 'Minimize to tray' })).toBeDisabled();
   await expect(page.getByText(/Not on Wayland/)).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Close to tray' })).toBeEnabled();
+});
+
+const hotkeyCalls = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __hotkey?: unknown[] }).__hotkey ?? []);
+
+test('the global hotkey registers on start, re-registers once recorded, and can be turned off', async ({
+  page
+}) => {
+  await boot(page, { fireUpdateOnBoot: false });
+  // The default is registered on start.
+  await expect.poll(() => hotkeyCalls(page)).toEqual(['Control+Space']);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Change the global hotkey' }).click();
+
+  // Recording unregisters first, so the combo being pressed can't hide the window.
+  await expect.poll(() => hotkeyCalls(page)).toEqual(['Control+Space', null]);
+
+  await page.keyboard.down('Control');
+  await page.keyboard.down('Alt');
+  await page.keyboard.press('K');
+  await page.keyboard.up('Alt');
+  await page.keyboard.up('Control');
+
+  await expect(page.getByText('Ctrl+Alt+K')).toBeVisible();
+  await expect
+    .poll(() => hotkeyCalls(page))
+    .toEqual(['Control+Space', null, 'Control+Alt+K']);
+
+  await page.getByRole('button', { name: 'Turn off the global hotkey' }).click();
+  await expect
+    .poll(() => hotkeyCalls(page))
+    .toEqual(['Control+Space', null, 'Control+Alt+K', null]);
+  await expect(page.getByText('Off', { exact: true })).toBeVisible();
+});
+
+test('a rejected global hotkey shows the backend error', async ({ page }) => {
+  await boot(page, { fireUpdateOnBoot: false, hotkeyError: 'Control+Space is already in use' });
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByText('Control+Space is already in use')).toBeVisible();
 });
 
 test.describe('on macOS', () => {
