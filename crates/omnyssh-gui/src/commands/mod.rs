@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod hosts;
+pub mod hotkey;
 pub mod keysetup;
 pub mod quick_commands;
 pub mod serial;

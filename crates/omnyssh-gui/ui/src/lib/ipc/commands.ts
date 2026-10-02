@@ -289,6 +289,12 @@ export async function setTrayBehavior(
   return res.data;
 }
 
+/** Register the global show/hide hotkey (an accelerator like "Control+Space"), or turn it off with null. */
+export async function setGlobalHotkey(accelerator: string | null): Promise<void> {
+  const res = await commands.setGlobalHotkey(accelerator);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
 /** Force an immediate metric poll of every host (tech-gui.md §4.2). */
 export async function refreshMetrics(): Promise<void> {
   const res = await commands.refreshMetrics();

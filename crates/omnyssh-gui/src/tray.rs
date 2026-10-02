@@ -59,6 +59,13 @@ fn behavior() -> Behavior {
     *BEHAVIOR.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether hiding the window should go into the tray — minimize-to-tray is on and an
+/// icon is actually up to bring it back from. Read by the global hotkey
+/// (`commands::hotkey`), which reuses this instead of a second hiding path.
+pub(crate) fn hides_to_tray() -> bool {
+    behavior().minimizes_to_tray()
+}
+
 fn set_behavior(behavior: Behavior) {
     *BEHAVIOR.lock().unwrap_or_else(PoisonError::into_inner) = behavior;
 }

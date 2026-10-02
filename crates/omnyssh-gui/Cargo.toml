@@ -55,6 +55,11 @@ tauri-plugin-clipboard-manager = "2"
 # `generate_context!` embeds the `plugins.updater` config and expands to serde_json at
 # runtime; also asserts the wire form of DTOs in tests (e.g. HostDto never carries a password).
 serde_json = "1"
+# The system-wide show/hide hotkey (plan J). Pinned to 2.3.2, not a bare "2": 2.4.0+
+# requires tauri >=2.12, and the core crate here is locked at 2.11.x. Rust-side only —
+# the frontend never calls its JS API (only our own `set_global_hotkey` command), so
+# there is no npm package and no npm/crate version pair to keep aligned.
+tauri-plugin-global-shortcut = "=2.3.2"
 
 # To restore SIGPIPE after a failed `exec` in the AppImage render retry — `std` resets
 # it as part of the child setup it runs in this process and never puts it back — and to

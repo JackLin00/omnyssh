@@ -515,6 +515,19 @@ async setTrayBehavior(minimizeToTray: boolean, closeToTray: boolean) : Promise<R
 }
 },
 /**
+ * Register `accelerator` (e.g. "Control+Space") as the global show/hide hotkey,
+ * replacing the previous one; None turns it off. A hotkey another program holds, or
+ * one the OS rejects, comes back as the error.
+ */
+async setGlobalHotkey(accelerator: string | null) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_global_hotkey", { accelerator }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Query GitHub for a newer release (tech-gui.md §4.2). `None` means up to date — the
  * core swallows network/parse errors so a failed check never disrupts.
  */

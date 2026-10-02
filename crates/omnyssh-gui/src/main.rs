@@ -18,6 +18,7 @@ use commands::auth::{answer_password, unlock_identity};
 use commands::hosts::{
     delete_host, duplicate_host, list_hosts, refresh_metrics, reload_hosts, save_host,
 };
+use commands::hotkey::set_global_hotkey;
 use commands::keysetup::start_key_setup;
 use commands::quick_commands::{list_quick_commands, save_quick_commands};
 use commands::serial::{
@@ -140,6 +141,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             unlock_identity,
             answer_password,
             set_tray_behavior,
+            set_global_hotkey,
             check_update,
             install_update,
             load_update_config,
@@ -272,6 +274,19 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         // Reads the clipboard for the terminals' right-click paste.
         .plugin(tauri_plugin_clipboard_manager::init())
+        // The global show/hide hotkey (plan J): no shortcut pre-registered here — the
+        // frontend hands one over through `set_global_hotkey` once it starts, so this is
+        // the only place anything gets registered. Only `Pressed` toggles the window;
+        // `Released` would otherwise double-fire on every press.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        commands::hotkey::on_hotkey(app);
+                    }
+                })
+                .build(),
+        )
         // Restores the window's size and position between launches; the flags keep it
         // away from everything that would touch the window itself (WINDOW_STATE_FLAGS).
         .plugin(
