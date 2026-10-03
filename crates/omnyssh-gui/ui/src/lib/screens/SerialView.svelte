@@ -60,7 +60,8 @@
   let ready = $state(false);
   let canSend = $state(false);
   let display = $state<SerialDisplay>('text');
-  const stamped = $derived(opts.mode === 'monitor' && $serialTimestamps);
+  // Stamps are for the receive-only monitor's text display; hex stays a plain dump.
+  const stamped = $derived(opts.mode === 'monitor' && display === 'text' && $serialTimestamps);
   // Only the initial values: the formatter is a plain stateful object, not reactive, and
   // later changes go through `rerender()`'s `formatter.reset(display, stamped)`.
   // svelte-ignore state_referenced_locally
@@ -106,10 +107,9 @@
     if (batch) term.write(batch);
   }
 
+  // The effect below re-renders once the display changes.
   function setDisplay(next: SerialDisplay): void {
-    if (next === display) return;
     display = next;
-    rerender();
   }
 
   function clear(): void {
@@ -287,10 +287,11 @@
     }
   });
 
-  // Re-render when the timestamp toggle flips; a no-op on the initial run, since `term`
-  // doesn't exist yet (it's created asynchronously in onMount). Untracked, so the
-  // `display` it reads doesn't make a Text/HEX switch replay the history twice.
+  // Re-render when the display or the timestamp toggle changes — once per change, since
+  // this is the only caller. A no-op on the initial run: `term` doesn't exist yet (it's
+  // created asynchronously in onMount). The render itself is untracked.
   $effect(() => {
+    void display;
     void stamped;
     untrack(rerender);
   });
@@ -325,9 +326,10 @@
         type="button"
         class="rounded-full border border-default px-3 py-0.5 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus {$serialTimestamps
           ? 'bg-accent text-accent-fg'
-          : 'text-muted hover:text-fg'}"
+          : 'text-muted hover:text-fg'} disabled:cursor-not-allowed disabled:opacity-40"
         aria-pressed={$serialTimestamps}
-        title="Stamp each line with when it arrived"
+        disabled={display === 'hex'}
+        title={display === 'hex' ? 'Timestamps show in the text display' : 'Stamp each line with when it arrived'}
         onclick={() => serialTimestamps.toggle()}
       >
         Time

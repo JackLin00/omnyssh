@@ -120,14 +120,10 @@ describe('SerialFormatter with timestamps', () => {
     expect(f.push(enc('a\r\n\r\nb'), AT)).toBe(`${ts('12:34:56.789')}a\r\n\r\n${ts('12:34:56.789')}b`);
   });
 
-  it('starts every hex packet on its own stamped line, wrapping long ones under the stamp', () => {
+  it('never stamps hex, which stays one continuous dump', () => {
     const f = new SerialFormatter('hex', true);
-    const indent = ' '.repeat('[12:34:56.789] '.length);
-    expect(f.push(Uint8Array.from([0x55, 0xaa]), AT)).toBe(`${ts('12:34:56.789')}55 AA `);
-    const long = new Uint8Array(18);
-    expect(f.push(long, LATER)).toBe(
-      `\r\n${ts('12:34:57.789')}${'00 '.repeat(15)}00\r\n${indent}00 00 `
-    );
+    expect(f.push(Uint8Array.from([0x55, 0xaa]), AT)).toBe('55 AA ');
+    expect(f.push(Uint8Array.from([0x01]), LATER)).toBe('01 ');
   });
 
   it('switches timestamps on and off with reset, keeping the plain output unchanged', () => {

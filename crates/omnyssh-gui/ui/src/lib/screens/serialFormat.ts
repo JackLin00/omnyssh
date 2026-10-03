@@ -25,7 +25,6 @@ export function formatTimestamp(at: number): string {
 // Stamps are dim (bright black) and give the foreground back after, so a device's own
 // colours on the rest of the line are untouched.
 const stamp = (at: number) => `\x1b[90m${formatTimestamp(at)}\x1b[39m `;
-const STAMP_WIDTH = '[00:00:00.000] '.length;
 
 export class SerialFormatter {
   // Not fatal: bytes that are not UTF-8 show as U+FFFD instead of throwing.
@@ -45,10 +44,12 @@ export class SerialFormatter {
       const text = this.decoder.decode(bytes, { stream: true });
       return this.timestamps ? this.stampLines(text, at) : text;
     }
-    return this.timestamps ? this.hexPacket(bytes, at) : this.hexRun(bytes);
+    // Hex stays one continuous dump: stamps are a text-display feature.
+    return this.hexRun(bytes);
   }
 
-  /** Start over in `display`, with or without timestamps, before re-rendering the history. */
+  /** Start over in `display`, with or without timestamps (which only text shows), before
+   *  re-rendering the history. */
   reset(display: SerialDisplay, timestamps: boolean = this.timestamps): void {
     this.display = display;
     this.timestamps = timestamps;
@@ -63,21 +64,6 @@ export class SerialFormatter {
       this.column = (this.column + 1) % HEX_ROW;
       out += HEX_BYTE[b] + (this.column === 0 ? '\r\n' : ' ');
     }
-    return out;
-  }
-
-  // Every packet starts its own stamped line; rows past the first are indented under it.
-  private hexPacket(bytes: Uint8Array, at: number): string {
-    if (bytes.length === 0) return '';
-    let out = this.column !== 0 ? '\r\n' : '';
-    out += stamp(at);
-    this.column = 0;
-    bytes.forEach((b, i) => {
-      if (i > 0 && i % HEX_ROW === 0) out += '\r\n' + ' '.repeat(STAMP_WIDTH);
-      out += HEX_BYTE[b] + (i % HEX_ROW === HEX_ROW - 1 && i < bytes.length - 1 ? '' : ' ');
-    });
-    // The packet's line stays open; the next packet starts a fresh one.
-    this.column = bytes.length % HEX_ROW || HEX_ROW;
     return out;
   }
 

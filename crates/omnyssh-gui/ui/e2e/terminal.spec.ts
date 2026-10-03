@@ -752,6 +752,14 @@ test('the serial monitor stamps lines with their arrival time, and remembers the
   await timeButton.click();
   await expect(page.locator('.xterm-rows')).toContainText(/\[\d{2}:\d{2}:\d{2}\.\d{3}\] hello/);
 
+  // Hex stays a plain dump: no stamps, and the toggle can't be used there.
+  await page.getByRole('button', { name: 'HEX', exact: true }).click();
+  await expect(page.locator('.xterm-rows')).toContainText('68 65 6C 6C 6F');
+  await expect(page.locator('.xterm-rows')).not.toContainText(/\[\d{2}:\d{2}:\d{2}\.\d{3}\]/);
+  await expect(timeButton).toBeDisabled();
+  await page.getByRole('button', { name: 'Text', exact: true }).click();
+  await expect(page.locator('.xterm-rows')).toContainText(/\[\d{2}:\d{2}:\d{2}\.\d{3}\] hello/);
+
   await timeButton.click();
   await expect(page.locator('.xterm-rows')).not.toContainText(/\[\d{2}:\d{2}:\d{2}\.\d{3}\]/);
 
