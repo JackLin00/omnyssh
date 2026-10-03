@@ -19,6 +19,14 @@ russh-keys = "0.46"
 # The public half of an encrypted OpenSSH key, to match it with an agent key.
 # Already built for russh-keys.
 ssh-key = "0.6"
+# Hashed `known_hosts` names (`|1|salt|hash`, HMAC-SHA1), to find a changed
+# key's lines. All three are already built for russh-keys.
+hmac = "0.12"
+sha1 = "0.10"
+data-encoding = "2"
+# A fresh salt for a replaced key written hashed, as the old one was. Already
+# built for rand.
+getrandom = "0.2"
 
 # Serialization
 serde = { workspace = true }

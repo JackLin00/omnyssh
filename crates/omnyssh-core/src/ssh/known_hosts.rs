@@ -6,10 +6,14 @@
 //! honoured, but it is never written again.
 
 use std::borrow::Cow;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use hmac::{Hmac, Mac};
 use russh::keys::key::{self, PublicKey};
 use russh::keys::known_hosts::{known_host_keys_path, learn_known_hosts_path};
+use russh::keys::PublicKeyBase64;
+use sha1::Sha1;
 
 /// What `known_hosts` says about the key a server offered.
 pub(crate) enum Verdict {
@@ -102,6 +106,186 @@ fn saved_keys(file: &Path, host: &str, port: u16) -> Result<Vec<PublicKey>, russ
 pub(crate) fn learn(host: &str, port: u16, key: &PublicKey) -> Result<(), russh::keys::Error> {
     let path = path().ok_or(russh::keys::Error::NoHomeDir)?;
     learn_known_hosts_path(host, port, key, path)
+}
+
+/// Saves `key` as the one `host:port` shows now, in `~/.ssh/known_hosts`, in
+/// place of the saved keys of its type. A key pinned in the Windows build's old
+/// file stays there: the main file is read first, so the new key decides.
+#[allow(dead_code)] // Called by the asking connection in Task L3; the attribute goes then.
+pub(crate) fn update(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
+    let path = path()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory"))?;
+    replace_in(&path, host, port, key).map(drop)
+}
+
+/// Pins `key` for `host:port` in `file` in place of the saved keys of its type:
+/// their lines go, the rest of the file stays as it was, and `key` is added at
+/// the end. A line that names other hosts too goes whole, as with
+/// `ssh-keygen -R`. One write, through a temp file and a rename, so the old key
+/// is never gone without the new one in its place; on unix the file keeps its
+/// permissions, and a symlinked file is written through. When a removed line
+/// named the host hashed (`|1|…`, `HashKnownHosts`), the new one is hashed too,
+/// with a fresh salt as ssh(1) does it, so the file does not give the name away;
+/// otherwise it is written plain, as `learn` writes it.
+///
+/// Returns how many lines were removed.
+pub(crate) fn replace_in(
+    file: &Path,
+    host: &str,
+    port: u16,
+    key: &PublicKey,
+) -> std::io::Result<usize> {
+    // Dotfile managers link the file: write the real one, not over the link.
+    let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let old = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let entry = host_entry(host, port);
+    let mut removed = 0;
+    let mut hashed = false;
+    let mut new = String::with_capacity(old.len() + 128);
+    for line in old.split_inclusive('\n') {
+        match pins_type(line, &entry, key) {
+            Some(by_hash) => {
+                removed += 1;
+                hashed |= by_hash;
+            }
+            None => new.push_str(line),
+        }
+    }
+    if !new.is_empty() && !new.ends_with('\n') {
+        new.push('\n');
+    }
+    // ssh(1) hashes the name in lower case.
+    let written_as = if hashed {
+        hashed_name(&entry.to_ascii_lowercase())?
+    } else {
+        entry
+    };
+    new.push_str(&format!(
+        "{written_as} {} {}\n",
+        key_type(key),
+        key.public_key_base64()
+    ));
+
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("known_hosts");
+    let tmp = file.with_file_name(format!(".{name}.omnyssh-tmp"));
+    let written = (|| {
+        let mut out = std::fs::File::create(&tmp)?;
+        // The original's permissions before any content goes in.
+        #[cfg(unix)]
+        if let Ok(meta) = std::fs::metadata(&file) {
+            std::fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        out.write_all(new.as_bytes())?;
+        out.sync_all()?;
+        std::fs::rename(&tmp, &file)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.map(|()| removed)
+}
+
+/// How `host:port` is written in `known_hosts`, as ssh(1) writes it.
+fn host_entry(host: &str, port: u16) -> String {
+    if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    }
+}
+
+/// Whether `line` pins a key of `key`'s type for `entry`: `Some(hashed)` when it
+/// does, `hashed` telling whether it names the host hashed. Comments, blank
+/// lines, `@cert-authority` / `@revoked` lines and lines whose key does not
+/// parse never do: what is not understood is left as it is.
+fn pins_type(line: &str, entry: &str, key: &PublicKey) -> Option<bool> {
+    let line = line.trim_start();
+    if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
+        return None;
+    }
+    let mut fields = line.split_whitespace();
+    let (Some(hosts), Some(_type), Some(blob)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return None;
+    };
+    let hashed = names(hosts, entry)?;
+    russh::keys::parse_public_key_base64(blob)
+        .is_ok_and(|saved| same_type(&saved, key))
+        .then_some(hashed)
+}
+
+/// Whether a line's comma-separated host list names `entry`: `Some(hashed)` when
+/// it does, `hashed` telling whether a hashed name matched. A plain name matches
+/// regardless of case; a hashed one (`|1|salt|hash`) is tried with the name as
+/// given and in lower case, which is how ssh(1) hashes it. Patterns (`*`, `?`,
+/// `!`) never equal a name, as the check never matches them either.
+fn names(list: &str, entry: &str) -> Option<bool> {
+    let lower = entry.to_ascii_lowercase();
+    let mut found = None;
+    for name in list.split(',') {
+        match name.strip_prefix("|1|") {
+            Some(hashed) if hashes(hashed, entry) || hashes(hashed, &lower) => return Some(true),
+            Some(_) => {}
+            None if name.eq_ignore_ascii_case(entry) => found = Some(false),
+            None => {}
+        }
+    }
+    found
+}
+
+/// `name` hashed as `HashKnownHosts` writes it: `|1|salt|hash`, a fresh random
+/// 20-byte salt and HMAC-SHA1(salt, name), both base64.
+fn hashed_name(name: &str) -> std::io::Result<String> {
+    let mut salt = [0u8; 20];
+    getrandom::getrandom(&mut salt).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mac = Hmac::<Sha1>::new_from_slice(&salt)
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .chain_update(name.as_bytes())
+        .finalize()
+        .into_bytes();
+    Ok(format!(
+        "|1|{}|{}",
+        data_encoding::BASE64.encode(&salt),
+        data_encoding::BASE64.encode(&mac)
+    ))
+}
+
+/// Whether `salt|hash` (both base64) is HMAC-SHA1(salt, name).
+fn hashes(hashed: &str, name: &str) -> bool {
+    let Some((salt, hash)) = hashed.split_once('|') else {
+        return false;
+    };
+    let (Ok(salt), Ok(hash)) = (
+        data_encoding::BASE64.decode(salt.as_bytes()),
+        data_encoding::BASE64.decode(hash.as_bytes()),
+    ) else {
+        return false;
+    };
+    let Ok(mac) = Hmac::<Sha1>::new_from_slice(&salt) else {
+        return false;
+    };
+    mac.chain_update(name.as_bytes())
+        .verify_slice(&hash)
+        .is_ok()
+}
+
+/// The name a key type goes by in `known_hosts`. An RSA key's russh name follows
+/// the signature hash it was negotiated with; the file wants the key's own.
+pub(crate) fn key_type(key: &PublicKey) -> &'static str {
+    match key {
+        PublicKey::RSA { .. } => "ssh-rsa",
+        _ => key.name(),
+    }
 }
 
 /// Host key algorithms for `host:port`, those of the keys saved for it first,
@@ -376,6 +560,290 @@ mod tests {
         assert!(
             message.contains("ssh-keygen -R \"[10.0.0.5]:2222\" -f \"/home/me/.ssh/known_hosts\"")
         );
+    }
+
+    fn ed25519() -> PublicKey {
+        pubkey(&KeyPair::generate_ed25519())
+    }
+
+    fn read(file: &Path) -> String {
+        std::fs::read_to_string(file).expect("read")
+    }
+
+    #[test]
+    fn replacing_drops_the_old_key_and_pins_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let (old, new, other) = (ed25519(), ed25519(), ed25519());
+        write(
+            &file,
+            &[
+                String::from("# my servers"),
+                line("10.0.0.5", &old),
+                String::new(),
+                line("10.0.0.6", &other),
+            ],
+        );
+
+        assert_eq!(replace_in(&file, "10.0.0.5", 22, &new).unwrap(), 1);
+        assert_eq!(
+            read(&file),
+            format!(
+                "# my servers\n\n{}\n{}\n",
+                line("10.0.0.6", &other),
+                line("10.0.0.5", &new)
+            )
+        );
+        let files = [file.clone()];
+        assert!(matches!(
+            check_in(&files, "10.0.0.5", 22, &new),
+            Verdict::Known
+        ));
+        assert!(matches!(
+            check_in(&files, "10.0.0.6", 22, &other),
+            Verdict::Known
+        ));
+        // Written through a temp file that is gone again.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["known_hosts"]);
+    }
+
+    #[test]
+    fn a_port_other_than_22_is_an_entry_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let (on_22, old, new) = (ed25519(), ed25519(), ed25519());
+        write(&file, &[line("vm", &on_22), line("[vm]:2222", &old)]);
+
+        assert_eq!(replace_in(&file, "vm", 2222, &new).unwrap(), 1);
+        assert_eq!(
+            read(&file),
+            format!("{}\n{}\n", line("vm", &on_22), line("[vm]:2222", &new))
+        );
+    }
+
+    #[test]
+    fn hashed_names_are_matched_regardless_of_case() {
+        // Written by `ssh-keygen -H`: the first hashes `example.com`, the second
+        // `[example.com]:2222`.
+        const ON_22: &str = "|1|rF0iZ6UmrxfqFziUR+y1OAnbvK0=|y3TcuSq26U5HODCziCMs103PkEk= \
+            ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKvMobXCP6wkUilydytvOK7LabasDPlGlF2H5s1Xy4s3";
+        const ON_2222: &str = "|1|1Xtu7jI/QiC0TA60nMDciVu8sDU=|InwSbTSkr2Fi1Mtlvnuw1+QZx30= \
+            ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKvMobXCP6wkUilydytvOK7LabasDPlGlF2H5s1Xy4s3";
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        write(&file, &[ON_22.to_string(), ON_2222.to_string()]);
+        let new = ed25519();
+
+        assert_eq!(replace_in(&file, "example.org", 22, &new).unwrap(), 0);
+        assert_eq!(replace_in(&file, "example.com", 2222, &new).unwrap(), 1);
+        let text = read(&file);
+        assert!(text.starts_with(&format!("{ON_22}\n")), "{text}");
+        assert!(!text.contains(ON_2222), "{text}");
+
+        assert_eq!(replace_in(&file, "Example.COM", 22, &new).unwrap(), 1);
+        assert!(!read(&file).contains(ON_22));
+    }
+
+    #[test]
+    fn a_hashed_entry_is_replaced_by_a_hashed_one() {
+        // `[example.com]:2222`, hashed by `ssh-keygen -H`.
+        const OLD: &str = "|1|1Xtu7jI/QiC0TA60nMDciVu8sDU=|InwSbTSkr2Fi1Mtlvnuw1+QZx30= \
+            ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKvMobXCP6wkUilydytvOK7LabasDPlGlF2H5s1Xy4s3";
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let new = ed25519();
+        write(&file, &[OLD.to_string()]);
+
+        assert_eq!(replace_in(&file, "Example.com", 2222, &new).unwrap(), 1);
+        let text = read(&file);
+        assert!(
+            !text.contains("example.com") && !text.contains("Example.com"),
+            "{text}"
+        );
+        let (hosts, rest) = text.trim_end().split_once(' ').expect("a key line");
+        assert_eq!(rest, format!("ssh-ed25519 {}", new.public_key_base64()));
+        assert!(
+            hosts.starts_with("|1|") && !OLD.starts_with(hosts),
+            "{hosts}"
+        );
+        // A fresh salt, and a name both this matcher and the check find.
+        assert_ne!(hosts.split('|').nth(2), OLD.split('|').nth(2));
+        assert_eq!(names(hosts, "[example.com]:2222"), Some(true));
+        assert_eq!(names(hosts, "[example.com]:22"), None);
+        let files = [file.clone()];
+        assert!(matches!(
+            check_in(&files, "example.com", 2222, &new),
+            Verdict::Known
+        ));
+        assert!(matches!(
+            check_in(&files, "Example.com", 2222, &new),
+            Verdict::Known
+        ));
+    }
+
+    #[test]
+    fn a_plain_entry_is_replaced_by_a_plain_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let (old, new) = (ed25519(), ed25519());
+        write(&file, &[line("[vm]:2222", &old)]);
+
+        assert_eq!(replace_in(&file, "vm", 2222, &new).unwrap(), 1);
+        assert_eq!(read(&file), format!("{}\n", line("[vm]:2222", &new)));
+    }
+
+    #[test]
+    fn a_line_naming_several_hosts_goes_whole_as_with_ssh_keygen() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let (old, new) = (ed25519(), ed25519());
+        write(&file, &[line("vm,10.0.0.7", &old)]);
+
+        assert_eq!(replace_in(&file, "10.0.0.7", 22, &new).unwrap(), 1);
+        assert_eq!(read(&file), format!("{}\n", line("10.0.0.7", &new)));
+    }
+
+    #[test]
+    fn other_types_markers_and_unreadable_lines_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let ecdsa = russh::keys::parse_public_key_base64(
+            "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBAdX7uLfmKNNWdDCmvSEIf+RcVQX7pM+\
+             X+JsRGPG88ZBnYMJCOypWfiNliHIPyo8fNivzpE4a6ZynYc8KHiEz+4=",
+        )
+        .expect("ecdsa key");
+        let (old, new) = (ed25519(), ed25519());
+        let revoked = format!("@revoked {}", line("vm", &old));
+        let garbage = String::from("vm ssh-ed25519 not-a-key");
+        write(
+            &file,
+            &[
+                line("vm", &ecdsa),
+                line("vm", &old),
+                revoked.clone(),
+                garbage.clone(),
+            ],
+        );
+
+        assert_eq!(replace_in(&file, "vm", 22, &new).unwrap(), 1);
+        assert_eq!(
+            read(&file),
+            format!(
+                "{}\n{revoked}\n{garbage}\n{}\n",
+                line("vm", &ecdsa),
+                line("vm", &new)
+            )
+        );
+    }
+
+    #[test]
+    fn line_endings_and_a_missing_last_newline_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let (other, old, new) = (ed25519(), ed25519(), ed25519());
+
+        std::fs::write(
+            &file,
+            format!("{}\r\n{}\r\n", line("a", &other), line("vm", &old)),
+        )
+        .unwrap();
+        assert_eq!(replace_in(&file, "vm", 22, &new).unwrap(), 1);
+        assert_eq!(
+            read(&file),
+            format!("{}\r\n{}\n", line("a", &other), line("vm", &new))
+        );
+
+        std::fs::write(&file, line("a", &other)).unwrap();
+        assert_eq!(replace_in(&file, "vm", 22, &new).unwrap(), 0);
+        assert_eq!(
+            read(&file),
+            format!("{}\n{}\n", line("a", &other), line("vm", &new))
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".ssh").join("known_hosts");
+        let new = ed25519();
+        assert_eq!(replace_in(&file, "vm", 22, &new).unwrap(), 0);
+        assert_eq!(read(&file), format!("{}\n", line("vm", &new)));
+    }
+
+    #[test]
+    fn an_rsa_key_is_matched_by_key_and_written_as_ssh_rsa() {
+        let rsa = || pubkey(&KeyPair::generate_rsa(2048, key::SignatureHash::SHA2_512).unwrap());
+        let (old, new) = (rsa(), rsa());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        // As russh's own TOFU writes it: under the hash name.
+        write(&file, &[line("vm", &old)]);
+
+        assert_eq!(replace_in(&file, "vm", 22, &new).unwrap(), 1);
+        // `PublicKeyBase64` comes in with `use super::*` (Step 4 imports it).
+        assert_eq!(
+            read(&file),
+            format!("vm ssh-rsa {}\n", new.public_key_base64())
+        );
+        assert!(matches!(check_in(&[file], "vm", 22, &new), Verdict::Known));
+    }
+
+    #[test]
+    fn a_new_key_in_the_main_file_overrules_a_legacy_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let (primary, legacy) = (dir.path().join("a"), dir.path().join("b"));
+        let (old, new) = (ed25519(), ed25519());
+        write(&legacy, &[line("vm", &old)]);
+        let files = [primary.clone(), legacy.clone()];
+        assert!(matches!(
+            check_in(&files, "vm", 22, &new),
+            Verdict::Changed { .. }
+        ));
+
+        assert_eq!(replace_in(&primary, "vm", 22, &new).unwrap(), 0);
+        assert_eq!(
+            read(&legacy),
+            format!("{}\n", line("vm", &old)),
+            "the legacy file is left alone"
+        );
+        assert!(matches!(check_in(&files, "vm", 22, &new), Verdict::Known));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let (old, new) = (ed25519(), ed25519());
+        for mode in [0o600, 0o644] {
+            write(&file, &[line("vm", &old)]);
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+            replace_in(&file, "vm", 22, &new).unwrap();
+            let kept = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(kept, mode);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_file_is_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let (real, link) = (dir.path().join("real"), dir.path().join("known_hosts"));
+        let (old, new) = (ed25519(), ed25519());
+        write(&real, &[line("vm", &old)]);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        replace_in(&link, "vm", 22, &new).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(read(&real), format!("{}\n", line("vm", &new)));
     }
 
     /// The old file is where russh-keys itself pins keys on Windows.
