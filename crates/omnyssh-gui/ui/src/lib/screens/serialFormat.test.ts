@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ByteHistory, HEX_ROW, SerialFormatter, mapEnter } from './serialFormat';
+import { ByteHistory, HEX_ROW, SerialFormatter, formatTimestamp, mapEnter } from './serialFormat';
 
 const bytes = (...b: number[]): Uint8Array => Uint8Array.from(b);
 
@@ -89,5 +89,71 @@ describe('mapEnter', () => {
 
   it('leaves other characters alone', () => {
     expect(mapEnter('ls -l', 'crlf')).toBe('ls -l');
+  });
+});
+
+// 2026-10-03 12:34:56.789 local time.
+const AT = new Date(2026, 9, 3, 12, 34, 56, 789).getTime();
+const LATER = AT + 1000; // 12:34:57.789
+const DIM = '\x1b[90m';
+const UNDIM = '\x1b[39m';
+const ts = (s: string) => `${DIM}[${s}]${UNDIM} `;
+const enc = (s: string) => new TextEncoder().encode(s);
+
+describe('formatTimestamp', () => {
+  it('reads as local [HH:MM:SS.mmm]', () => {
+    expect(formatTimestamp(AT)).toBe('[12:34:56.789]');
+    expect(formatTimestamp(new Date(2026, 0, 1, 1, 2, 3, 4).getTime())).toBe('[01:02:03.004]');
+  });
+});
+
+describe('SerialFormatter with timestamps', () => {
+  it('stamps each text line with when its first character arrived', () => {
+    const f = new SerialFormatter('text', true);
+    expect(f.push(enc('boot\r\nwifi '), AT)).toBe(`${ts('12:34:56.789')}boot\r\n${ts('12:34:56.789')}wifi `);
+    // The line continues in the next chunk: no new stamp until after the newline.
+    expect(f.push(enc('up\r\nok'), LATER)).toBe(`up\r\n${ts('12:34:57.789')}ok`);
+  });
+
+  it('leaves blank lines unstamped', () => {
+    const f = new SerialFormatter('text', true);
+    expect(f.push(enc('a\r\n\r\nb'), AT)).toBe(`${ts('12:34:56.789')}a\r\n\r\n${ts('12:34:56.789')}b`);
+  });
+
+  it('starts every hex packet on its own stamped line, wrapping long ones under the stamp', () => {
+    const f = new SerialFormatter('hex', true);
+    const indent = ' '.repeat('[12:34:56.789] '.length);
+    expect(f.push(Uint8Array.from([0x55, 0xaa]), AT)).toBe(`${ts('12:34:56.789')}55 AA `);
+    const long = new Uint8Array(18);
+    expect(f.push(long, LATER)).toBe(
+      `\r\n${ts('12:34:57.789')}${'00 '.repeat(15)}00\r\n${indent}00 00 `
+    );
+  });
+
+  it('switches timestamps on and off with reset, keeping the plain output unchanged', () => {
+    const f = new SerialFormatter('text', true);
+    f.reset('text', false);
+    expect(f.push(enc('x\n'), AT)).toBe('x\n');
+    f.reset('hex', false);
+    expect(f.push(Uint8Array.from([1]), AT)).toBe('01 ');
+  });
+});
+
+describe('ByteHistory arrival times', () => {
+  it('keeps when each chunk arrived', () => {
+    const h = new ByteHistory(100);
+    h.push(Uint8Array.from([1]), AT);
+    h.push(Uint8Array.from([2]), LATER);
+    expect(h.entries()).toEqual([
+      { bytes: Uint8Array.from([1]), at: AT },
+      { bytes: Uint8Array.from([2]), at: LATER }
+    ]);
+  });
+
+  it('drops times along with evicted chunks', () => {
+    const h = new ByteHistory(2);
+    h.push(Uint8Array.from([1, 2]), AT);
+    h.push(Uint8Array.from([3, 4]), LATER);
+    expect(h.entries()).toEqual([{ bytes: Uint8Array.from([3, 4]), at: LATER }]);
   });
 });
