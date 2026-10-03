@@ -5,7 +5,7 @@
   // re-renders the kept history, so nothing already received is lost. Kept mounted
   // for the tab's whole life, like TerminalView.
   import '@xterm/xterm/css/xterm.css';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import type { Terminal } from '@xterm/xterm';
   import type { FitAddon } from '@xterm/addon-fit';
@@ -288,10 +288,11 @@
   });
 
   // Re-render when the timestamp toggle flips; a no-op on the initial run, since `term`
-  // doesn't exist yet (it's created asynchronously in onMount).
+  // doesn't exist yet (it's created asynchronously in onMount). Untracked, so the
+  // `display` it reads doesn't make a Text/HEX switch replay the history twice.
   $effect(() => {
     void stamped;
-    rerender();
+    untrack(rerender);
   });
 </script>
 
