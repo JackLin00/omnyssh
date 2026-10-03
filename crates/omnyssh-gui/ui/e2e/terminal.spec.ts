@@ -651,6 +651,15 @@ async function bootSerial(page: Page, quickGroups: unknown[] = []): Promise<void
       let cbid = 0;
       let groups = quickGroups;
       const win = window as unknown as Record<string, unknown>;
+      // `serial_open`'s output channel, captured so a test can push device bytes through it.
+      let outputChannel: number | undefined;
+      let outputIndex = 0;
+      (win as { __sendSerial?: (text: string) => void }).__sendSerial = (text: string) => {
+        if (outputChannel == null) return;
+        const cb = win[`__cb${outputChannel}`] as ((m: unknown) => void) | undefined;
+        // The raw path delivers an ArrayBuffer; mirror that so xterm's Uint8Array wrap works.
+        cb?.({ message: new TextEncoder().encode(text).buffer, index: outputIndex++ });
+      };
 
       (win as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
         invoke: (cmd: string, args: Record<string, unknown>) => {
@@ -668,6 +677,7 @@ async function bootSerial(page: Page, quickGroups: unknown[] = []): Promise<void
             case 'serial_list_ports':
               return Promise.resolve([{ name: 'COM3', description: null }]);
             case 'serial_open':
+              outputChannel = (args.onOutput as { id: number }).id;
               return Promise.resolve(1);
             case 'serial_write': {
               const { data } = args as { data: number[] };
@@ -701,6 +711,12 @@ async function bootSerial(page: Page, quickGroups: unknown[] = []): Promise<void
 const serialWrites = (page: Page) =>
   page.evaluate(() => (window as unknown as { __serialWrites?: number[][] }).__serialWrites ?? []);
 
+const sendSerial = (page: Page, text: string) =>
+  page.evaluate(
+    (text) => (window as unknown as { __sendSerial?: (t: string) => void }).__sendSerial?.(text),
+    text
+  );
+
 test('a serial tab in monitor mode sends a quick command to the port', async ({ page }) => {
   await bootSerial(page, [
     { name: 'Ops', commands: [{ label: 'ping', kind: 'hex', payload: '55 AA', ending: 'none' }] }
@@ -717,4 +733,36 @@ test('a serial tab in monitor mode sends a quick command to the port', async ({ 
 
   await pingButton.click();
   await expect.poll(() => serialWrites(page)).toEqual([[0x55, 0xaa]]);
+});
+
+test('the serial monitor stamps lines with their arrival time, and remembers the toggle', async ({
+  page
+}) => {
+  await bootSerial(page);
+
+  await page.getByRole('button', { name: 'Serial', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.getByRole('button', { name: 'Open', exact: true }).click();
+  await expect(page.locator('.xterm')).toBeVisible();
+
+  await sendSerial(page, 'hello\r\n');
+  await expect(page.locator('.xterm-rows')).toContainText('hello');
+
+  const timeButton = page.getByRole('button', { name: 'Time', exact: true });
+  await timeButton.click();
+  await expect(page.locator('.xterm-rows')).toContainText(/\[\d{2}:\d{2}:\d{2}\.\d{3}\] hello/);
+
+  await timeButton.click();
+  await expect(page.locator('.xterm-rows')).not.toContainText(/\[\d{2}:\d{2}:\d{2}\.\d{3}\]/);
+
+  // The toggle is a UI preference, not tied to the session, so it survives a reload.
+  await page.reload();
+  await page.getByRole('button', { name: 'Serial', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.getByRole('button', { name: 'Open', exact: true }).click();
+  await expect(page.locator('.xterm')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Time', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'false'
+  );
 });

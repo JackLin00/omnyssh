@@ -22,6 +22,7 @@
   import { matchTerminalAction, quickSlot } from './terminalShortcuts';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { quickCommandBytes } from '$lib/stores/quickCommands';
+  import { serialTimestamps } from '$lib/stores/terminalPrefs';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
   import type { SerialExitDto, TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
@@ -59,7 +60,11 @@
   let ready = $state(false);
   let canSend = $state(false);
   let display = $state<SerialDisplay>('text');
-  const formatter = new SerialFormatter('text');
+  const stamped = $derived(opts.mode === 'monitor' && $serialTimestamps);
+  // Only the initial values: the formatter is a plain stateful object, not reactive, and
+  // later changes go through `rerender()`'s `formatter.reset(display, stamped)`.
+  // svelte-ignore state_referenced_locally
+  const formatter = new SerialFormatter(display, stamped);
   const history = new ByteHistory(HISTORY_LIMIT);
   let themeUnsub: (() => void) | undefined;
   let mouseClipboardOff: (() => void) | undefined;
@@ -82,16 +87,17 @@
     });
   }
 
-  function setDisplay(next: SerialDisplay): void {
-    if (!term || next === display) return;
-    display = next;
-    formatter.reset(next);
+  /** Re-render the kept history into `term`, from scratch. Called after the display or
+   *  timestamp toggle changes. A no-op before `term` exists (e.g. the initial mount). */
+  function rerender(): void {
+    if (!term) return;
+    formatter.reset(display, stamped);
     // In-band RIS, not term.reset(): it is ordered after output xterm has queued but
     // not parsed yet, so nothing from before the flip lands after it.
     term.write('\x1bc');
     let batch = '';
-    for (const chunk of history.all()) {
-      batch += formatter.push(chunk);
+    for (const e of history.entries()) {
+      batch += formatter.push(e.bytes, e.at);
       if (batch.length >= REPLAY_BATCH) {
         term.write(batch);
         batch = '';
@@ -100,9 +106,15 @@
     if (batch) term.write(batch);
   }
 
+  function setDisplay(next: SerialDisplay): void {
+    if (next === display) return;
+    display = next;
+    rerender();
+  }
+
   function clear(): void {
     history.clear();
-    formatter.reset(display);
+    formatter.reset(display, stamped);
     term?.write('\x1bc');
   }
 
@@ -204,8 +216,9 @@
       const output = new Channel<TerminalBytes>();
       output.onmessage = (msg) => {
         const bytes = new Uint8Array(msg as unknown as ArrayBuffer);
-        history.push(bytes);
-        term?.write(formatter.push(bytes));
+        const at = Date.now();
+        history.push(bytes, at);
+        term?.write(formatter.push(bytes, at));
       };
       const exit = new Channel<SerialExitDto>();
       exit.onmessage = (msg) => {
@@ -273,6 +286,13 @@
       });
     }
   });
+
+  // Re-render when the timestamp toggle flips; a no-op on the initial run, since `term`
+  // doesn't exist yet (it's created asynchronously in onMount).
+  $effect(() => {
+    void stamped;
+    rerender();
+  });
 </script>
 
 <div
@@ -299,6 +319,19 @@
         </button>
       {/each}
     </div>
+    {#if opts.mode === 'monitor'}
+      <button
+        type="button"
+        class="rounded-full border border-default px-3 py-0.5 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus {$serialTimestamps
+          ? 'bg-accent text-accent-fg'
+          : 'text-muted hover:text-fg'}"
+        aria-pressed={$serialTimestamps}
+        title="Stamp each line with when it arrived"
+        onclick={() => serialTimestamps.toggle()}
+      >
+        Time
+      </button>
+    {/if}
     <Button variant="ghost" title="Clear the output" onclick={clear}>Clear</Button>
   </div>
   <div class="relative min-h-0 flex-1 px-2 pt-2" style="background: {$terminalColors.background}">

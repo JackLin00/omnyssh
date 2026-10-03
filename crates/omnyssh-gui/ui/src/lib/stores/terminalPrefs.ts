@@ -72,3 +72,5 @@ function persistedFlag(localKey: string, storeKey: string, fallback: boolean) {
 export const copyOnSelect = persistedFlag('omnyssh-copy-on-select', 'copyOnSelect', true);
 /** Right-click in a terminal pastes the clipboard instead of opening the context menu. */
 export const rightClickPaste = persistedFlag('omnyssh-right-click-paste', 'rightClickPaste', true);
+/** Stamp a serial monitor's lines with their arrival time. */
+export const serialTimestamps = persistedFlag('omnyssh-serial-timestamps', 'serialTimestamps', false);
