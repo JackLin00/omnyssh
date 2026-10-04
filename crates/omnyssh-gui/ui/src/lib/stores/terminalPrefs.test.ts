@@ -56,3 +56,60 @@ describe('terminal mouse-clipboard prefs', () => {
     expect(get(copyOnSelect)).toBe(true);
   });
 });
+
+// The terminal font size: a number, clamped to 8-32, shared by every SSH and serial tab.
+// Same persistence shape as the flags above (localStorage mirror + tauri-plugin-store).
+describe('terminal font size', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    backend.get.mockReset();
+    backend.set.mockReset().mockResolvedValue(undefined);
+    backend.save.mockReset().mockResolvedValue(undefined);
+  });
+
+  it('defaults to 13', async () => {
+    const { terminalFontSize } = await fresh();
+    expect(get(terminalFontSize)).toBe(13);
+  });
+
+  it('set() clamps to the 8-32 range, and a non-number falls back to 13', async () => {
+    const { terminalFontSize } = await fresh();
+    terminalFontSize.set(40);
+    expect(get(terminalFontSize)).toBe(32);
+    terminalFontSize.set(2);
+    expect(get(terminalFontSize)).toBe(8);
+    terminalFontSize.set(NaN);
+    expect(get(terminalFontSize)).toBe(13);
+  });
+
+  it('step(+1) and step(-1) move within the range', async () => {
+    const { terminalFontSize } = await fresh();
+    terminalFontSize.step(1);
+    expect(get(terminalFontSize)).toBe(14);
+    terminalFontSize.step(-1);
+    expect(get(terminalFontSize)).toBe(13);
+  });
+
+  it('reset() returns to 13', async () => {
+    const { terminalFontSize } = await fresh();
+    terminalFontSize.set(20);
+    terminalFontSize.reset();
+    expect(get(terminalFontSize)).toBe(13);
+  });
+
+  it('a change is mirrored to localStorage and survives a reload', async () => {
+    let prefs = await fresh();
+    prefs.terminalFontSize.set(18);
+    expect(localStorage.getItem('omnyssh-terminal-font-size')).toBe('18');
+    prefs = await fresh();
+    expect(get(prefs.terminalFontSize)).toBe(18);
+  });
+
+  it('hydrate applies the stored value without clobbering a fresh user edit', async () => {
+    backend.get.mockResolvedValue(20);
+    const { terminalFontSize } = await fresh();
+    terminalFontSize.set(16); // user acts before hydrate runs
+    await terminalFontSize.hydrate();
+    expect(get(terminalFontSize)).toBe(16);
+  });
+});
