@@ -556,6 +556,18 @@ impl SshSession {
         })
     }
 
+    /// [`SshSession::connect_with`] for a connection the user is watching: a
+    /// changed host key is put to `host_keys` when there is one.
+    pub(crate) async fn connect_asking(
+        host: &Host,
+        passwords: Passwords<'_>,
+        host_keys: Option<&dyn AskHostKey>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            handle: Arc::new(connect_chain(host, passwords, false, host_keys).await?),
+        })
+    }
+
     /// Execute a shell command on the remote host and return its stdout.
     ///
     /// A new SSH channel is opened for each call so sessions can be
@@ -699,6 +711,14 @@ struct AcceptOnce {
     key: PublicKey,
 }
 
+/// Whether the user let a changed key of `hop` in on this open (Update or
+/// Once): a password remembered for the login is then not sent on its own.
+fn was_let_in(let_in: &[(String, u16)], hop: &Host) -> bool {
+    let_in
+        .iter()
+        .any(|(host, port)| *host == hop.hostname && *port == hop.port)
+}
+
 /// The changed key `hop` may show on this attempt.
 fn once_for<'a>(once: &'a [AcceptOnce], hop: &Host) -> Option<&'a PublicKey> {
     once.iter()
@@ -712,7 +732,9 @@ fn once_for<'a>(once: &'a [AcceptOnce], hop: &Host) -> Option<&'a PublicKey> {
 /// A changed host key is put to `host_keys` when there is one: the connection
 /// was turned down, and goes again as answered — with the new key saved, or let
 /// in once — or fails. A key that changes again is asked about again, up to
-/// [`HOST_KEY_ASKS`] times per host.
+/// [`HOST_KEY_ASKS`] times per host. On a hop whose changed key the user let in,
+/// a password remembered for the login earlier in the session is not sent
+/// unasked: if the change is an interception, it would go to the interceptor.
 async fn connect_chain(
     host: &Host,
     mut passwords: Passwords<'_>,
@@ -723,8 +745,11 @@ async fn connect_chain(
     let background = !matches!(passwords, Passwords::Ask(_));
     let mut once: Vec<AcceptOnce> = Vec::new();
     let mut asked: Vec<(String, u16)> = Vec::new();
+    // The hops whose changed key the user let in, saved or once.
+    let mut accepted: Vec<(String, u16)> = Vec::new();
     loop {
-        let e = match connect_hops(host, &chain, &mut passwords, lends_agent, &once).await {
+        let attempt = connect_hops(host, &chain, &mut passwords, lends_agent, &once, &accepted);
+        let e = match attempt.await {
             Ok(conn) => return Ok(conn),
             Err(e) => e,
         };
@@ -742,6 +767,9 @@ async fn connect_chain(
         asked.push(hop.clone());
         let decision = ask.ask(&changed).await;
         once.retain(|o| (o.host.as_str(), o.port) != (hop.0.as_str(), hop.1));
+        if decision != Decision::Cancel && !accepted.contains(&hop) {
+            accepted.push(hop.clone());
+        }
         match decision {
             Decision::Update => {
                 let (name, port, key) = (hop.0.clone(), hop.1, changed.offered.clone());
@@ -774,6 +802,7 @@ async fn connect_hops(
     passwords: &mut Passwords<'_>,
     lends_agent: bool,
     once: &[AcceptOnce],
+    accepted: &[(String, u16)],
 ) -> anyhow::Result<SshConnection> {
     // Walk the bastions outward: the first is reached directly, every later one
     // through its predecessor. The target then rides the last hop.
@@ -781,9 +810,13 @@ async fn connect_hops(
     for (i, hop) in chain.iter().enumerate() {
         let key = login_key(hop, &chain[..i]);
         let handle = match jumps.last() {
-            None => connect_direct(hop, &key, passwords, false, once_for(once, hop)).await,
+            None => {
+                let once = once_for(once, hop);
+                connect_direct(hop, &key, passwords, false, once, was_let_in(accepted, hop)).await
+            }
             Some(via) => {
-                connect_tunnelled(via, hop, &key, passwords, false, once_for(once, hop)).await
+                let (once, let_in) = (once_for(once, hop), was_let_in(accepted, hop));
+                connect_tunnelled(via, hop, &key, passwords, false, once, let_in).await
             }
         }
         .map_err(|e| at_hop(e, format!("ProxyJump via '{}' failed", hop.name)))
@@ -800,10 +833,14 @@ async fn connect_hops(
             passwords,
             lends_agent,
             once_for(once, host),
+            was_let_in(accepted, host),
         )
         .await
         .map_err(|e| at_hop(e, format!("connecting via '{}' failed", last.name)))?,
-        _ => connect_direct(host, &key, passwords, lends_agent, once_for(once, host)).await?,
+        _ => {
+            let (once, let_in) = (once_for(once, host), was_let_in(accepted, host));
+            connect_direct(host, &key, passwords, lends_agent, once, let_in).await?
+        }
     };
 
     Ok(SshConnection {
@@ -880,16 +917,19 @@ async fn jump_chain(host: &Host) -> anyhow::Result<Vec<Host>> {
 
 /// Opens a TCP connection to `host` and authenticates. `accept_once`: the
 /// changed key the user let in for this attempt, if any — every dial of the hop
-/// takes it, keyboard-interactive's fresh connection too.
+/// takes it, keyboard-interactive's fresh connection too. `key_let_in`: the user
+/// let a changed key of this hop in (saved or once), so no remembered password
+/// goes unasked.
 async fn connect_direct(
     host: &Host,
     key: &str,
     passwords: &mut Passwords<'_>,
     lends_agent: bool,
     accept_once: Option<&PublicKey>,
+    key_let_in: bool,
 ) -> anyhow::Result<Handle<KnownHostsHandler>> {
     let dial = || dial_direct(host, lends_agent, accept_once.cloned());
-    finish_auth(dial().await?, host, key, dial, passwords).await
+    finish_auth(dial().await?, host, key, dial, passwords, key_let_in).await
 }
 
 /// Reaches `host` through the already-connected bastion `via`: a `direct-tcpip`
@@ -902,9 +942,10 @@ async fn connect_tunnelled(
     passwords: &mut Passwords<'_>,
     lends_agent: bool,
     accept_once: Option<&PublicKey>,
+    key_let_in: bool,
 ) -> anyhow::Result<Handle<KnownHostsHandler>> {
     let dial = || dial_tunnelled(via, host, lends_agent, accept_once.cloned());
-    finish_auth(dial().await?, host, key, dial, passwords).await
+    finish_auth(dial().await?, host, key, dial, passwords, key_let_in).await
 }
 
 /// A connection that has shaken hands and passed the host-key check, not yet
@@ -1031,13 +1072,15 @@ fn known_hosts_handler(
 
 /// Authenticates the `first` connection as `host` (remembered passwords under
 /// `key`), converting a refusal into an error. `dial` opens another connection
-/// to the same hop, for keyboard-interactive.
+/// to the same hop, for keyboard-interactive. `key_let_in`: the user let a
+/// changed host key of this hop in.
 async fn finish_auth<F, Fut>(
     first: Dialed,
     host: &Host,
     key: &str,
     dial: F,
     passwords: &mut Passwords<'_>,
+    key_let_in: bool,
 ) -> anyhow::Result<Handle<KnownHostsHandler>>
 where
     F: Fn() -> Fut,
@@ -1067,10 +1110,15 @@ where
     // The server login password, never a key passphrase, and tried last: keys
     // are what OmnySSH steers users towards. One typed this session goes first,
     // as it is newer than a saved one — but never to a host key first seen on
-    // this connection: that is not the server it was typed for.
+    // this connection: that is not the server it was typed for. Nor to a changed
+    // key the user just let in (Update or Once): should the change be an
+    // interception, the password would go to the interceptor, so it is asked
+    // for again.
     let new_key = first.link.new_key();
     let typed = match passwords {
-        Passwords::Remembered | Passwords::Ask(_) if new_key.is_none() => password::accepted(key),
+        Passwords::Remembered | Passwords::Ask(_) if new_key.is_none() && !key_let_in => {
+            password::accepted(key)
+        }
         _ => None,
     };
     let saved = match passwords {

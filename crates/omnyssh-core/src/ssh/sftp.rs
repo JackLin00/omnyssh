@@ -15,6 +15,7 @@ use tokio::time;
 
 use crate::event::{CoreEvent, TransferId};
 use crate::ssh::client::Host;
+use crate::ssh::host_key::{AskHostKey, HostKeyPrompter};
 use crate::ssh::password::Prompter;
 use crate::ssh::session::{Passwords, SshSession};
 
@@ -96,9 +97,38 @@ impl SftpManager {
     pub async fn connect(
         host: &Host,
         event_tx: mpsc::Sender<CoreEvent>,
-        mut prompter: Prompter,
+        prompter: Prompter,
     ) -> anyhow::Result<Self> {
-        let session = SshSession::connect_with(host, Passwords::Ask(&mut prompter))
+        Self::open(host, event_tx, prompter, None).await
+    }
+
+    /// [`SftpManager::connect`], putting a changed host key to the user through
+    /// `host_keys` instead of only refusing it.
+    ///
+    /// # Errors
+    /// As [`SftpManager::connect`], including a changed key the user turned down.
+    pub async fn connect_asking_host_keys(
+        host: &Host,
+        event_tx: mpsc::Sender<CoreEvent>,
+        prompter: Prompter,
+        host_keys: HostKeyPrompter,
+    ) -> anyhow::Result<Self> {
+        Self::open(
+            host,
+            event_tx,
+            prompter,
+            Some(&host_keys as &dyn AskHostKey),
+        )
+        .await
+    }
+
+    async fn open(
+        host: &Host,
+        event_tx: mpsc::Sender<CoreEvent>,
+        mut prompter: Prompter,
+        host_keys: Option<&dyn AskHostKey>,
+    ) -> anyhow::Result<Self> {
+        let session = SshSession::connect_asking(host, Passwords::Ask(&mut prompter), host_keys)
             .await
             .context("SFTP SSH connect")?;
         // The login is bounded step by step; the channel must not hang either.

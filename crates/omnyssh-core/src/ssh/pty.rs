@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::event::CoreEvent;
 use crate::ssh::client::Host;
+use crate::ssh::host_key::{AskHostKey, HostKeyPrompter};
 use crate::ssh::identity;
 use crate::ssh::password::{AskPassword, NoAnswer, Prompt};
 use crate::ssh::session::{
@@ -184,7 +185,7 @@ async fn open_shell(
 }
 
 /// Owns the russh channel for one session and multiplexes I/O until close/EOF.
-#[allow(clippy::too_many_arguments)] // additive raw-output sink (§3.6) is the 8th
+#[allow(clippy::too_many_arguments)] // additive raw-output sink (§3.6) and the host-key opt-in
 async fn session_task(
     id: SessionId,
     host: Host,
@@ -194,6 +195,7 @@ async fn session_task(
     mut ctrl_rx: mpsc::UnboundedReceiver<Ctrl>,
     tx: mpsc::Sender<CoreEvent>,
     raw_output: Option<mpsc::Sender<(SessionId, Vec<u8>)>>,
+    host_keys: bool,
 ) {
     // Phase A/B: connect, authenticate — asking for a password in the tab when
     // the keys do not get in — and open the remote shell. Failures are reported
@@ -211,7 +213,14 @@ async fn session_task(
     // Asked once: the connection that takes agent channels and the request that
     // invites them must agree, even if the agent comes or goes during the login.
     let lends_agent = forwards_agent(&host);
-    let connected = connect_for_shell(&host, Passwords::Ask(&mut prompt), lends_agent, None).await;
+    let asker = host_keys.then(|| HostKeyPrompter::new(tx.clone(), host.name.clone()));
+    let connected = connect_for_shell(
+        &host,
+        Passwords::Ask(&mut prompt),
+        lends_agent,
+        asker.as_ref().map(|a| a as &dyn AskHostKey),
+    )
+    .await;
     // Keys typed past a password prompt must not reach the new shell (a
     // password entered twice would be echoed there). Without a prompt they are
     // the user's first command, and stay queued.
@@ -440,6 +449,9 @@ pub struct PtyManager {
     /// existing parser feed + `PtyOutput` nudge. `None` for the TUI, whose path is
     /// byte-for-byte unchanged.
     raw_output: Option<mpsc::Sender<(SessionId, Vec<u8>)>>,
+    /// Put a changed host key to the user instead of only refusing it (GUI
+    /// only, see [`PtyManager::asking_host_keys`]). The TUI leaves it off.
+    host_keys: bool,
 }
 
 impl PtyManager {
@@ -449,6 +461,7 @@ impl PtyManager {
             sessions: Vec::new(),
             next_id: 1,
             raw_output: None,
+            host_keys: false,
         }
     }
 
@@ -461,7 +474,17 @@ impl PtyManager {
             sessions: Vec::new(),
             next_id: 1,
             raw_output: Some(raw_output),
+            host_keys: false,
         }
+    }
+
+    /// Sessions put a changed host key to the user
+    /// ([`CoreEvent::HostKeyChanged`]) instead of only refusing it, for a
+    /// frontend that answers with [`crate::ssh::host_key::answer`].
+    #[must_use]
+    pub fn asking_host_keys(mut self) -> Self {
+        self.host_keys = true;
+        self
     }
 
     /// Opens a new terminal tab for `host` and returns the assigned [`SessionId`].
@@ -492,6 +515,7 @@ impl PtyManager {
             ctrl_rx,
             tx,
             self.raw_output.clone(),
+            self.host_keys,
         ));
         self.sessions.push(PtySession {
             id,
@@ -637,6 +661,14 @@ mod tests {
         // additive sink is absent unless a GUI opts in via `with_raw_output`.
         assert!(PtyManager::new().raw_output.is_none());
         assert!(PtyManager::default().raw_output.is_none());
+    }
+
+    #[test]
+    fn only_a_frontend_that_opts_in_asks_about_host_keys() {
+        assert!(!PtyManager::new().host_keys);
+        let (raw_tx, _raw_rx) = mpsc::channel::<(SessionId, Vec<u8>)>(1);
+        assert!(!PtyManager::with_raw_output(raw_tx).host_keys);
+        assert!(PtyManager::new().asking_host_keys().host_keys);
     }
 
     #[test]
