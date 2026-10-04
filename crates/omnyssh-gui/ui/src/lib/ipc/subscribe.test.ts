@@ -37,6 +37,7 @@ vi.mock('$lib/bindings', () => {
       updateAvailable: channel('updateAvailable'),
       keyPassphraseRequired: channel('keyPassphraseRequired'),
       passwordRequired: channel('passwordRequired'),
+      hostKeyChanged: channel('hostKeyChanged'),
       error: channel('error')
     }
   };
@@ -52,6 +53,7 @@ import { sftp } from '$lib/stores/sftp';
 import { lastError } from '$lib/stores/notifications';
 import { passphrasePrompt, passphraseQueue } from '$lib/stores/passphrase';
 import { passwordPrompt, passwordQueue } from '$lib/stores/password';
+import { hostKeyPrompt, hostKeyQueue } from '$lib/stores/hostKey';
 import { startEventBridge } from './subscribe';
 
 describe('startEventBridge', () => {
@@ -63,6 +65,7 @@ describe('startEventBridge', () => {
     lastError.set(null);
     passphraseQueue.set([]);
     passwordQueue.set([]);
+    hostKeyQueue.set([]);
     clearRun();
   });
 
@@ -105,6 +108,17 @@ describe('startEventBridge', () => {
     listeners.passwordRequired({ payload: second });
     expect(get(passwordPrompt)).toEqual(first);
     expect(get(passwordQueue)).toEqual([first, second]);
+  });
+
+  it('queues host-key questions in order', async () => {
+    await startEventBridge();
+    const key = { keyType: 'ssh-ed25519', fingerprint: 'SHA256:x' };
+    const first = { requestId: 5, hostName: 'nas', host: 'nas.lan', port: 22, jumpFor: null, file: '/k', saved: [key], offered: key };
+    const second = { ...first, requestId: 6, hostName: 'db' };
+    listeners.hostKeyChanged({ payload: first });
+    listeners.hostKeyChanged({ payload: second });
+    expect(get(hostKeyPrompt)).toEqual(first);
+    expect(get(hostKeyQueue)).toEqual([first, second]);
   });
 
   it('terminal-exited closes the tab whose backend id matches', async () => {

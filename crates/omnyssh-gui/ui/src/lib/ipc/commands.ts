@@ -7,6 +7,7 @@ import type {
   FileEntryDto,
   HostDto,
   HostInputDto,
+  HostKeyDecisionDto,
   QuickGroupDto,
   SerialConfigDto,
   SerialDeviceDto,
@@ -337,5 +338,11 @@ export async function unlockIdentity(keyPath: string, passphrase: string): Promi
 /** Answer a login's password prompt; `null` cancels the login. */
 export async function answerPassword(requestId: number, password: string | null): Promise<void> {
   const res = await commands.answerPassword(requestId, password);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Answer a changed host key: save it and connect, connect once, or give up. */
+export async function answerHostKey(requestId: number, decision: HostKeyDecisionDto): Promise<void> {
+  const res = await commands.answerHostKey(requestId, decision);
   if (res.status === 'error') throw new Error(res.error.message);
 }

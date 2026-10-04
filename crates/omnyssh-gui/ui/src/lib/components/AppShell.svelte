@@ -11,6 +11,7 @@
   import KeySetupProgress from '$lib/screens/KeySetupProgress.svelte';
   import PassphrasePrompt from '$lib/screens/PassphrasePrompt.svelte';
   import PasswordPrompt from '$lib/screens/PasswordPrompt.svelte';
+  import HostKeyPrompt from '$lib/screens/HostKeyPrompt.svelte';
   import UpdateBanner from './UpdateBanner.svelte';
   import { support } from '$lib/stores/support';
   import SerialConnect from '$lib/screens/SerialConnect.svelte';
@@ -52,5 +53,6 @@
   <KeySetupProgress />
   <PassphrasePrompt />
   <PasswordPrompt />
+  <HostKeyPrompt />
   <UpdateBanner />
 </div>
