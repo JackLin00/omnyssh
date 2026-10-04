@@ -65,6 +65,9 @@ pub(crate) struct KnownHostsHandler {
     no_method: Arc<AtomicBool>,
     /// The fingerprint of a host key first seen, and recorded, on this connection.
     new_key: Arc<Mutex<Option<String>>>,
+    /// The fingerprint of the host key this connection went ahead with, whatever
+    /// let it in: a remembered password goes only to the key it was typed for.
+    host_key: Arc<Mutex<Option<String>>>,
     /// Why the host key was turned down, for the user; russh itself only says
     /// "Unknown server key".
     refusal: Arc<Mutex<Option<Refusal>>>,
@@ -90,6 +93,7 @@ struct Link {
     hung_up: Arc<AtomicBool>,
     no_method: Arc<AtomicBool>,
     new_key: Arc<Mutex<Option<String>>>,
+    host_key: Arc<Mutex<Option<String>>>,
     refusal: Arc<Mutex<Option<Refusal>>>,
     /// Changes (to closed) once the session is over.
     ended: watch::Receiver<()>,
@@ -98,6 +102,14 @@ struct Link {
 impl Link {
     fn new_key(&self) -> Option<String> {
         self.new_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The fingerprint of the host key the connection went ahead with.
+    fn host_key(&self) -> Option<String> {
+        self.host_key
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -119,6 +131,14 @@ impl Link {
 }
 
 impl KnownHostsHandler {
+    /// Notes `fingerprint` as the host key the connection goes ahead with.
+    fn going_ahead_with(&self, fingerprint: &str) {
+        *self
+            .host_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fingerprint.to_string());
+    }
+
     /// Whether `key` is the changed key the user let in for this attempt.
     fn accepts_once(&self, key: &PublicKey) -> bool {
         self.accept_once.as_ref() == Some(key)
@@ -135,7 +155,10 @@ impl client::Handler for KnownHostsHandler {
     ) -> Result<bool, Self::Error> {
         let fingerprint = format!("SHA256:{}", server_public_key.fingerprint());
         let refusal = match known_hosts::check(&self.host, self.port, server_public_key) {
-            Verdict::Known => return Ok(true),
+            Verdict::Known => {
+                self.going_ahead_with(&fingerprint);
+                return Ok(true);
+            }
             // Host not seen before — record the key (trust on first use) so a
             // later key change is detected, then accept. Recording is
             // best-effort: a connection must not fail just because
@@ -158,6 +181,7 @@ impl client::Handler for KnownHostsHandler {
                         "could not record host key in known_hosts"
                     ),
                 }
+                self.going_ahead_with(&fingerprint);
                 *self
                     .new_key
                     .lock()
@@ -173,6 +197,7 @@ impl client::Handler for KnownHostsHandler {
                         %fingerprint,
                         "accepting a changed host key once, as the user chose"
                     );
+                    self.going_ahead_with(&fingerprint);
                     return Ok(true);
                 }
                 let changed = HostKeyChanged::new(
@@ -732,9 +757,10 @@ fn once_for<'a>(once: &'a [AcceptOnce], hop: &Host) -> Option<&'a PublicKey> {
 /// A changed host key is put to `host_keys` when there is one: the connection
 /// was turned down, and goes again as answered — with the new key saved, or let
 /// in once — or fails. A key that changes again is asked about again, up to
-/// [`HOST_KEY_ASKS`] times per host. On a hop whose changed key the user let in,
-/// a password remembered for the login earlier in the session is not sent
-/// unasked: if the change is an interception, it would go to the interceptor.
+/// [`HOST_KEY_ASKS`] times per host, then turned down in short. On a hop whose
+/// changed key the user let in, no password goes unasked on this call: a
+/// remembered one is held with the old key, and the configured one is asked for
+/// (see `finish_auth`).
 async fn connect_chain(
     host: &Host,
     mut passwords: Passwords<'_>,
@@ -761,8 +787,10 @@ async fn connect_chain(
         let ask = match host_keys {
             _ if background => return Err(changed.shown(Shown::Background).into()),
             Some(ask) if asked.iter().filter(|h| **h == hop).count() < HOST_KEY_ASKS => ask,
-            // Nobody to ask (the TUI), or asked enough: the whole story.
-            _ => return Err(changed.into()),
+            // Asked enough: the user has seen the story already.
+            Some(_) => return Err(changed.shown(Shown::KeepsChanging).into()),
+            // Nobody to ask (the TUI): the whole story.
+            None => return Err(changed.into()),
         };
         asked.push(hop.clone());
         let decision = ask.ask(&changed).await;
@@ -918,8 +946,8 @@ async fn jump_chain(host: &Host) -> anyhow::Result<Vec<Host>> {
 /// Opens a TCP connection to `host` and authenticates. `accept_once`: the
 /// changed key the user let in for this attempt, if any — every dial of the hop
 /// takes it, keyboard-interactive's fresh connection too. `key_let_in`: the user
-/// let a changed key of this hop in (saved or once), so no remembered password
-/// goes unasked.
+/// let a changed key of this hop in (saved or once), so the configured password
+/// is asked for rather than sent.
 async fn connect_direct(
     host: &Host,
     key: &str,
@@ -1053,6 +1081,7 @@ fn known_hosts_handler(
         hung_up: Arc::new(AtomicBool::new(false)),
         no_method: Arc::new(AtomicBool::new(false)),
         new_key: Arc::new(Mutex::new(None)),
+        host_key: Arc::new(Mutex::new(None)),
         refusal: Arc::new(Mutex::new(None)),
         ended,
     };
@@ -1063,6 +1092,7 @@ fn known_hosts_handler(
         hung_up: Arc::clone(&link.hung_up),
         no_method: Arc::clone(&link.no_method),
         new_key: Arc::clone(&link.new_key),
+        host_key: Arc::clone(&link.host_key),
         refusal: Arc::clone(&link.refusal),
         lends_agent,
         ended: ended_tx,
@@ -1109,20 +1139,28 @@ where
 
     // The server login password, never a key passphrase, and tried last: keys
     // are what OmnySSH steers users towards. One typed this session goes first,
-    // as it is newer than a saved one — but never to a host key first seen on
-    // this connection: that is not the server it was typed for. Nor to a changed
-    // key the user just let in (Update or Once): should the change be an
-    // interception, the password would go to the interceptor, so it is asked
-    // for again.
+    // as it is newer than a saved one — but only to the host key it was typed
+    // for (`password::accepted` checks), so never to a key first seen on this
+    // connection, nor to a changed key the user let in, saved or once: should
+    // the change be an interception, the password would go to the interceptor.
+    // Background work after an Update included.
     let new_key = first.link.new_key();
+    let host_key = first.link.host_key().unwrap_or_default();
     let typed = match passwords {
-        Passwords::Remembered | Passwords::Ask(_) if new_key.is_none() && !key_let_in => {
-            password::accepted(key)
+        Passwords::Remembered | Passwords::Ask(_) if new_key.is_none() => {
+            password::accepted(key, &host_key)
         }
         _ => None,
     };
+    // The configured password is not sent on its own to a changed key the user
+    // has just let in on this connection either: it is asked for (the asking
+    // connection is the only one that lets a key in), so the user types it
+    // knowingly. After an Update, later connections send it as before: saving
+    // the key is a lasting decision to trust it, and the user set up the login
+    // to go by itself.
     let saved = match passwords {
         Passwords::KeysOnly => None,
+        _ if key_let_in => None,
         _ => host.password.clone(),
     }
     .filter(|p| typed.as_ref() != Some(p));
@@ -1166,6 +1204,7 @@ where
             key,
             &refused,
             new_key.as_deref(),
+            &host_key,
         )
         .await?;
         let refusal = match asked {
@@ -1224,6 +1263,7 @@ async fn ask_password<F, Fut>(
     key: &str,
     refused: &[String],
     new_key: Option<&str>,
+    host_key: &str,
 ) -> anyhow::Result<Asked>
 where
     F: Fn() -> Fut,
@@ -1254,7 +1294,7 @@ where
             Offer::Rejected => refused.push(password),
             Offer::Unavailable(e) => return Err(e),
             accepted => {
-                password::remember(key, &password);
+                password::remember(key, &password, host_key);
                 return Ok(Asked::In(accepted));
             }
         }
@@ -1332,9 +1372,10 @@ where
             Err(e) => return Offer::Unavailable(e),
         },
     };
-    // With known_hosts unwritable every connection meets the key anew: this one
-    // must meet the same key as the first, whose fingerprint the user saw.
-    if let (Some(seen), Some(now)) = (first.link.new_key(), fresh.link.new_key()) {
+    // This connection must go ahead with the same key as the first, whose
+    // fingerprint the user saw and a remembered password was checked against —
+    // with known_hosts unwritable every connection meets the key anew.
+    if let (Some(seen), Some(now)) = (first.link.host_key(), fresh.link.host_key()) {
         if seen != now {
             return Offer::Unavailable(
                 Refused(format!(

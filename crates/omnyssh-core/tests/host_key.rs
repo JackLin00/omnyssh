@@ -18,6 +18,7 @@ use omnyssh_core::event::CoreEvent;
 use omnyssh_core::ssh::client::Host;
 use omnyssh_core::ssh::host_key::{self, Decision};
 use omnyssh_core::ssh::pty::PtyManager;
+use omnyssh_core::ssh::session::SshSession;
 
 const PASSWORD: &str = "host-key-test";
 
@@ -196,16 +197,32 @@ fn open_with(
     let (tx, rx) = mpsc::channel(256);
     let seen = frontend(rx, decisions);
     let mut pty = PtyManager::new().asking_host_keys();
-    let host = Host {
+    let id = pty
+        .open(&host(name, addr, password), 80, 24, tx)
+        .expect("open");
+    (pty, id, seen)
+}
+
+/// The host `name` at `addr`, logging in as `name`, with `password` saved for
+/// it (or none).
+fn host(name: &str, addr: SocketAddr, password: Option<&str>) -> Host {
+    Host {
         name: name.to_string(),
         hostname: addr.ip().to_string(),
         port: addr.port(),
         user: name.to_string(),
         password: password.map(str::to_string),
         ..Host::default()
-    };
-    let id = pty.open(&host, 80, 24, tx).expect("open");
-    (pty, id, seen)
+    }
+}
+
+/// Types `text` and Enter once the password prompt shows.
+async fn type_password(pty: &mut PtyManager, id: u64, text: &str) {
+    assert!(
+        screen_contains(pty, id, "'s password: ").await,
+        "no password prompt"
+    );
+    pty.write(id, format!("{text}\r").as_bytes()).expect("type");
 }
 
 async fn screen_contains(pty: &PtyManager, id: u64, text: &str) -> bool {
@@ -220,6 +237,12 @@ async fn screen_contains(pty: &PtyManager, id: u64, text: &str) -> bool {
     false
 }
 
+fn screen(pty: &PtyManager, id: u64) -> String {
+    let parser = pty.parser_for(id).expect("tab");
+    let contents = parser.lock().unwrap().screen().contents();
+    contents
+}
+
 async fn first_error(seen: &Mutex<Seen>) -> String {
     for _ in 0..100 {
         if let Some(error) = seen.lock().unwrap().errors.first().cloned() {
@@ -230,8 +253,10 @@ async fn first_error(seen: &Mutex<Seen>) -> String {
     panic!("no error reported");
 }
 
-/// Update puts the new key in place of the old one and logs in; the next
-/// connection meets a known key and asks nothing.
+/// Update puts the new key in place of the old one. The saved password is not
+/// sent on its own to the key just let in: the login asks for it. From then on
+/// the key is trusted, and the next connections, background ones too, log in
+/// with the saved password as before.
 #[tokio::test]
 async fn update_saves_the_new_key_and_connects() {
     isolate_home();
@@ -240,7 +265,8 @@ async fn update_saves_the_new_key_and_connects() {
     let (addr, _) = serve(vec![new.clone()]).await;
     pin(addr, &old);
 
-    let (pty, id, seen) = open("update", addr, vec![Decision::Update]);
+    let (mut pty, id, seen) = open("update", addr, vec![Decision::Update]);
+    type_password(&mut pty, id, PASSWORD).await;
     assert!(screen_contains(&pty, id, "logged-in").await, "no shell");
     assert_eq!(
         seen.lock().unwrap().asked,
@@ -252,10 +278,15 @@ async fn update_saves_the_new_key_and_connects() {
     let (pty, id, seen) = open("update", addr, vec![]);
     assert!(screen_contains(&pty, id, "logged-in").await, "no shell");
     assert!(seen.lock().unwrap().asked.is_empty());
+    assert!(!screen(&pty, id).contains("'s password: "), "asked again");
+    SshSession::connect(&host("update", addr, Some(PASSWORD)))
+        .await
+        .expect("background work logs in with the saved password");
 }
 
-/// Once lets the new key in for that connection only: nothing is saved, and
-/// the next connection asks again. Cancelling it fails with the headline only.
+/// Once lets the new key in for that connection only: nothing is saved, the
+/// saved password is asked for rather than sent, and the next connection asks
+/// again. Cancelling it fails with the headline only.
 #[tokio::test]
 async fn once_saves_nothing_and_cancel_gives_up() {
     isolate_home();
@@ -264,7 +295,8 @@ async fn once_saves_nothing_and_cancel_gives_up() {
     let (addr, _) = serve(vec![new.clone()]).await;
     pin(addr, &old);
 
-    let (pty, id, _seen) = open("once", addr, vec![Decision::Once]);
+    let (mut pty, id, _seen) = open("once", addr, vec![Decision::Once]);
+    type_password(&mut pty, id, PASSWORD).await;
     assert!(screen_contains(&pty, id, "logged-in").await, "no shell");
     assert!(
         pinned(addr, &old) && !pinned(addr, &new),
@@ -285,7 +317,7 @@ async fn once_saves_nothing_and_cancel_gives_up() {
 
 /// A different key on the connection after an answer is asked about again,
 /// never let in on the strength of the first answer — and a server that keeps
-/// changing its key is asked about twice at most.
+/// changing its key is asked about twice at most, then turned down in short.
 #[tokio::test]
 async fn a_key_that_changes_again_is_asked_about_again_at_most_twice() {
     isolate_home();
@@ -296,8 +328,14 @@ async fn a_key_that_changes_again_is_asked_about_again_at_most_twice() {
     pin(addr, &old);
 
     let (_pty, _id, seen) = open("rotating", addr, vec![Decision::Once; 3]);
-    let error = first_error(&seen).await;
-    assert!(error.contains("has changed"), "{error}");
+    assert_eq!(
+        first_error(&seen).await,
+        format!(
+            "Terminal: Host key of {} port {} keeps changing; not connecting",
+            addr.ip(),
+            addr.port()
+        )
+    );
     assert_eq!(
         seen.lock().unwrap().asked,
         [
@@ -309,9 +347,30 @@ async fn a_key_that_changes_again_is_asked_about_again_at_most_twice() {
     assert!(pinned(addr, &old), "nothing is saved");
 }
 
+/// A password typed for a login is remembered with the host key it went to,
+/// and background work (`SshSession::connect`) logs in with it for as long as
+/// the server shows that key.
+#[tokio::test]
+async fn a_remembered_password_serves_later_connections_to_the_same_key() {
+    isolate_home();
+    let _one = SERIAL.lock().await;
+    let key = KeyPair::generate_ed25519();
+    let (addr, _) = serve(vec![key.clone()]).await;
+    pin(addr, &key);
+
+    let (mut pty, id, _seen) = open_with("same-key", addr, None, vec![]);
+    type_password(&mut pty, id, PASSWORD).await;
+    assert!(screen_contains(&pty, id, "logged-in").await, "no shell");
+
+    SshSession::connect(&host("same-key", addr, None))
+        .await
+        .expect("the remembered password logs in again");
+}
+
 /// After the user lets a changed key in, a password typed for the login earlier
 /// in the session is not sent on its own: if the change is an interception, it
-/// would go to whoever intercepts. The login asks for it again instead.
+/// would go to whoever intercepts. The login asks for it again instead — and,
+/// once the key is saved, background work does not send it either.
 #[tokio::test]
 async fn a_remembered_password_is_not_sent_after_a_changed_key_is_let_in() {
     isolate_home();
@@ -325,38 +384,30 @@ async fn a_remembered_password_is_not_sent_after_a_changed_key_is_let_in() {
 
         // Typed once at the prompt: remembered for the login.
         let (mut pty, id, _seen) = open_with(&name, addr, None, vec![]);
-        assert!(
-            screen_contains(&pty, id, "'s password: ").await,
-            "no prompt"
-        );
-        pty.write(id, format!("{PASSWORD}\r").as_bytes())
-            .expect("type");
+        type_password(&mut pty, id, PASSWORD).await;
         assert!(screen_contains(&pty, id, "logged-in").await, "no shell");
 
         // The key changed and the user let it in: the password is asked again.
+        // The user gives up at the prompt (Ctrl+C).
         let (mut pty, id, seen) = open_with(&name, addr, None, vec![decision]);
         assert!(
             screen_contains(&pty, id, "'s password: ").await,
             "{decision:?}: the remembered password was sent to the changed key"
         );
         assert_eq!(seen.lock().unwrap().asked.len(), 1);
-        pty.write(id, format!("{PASSWORD}\r").as_bytes())
-            .expect("type");
-        assert!(screen_contains(&pty, id, "logged-in").await, "no shell");
+        pty.write(id, b"\x03").expect("type");
+        let error = first_error(&seen).await;
+        assert!(error.contains("cancelled"), "{error}");
 
         if decision == Decision::Update {
-            // The saved key is known from now on, and the remembered password
-            // goes as before.
-            let (pty, id, seen) = open_with(&name, addr, None, vec![]);
-            assert!(screen_contains(&pty, id, "logged-in").await, "no shell");
-            let screen = pty.parser_for(id).expect("tab");
-            assert!(!screen
-                .lock()
-                .unwrap()
-                .screen()
-                .contents()
-                .contains("'s password: "));
-            assert!(seen.lock().unwrap().asked.is_empty());
+            // The new key is saved, but the password was remembered with the
+            // old one: background work does not send it.
+            assert!(pinned(addr, &new));
+            let e = SshSession::connect(&host(&name, addr, None))
+                .await
+                .err()
+                .expect("no password to log in with");
+            assert!(format!("{e:#}").contains("no password is saved"), "{e:#}");
         }
     }
 }

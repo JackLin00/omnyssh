@@ -11,6 +11,9 @@
   import { lastError } from '$lib/stores/notifications';
   import { answerHostKey } from '$lib/ipc/commands';
 
+  // A key type with no standard file on the server: say what to look for.
+  const GENERIC_KEY_FILE = "<the server's host key .pub file>";
+
   let cancel = $state<HTMLButtonElement>();
   let box = $state<HTMLDivElement>();
 
@@ -67,7 +70,8 @@
         <p class="font-medium text-muted">
           Saved in <span class="break-all font-mono">{q.file}</span>
         </p>
-        {#each q.saved as key (key.fingerprint)}
+        <!-- By position: a fingerprint saved twice must not break the list. -->
+        {#each q.saved as key, i (i)}
           <p class="break-all font-mono text-fg">{key.keyType} {key.fingerprint}</p>
         {/each}
       </div>
@@ -78,7 +82,7 @@
       <p class="text-xs text-muted">
         If the server was reinstalled or its keys were replaced, this is expected. Otherwise someone may be
         intercepting the connection. Check the key on the server first, for example with
-        <code class="break-all font-mono">ssh-keygen -lf {serverKeyFile(q.offered.keyType)}</code>.
+        <code class="break-all font-mono">ssh-keygen -lf {serverKeyFile(q.offered.keyType) ?? GENERIC_KEY_FILE}</code>.
       </p>
       <div class="flex flex-wrap justify-end gap-2">
         <Button variant="ghost" onclick={() => void answer('update')}>Update key and connect</Button>

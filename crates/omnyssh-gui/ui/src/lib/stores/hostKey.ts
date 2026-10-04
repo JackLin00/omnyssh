@@ -20,8 +20,18 @@ export function hostKeyTitle(q: Pick<HostKeyChanged, 'host' | 'port' | 'jumpFor'
   return `Host key changed: ${where}${via}`;
 }
 
-/** Where a server keeps its public host key of `keyType`, for the check it suggests. */
-export function serverKeyFile(keyType: string): string {
-  const kind = keyType === 'ssh-rsa' ? 'rsa' : keyType.startsWith('ecdsa-') ? 'ecdsa' : 'ed25519';
-  return `/etc/ssh/ssh_host_${kind}_key.pub`;
+/**
+ * Where a server keeps its public host key of `keyType`, for the check it suggests;
+ * `null` for a type with no standard file.
+ */
+export function serverKeyFile(keyType: string): string | null {
+  const kind =
+    keyType === 'ssh-rsa'
+      ? 'rsa'
+      : keyType.startsWith('ecdsa-sha2-')
+        ? 'ecdsa'
+        : keyType === 'ssh-ed25519'
+          ? 'ed25519'
+          : null;
+  return kind && `/etc/ssh/ssh_host_${kind}_key.pub`;
 }

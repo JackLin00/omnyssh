@@ -32,6 +32,9 @@ pub(crate) enum Shown {
     Background,
     /// The user said no, or did not answer: the headline is all they need.
     Declined,
+    /// Asked about as often as one connection asks, and the server shows yet
+    /// another key: the user has seen the story, a short refusal will do.
+    KeepsChanging,
 }
 
 /// A connection turned down because the server's host key no longer matches the
@@ -114,6 +117,7 @@ impl fmt::Display for HostKeyChanged {
                 "Host key of {who} has changed (open a terminal to review the new key)"
             ),
             Shown::Declined => write!(f, "Host key of {who} has changed"),
+            Shown::KeepsChanging => write!(f, "Host key of {who} keeps changing; not connecting"),
         }
     }
 }
@@ -420,6 +424,14 @@ mod tests {
         assert_eq!(
             changed_key(2222).shown(Shown::Declined).to_string(),
             "Host key of 10.0.0.5 port 2222 has changed"
+        );
+    }
+
+    #[test]
+    fn a_key_that_keeps_changing_is_turned_down_in_short() {
+        assert_eq!(
+            changed_key(22).shown(Shown::KeepsChanging).to_string(),
+            "Host key of 10.0.0.5 keeps changing; not connecting"
         );
     }
 }

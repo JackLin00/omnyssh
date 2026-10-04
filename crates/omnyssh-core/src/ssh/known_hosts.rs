@@ -80,7 +80,13 @@ fn check_in(files: &[PathBuf], host: &str, port: u16, key: &PublicKey) -> Verdic
         if saved.contains(key) {
             return Verdict::Known;
         }
-        let same: Vec<PublicKey> = saved.into_iter().filter(|k| same_type(k, key)).collect();
+        // A key saved on several lines is one key: the question lists it once.
+        let mut same: Vec<PublicKey> = Vec::new();
+        for k in saved {
+            if same_type(&k, key) && !same.contains(&k) {
+                same.push(k);
+            }
+        }
         if !same.is_empty() {
             return Verdict::Changed {
                 file: file.clone(),
@@ -113,7 +119,26 @@ fn saved_keys(file: &Path, host: &str, port: u16) -> Result<Vec<PublicKey>, russ
 /// Saves a key first seen on this connection (trust on first use).
 pub(crate) fn learn(host: &str, port: u16, key: &PublicKey) -> Result<(), russh::keys::Error> {
     let path = path().ok_or(russh::keys::Error::NoHomeDir)?;
-    learn_known_hosts_path(host, port, key, path)
+    learn_in(&path, host, port, key)
+}
+
+/// Appends `key` for `host:port` to `file`, under [`edits`]: a first-use append
+/// racing a replace would otherwise land in the file the replace is about to
+/// rename over, and be lost.
+fn learn_in(file: &Path, host: &str, port: u16, key: &PublicKey) -> Result<(), russh::keys::Error> {
+    let _edit = edits();
+    learn_known_hosts_path(host, port, key, file)
+}
+
+/// Held around every change this process makes to a `known_hosts` file, so
+/// two never interleave: a replace reads, rewrites and renames the whole file,
+/// and anything another connection adds meanwhile would be lost. (Other
+/// programs, `ssh` itself among them, take no lock either.)
+fn edits() -> std::sync::MutexGuard<'static, ()> {
+    static KNOWN_HOSTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    KNOWN_HOSTS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Saves `key` as the one `host:port` shows now, in `~/.ssh/known_hosts`, in
@@ -142,6 +167,7 @@ pub(crate) fn replace_in(
     port: u16,
     key: &PublicKey,
 ) -> std::io::Result<usize> {
+    let _edit = edits();
     // Dotfile managers link the file: write the real one, not over the link.
     let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     let old = match std::fs::read_to_string(&file) {
@@ -184,18 +210,31 @@ pub(crate) fn replace_in(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("known_hosts");
-    let tmp = file.with_file_name(format!(".{name}.omnyssh-tmp"));
+    // A name of its own, made anew (never an existing file, nor one a link
+    // points at), so no other writer shares it.
+    let mut nonce = [0u8; 8];
+    getrandom::getrandom(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let tmp = file.with_file_name(format!(
+        ".{name}.omnyssh-{}-{}.tmp",
+        std::process::id(),
+        data_encoding::HEXLOWER.encode(&nonce)
+    ));
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
     let written = (|| {
-        let mut out = std::fs::File::create(&tmp)?;
         // The original's permissions before any content goes in.
         #[cfg(unix)]
         if let Ok(meta) = std::fs::metadata(&file) {
             std::fs::set_permissions(&tmp, meta.permissions())?;
         }
         out.write_all(new.as_bytes())?;
-        out.sync_all()?;
-        std::fs::rename(&tmp, &file)
+        out.sync_all()
     })();
+    // Closed before the rename, which Windows refuses for an open file.
+    drop(out);
+    let written = written.and_then(|()| std::fs::rename(&tmp, &file));
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -871,6 +910,68 @@ mod tests {
             }
             _ => panic!("expected a changed key"),
         }
+    }
+
+    #[test]
+    fn a_key_saved_twice_is_listed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let (old, new) = (ed25519(), ed25519());
+        write(&file, &[line("vm", &old), line("10.0.0.9,vm", &old)]);
+        match check_in(std::slice::from_ref(&file), "vm", 22, &new) {
+            Verdict::Changed { saved, .. } => assert_eq!(saved, vec![old]),
+            _ => panic!("expected a changed key"),
+        }
+    }
+
+    #[test]
+    fn concurrent_edits_are_never_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let replaced: Vec<(String, PublicKey, PublicKey)> = (0..8)
+            .map(|i| (format!("replaced{i}"), ed25519(), ed25519()))
+            .collect();
+        let learnt: Vec<(String, PublicKey)> =
+            (0..8).map(|i| (format!("learnt{i}"), ed25519())).collect();
+        let old_lines: Vec<String> = replaced.iter().map(|(h, old, _)| line(h, old)).collect();
+        write(&file, &old_lines);
+
+        std::thread::scope(|scope| {
+            for (host, _, new) in &replaced {
+                let file = &file;
+                scope.spawn(move || replace_in(file, host, 22, new).expect("replace"));
+            }
+            for (host, key) in &learnt {
+                let file = &file;
+                scope.spawn(move || learn_in(file, host, 22, key).expect("learn"));
+            }
+        });
+
+        let files = [file.clone()];
+        for (host, old, new) in &replaced {
+            assert!(
+                matches!(check_in(&files, host, 22, new), Verdict::Known),
+                "{host}"
+            );
+            assert!(
+                !read(&file).contains(&line(host, old)),
+                "{host}: old key left"
+            );
+        }
+        for (host, key) in &learnt {
+            assert!(
+                matches!(check_in(&files, host, 22, key), Verdict::Known),
+                "{host}"
+            );
+        }
+        // russh's own append may leave blank lines; every key line is there once.
+        let keys = read(&file).lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(keys, 16, "{}", read(&file));
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["known_hosts"], "no temp file left behind");
     }
 
     /// The old file is where russh-keys itself pins keys on Windows.

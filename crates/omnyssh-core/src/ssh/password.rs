@@ -3,7 +3,11 @@
 //! A password is kept in process memory only — never written to disk — and
 //! only once a server has accepted it. It is keyed by the login it was typed
 //! for: user, host, port and the bastions on the way, so it is never offered to
-//! another server that shares an address behind a different bastion.
+//! another server that shares an address behind a different bastion — and
+//! held with the host key of the server that took it (its `SHA256:…`
+//! fingerprint), so it is never sent on its own to a server showing another key:
+//! should a changed key be an interception, even one the user let in or saved,
+//! the password would go to the interceptor.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
@@ -17,8 +21,9 @@ use crate::event::CoreEvent;
 
 #[derive(Default)]
 struct State {
-    /// Passwords a server accepted, by login key.
-    accepted: HashMap<String, String>,
+    /// Passwords a server accepted, by login key, with the fingerprint of the
+    /// host key that server showed.
+    accepted: HashMap<String, Accepted>,
     /// How many times each login's password was remembered.
     generations: HashMap<String, u64>,
     /// How each login's password is sent, once a server has shown it.
@@ -26,6 +31,12 @@ struct State {
     /// Prompts waiting for an answer, by request id.
     pending: HashMap<u64, oneshot::Sender<Option<String>>>,
     last_request: u64,
+}
+
+/// A password a server took, and the host key it showed.
+struct Accepted {
+    password: String,
+    host_key: String,
 }
 
 /// How a server takes the login password.
@@ -56,16 +67,28 @@ fn accepted_signal() -> &'static watch::Sender<()> {
     ACCEPTED.get_or_init(|| watch::channel(()).0)
 }
 
-/// The password a server accepted for `key` this session.
-pub(crate) fn accepted(key: &str) -> Option<String> {
-    state().accepted.get(key).cloned()
+/// The password a server accepted for `key` this session, if that server showed
+/// `host_key` (a `SHA256:…` fingerprint) as this one does.
+pub(crate) fn accepted(key: &str, host_key: &str) -> Option<String> {
+    state()
+        .accepted
+        .get(key)
+        .filter(|held| held.host_key == host_key)
+        .map(|held| held.password.clone())
 }
 
-/// Remembers `password` for `key`; call only once the server took it.
-pub(crate) fn remember(key: &str, password: &str) {
+/// Remembers `password` for `key`, with the `host_key` fingerprint of the
+/// server that took it; call only once the server took it.
+pub(crate) fn remember(key: &str, password: &str, host_key: &str) {
     {
         let mut state = state();
-        state.accepted.insert(key.to_string(), password.to_string());
+        state.accepted.insert(
+            key.to_string(),
+            Accepted {
+                password: password.to_string(),
+                host_key: host_key.to_string(),
+            },
+        );
         *state.generations.entry(key.to_string()).or_default() += 1;
     }
     accepted_signal().send_replace(());
@@ -79,7 +102,7 @@ fn generation(key: &str) -> u64 {
 /// remembered meanwhile stays.
 pub(crate) fn forget(key: &str, password: &str) {
     let mut state = state();
-    if state.accepted.get(key).map(String::as_str) == Some(password) {
+    if state.accepted.get(key).map(|held| held.password.as_str()) == Some(password) {
         state.accepted.remove(key);
     }
 }
@@ -100,7 +123,7 @@ pub(crate) fn learn(key: &str, method: Method) {
 pub(crate) async fn remembered(key: &str) {
     let mut rx = accepted_signal().subscribe();
     let seen = generation(key);
-    while generation(key) == seen || accepted(key).is_none() {
+    while generation(key) == seen || !state().accepted.contains_key(key) {
         // The sender lives in a static and is never dropped.
         let _ = rx.changed().await;
     }
@@ -288,14 +311,14 @@ mod tests {
     #[tokio::test]
     async fn a_password_already_held_does_not_wake_a_waiter() {
         let key = "held@10.6.6.6:22";
-        remember(key, "secret");
+        remember(key, "secret", "SHA256:a");
         let waiter = tokio::spawn(async move { remembered(key).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !waiter.is_finished(),
             "only a newly typed password wakes it"
         );
-        remember(key, "newer");
+        remember(key, "newer", "SHA256:a");
         tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
             .expect("the waiter wakes")
@@ -309,11 +332,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!waiter.is_finished());
 
-        remember("someone-else@10.9.9.9:22", "x");
+        remember("someone-else@10.9.9.9:22", "x", "SHA256:a");
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!waiter.is_finished(), "another login does not wake it");
 
-        remember(key, "secret");
+        remember(key, "secret", "SHA256:a");
         tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
             .expect("the waiter wakes")
@@ -331,12 +354,20 @@ mod tests {
     #[test]
     fn a_refused_password_is_forgotten_but_a_newer_one_stays() {
         let key = "forget@10.8.8.8:22";
-        remember(key, "old");
+        remember(key, "old", "SHA256:a");
         forget(key, "old");
-        assert_eq!(accepted(key), None);
+        assert_eq!(accepted(key, "SHA256:a"), None);
 
-        remember(key, "new");
+        remember(key, "new", "SHA256:a");
         forget(key, "old");
-        assert_eq!(accepted(key).as_deref(), Some("new"));
+        assert_eq!(accepted(key, "SHA256:a").as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn a_password_goes_only_to_the_host_key_it_was_accepted_under() {
+        let key = "pinned@10.5.5.5:22";
+        remember(key, "secret", "SHA256:old");
+        assert_eq!(accepted(key, "SHA256:old").as_deref(), Some("secret"));
+        assert_eq!(accepted(key, "SHA256:new"), None);
     }
 }

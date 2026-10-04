@@ -53,4 +53,9 @@ describe('serverKeyFile', () => {
     expect(serverKeyFile('ecdsa-sha2-nistp256')).toBe('/etc/ssh/ssh_host_ecdsa_key.pub');
     expect(serverKeyFile('ssh-rsa')).toBe('/etc/ssh/ssh_host_rsa_key.pub');
   });
+
+  it('names no file for a type without a standard one', () => {
+    expect(serverKeyFile('ssh-dss')).toBeNull();
+    expect(serverKeyFile('sk-ssh-ed25519@openssh.com')).toBeNull();
+  });
 });
