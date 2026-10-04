@@ -211,7 +211,7 @@ async fn session_task(
     // Asked once: the connection that takes agent channels and the request that
     // invites them must agree, even if the agent comes or goes during the login.
     let lends_agent = forwards_agent(&host);
-    let connected = connect_for_shell(&host, Passwords::Ask(&mut prompt), lends_agent).await;
+    let connected = connect_for_shell(&host, Passwords::Ask(&mut prompt), lends_agent, None).await;
     // Keys typed past a password prompt must not reach the new shell (a
     // password entered twice would be echoed there). Without a prompt they are
     // the user's first command, and stay queued.

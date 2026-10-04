@@ -33,7 +33,7 @@ use tokio::sync::watch;
 use tokio::time;
 
 use crate::ssh::client::Host;
-use crate::ssh::host_key::{self, HostKeyChanged, Shown};
+use crate::ssh::host_key::{self, AskHostKey, Decision, HostKeyChanged, Shown};
 use crate::ssh::identity::{self, IdentityError};
 use crate::ssh::known_hosts::{self, Verdict};
 use crate::ssh::password::{self, AskPassword, Method, NoAnswer, Prompt};
@@ -47,12 +47,16 @@ use crate::ssh::password::{self, AskPassword, Method, NoAnswer, Prompt};
 ///
 /// Verifies the server's host key against `~/.ssh/known_hosts` (see
 /// [`known_hosts`]). Unknown hosts are recorded on first connection (trust on
-/// first use); changed keys are rejected.
+/// first use); changed keys are rejected, unless the user let that exact key in
+/// for this attempt.
 pub(crate) struct KnownHostsHandler {
     /// Hostname used for known_hosts lookup.
     host: String,
     /// Port used for known_hosts lookup.
     port: u16,
+    /// A changed key the user let in for this connection attempt only. Only
+    /// that exact key, and only in place of a saved one that differs.
+    accept_once: Option<PublicKey>,
     /// Set when the server ends the session with a DISCONNECT of its own, as
     /// OpenSSH does after too many failed logins. A link that just dies leaves
     /// it unset.
@@ -114,6 +118,13 @@ impl Link {
     }
 }
 
+impl KnownHostsHandler {
+    /// Whether `key` is the changed key the user let in for this attempt.
+    fn accepts_once(&self, key: &PublicKey) -> bool {
+        self.accept_once.as_ref() == Some(key)
+    }
+}
+
 #[async_trait]
 impl client::Handler for KnownHostsHandler {
     type Error = russh::Error;
@@ -155,6 +166,15 @@ impl client::Handler for KnownHostsHandler {
             }
             // A previously recorded key changed — refuse; possible MITM.
             Verdict::Changed { file, saved } => {
+                if self.accepts_once(server_public_key) {
+                    tracing::warn!(
+                        host = %self.host,
+                        port = self.port,
+                        %fingerprint,
+                        "accepting a changed host key once, as the user chose"
+                    );
+                    return Ok(true);
+                }
                 let changed = HostKeyChanged::new(
                     &self.host,
                     self.port,
@@ -329,14 +349,6 @@ fn at_hop(e: anyhow::Error, context: String) -> anyhow::Error {
 fn on_the_way_to(e: anyhow::Error, target: &str) -> anyhow::Error {
     match e.downcast::<HostKeyChanged>() {
         Ok(changed) => changed.jump_host_for(target).into(),
-        Err(e) => e,
-    }
-}
-
-/// A changed host key as background work words it.
-fn for_background(e: anyhow::Error) -> anyhow::Error {
-    match e.downcast::<HostKeyChanged>() {
-        Ok(changed) => changed.shown(Shown::Background).into(),
         Err(e) => e,
     }
 }
@@ -639,18 +651,20 @@ pub(crate) async fn connect_and_auth(
     host: &Host,
     passwords: Passwords<'_>,
 ) -> anyhow::Result<SshConnection> {
-    connect_chain(host, passwords, false).await
+    connect_chain(host, passwords, false, None).await
 }
 
 /// [`connect_and_auth`] for an interactive shell, whose target lends the local
 /// agent when `lends_agent` — decided once by the caller, which also offers it.
-/// Bastions never do, as with `ssh -J -A`.
+/// Bastions never do, as with `ssh -J -A`. A changed host key is put to
+/// `host_keys` when there is one.
 pub(crate) async fn connect_for_shell(
     host: &Host,
     passwords: Passwords<'_>,
     lends_agent: bool,
+    host_keys: Option<&dyn AskHostKey>,
 ) -> anyhow::Result<SshConnection> {
-    connect_chain(host, passwords, lends_agent).await
+    connect_chain(host, passwords, lends_agent, host_keys).await
 }
 
 /// Whether a terminal to `host` lends the local agent. With no agent running there
@@ -674,18 +688,83 @@ fn agent_running() -> bool {
     false
 }
 
+/// How many times one connection asks about the same host's changed key. A
+/// server that shows yet another key after that is not asked about again.
+const HOST_KEY_ASKS: usize = 2;
+
+/// A changed host key the user let in once, for the hop it was met on.
+struct AcceptOnce {
+    host: String,
+    port: u16,
+    key: PublicKey,
+}
+
+/// The changed key `hop` may show on this attempt.
+fn once_for<'a>(once: &'a [AcceptOnce], hop: &Host) -> Option<&'a PublicKey> {
+    once.iter()
+        .find(|o| o.host == hop.hostname && o.port == hop.port)
+        .map(|o| &o.key)
+}
+
 /// Both entry points share it, so every native SSH path honors the same keys,
 /// agent, passwords, known_hosts policy and bastions.
+///
+/// A changed host key is put to `host_keys` when there is one: the connection
+/// was turned down, and goes again as answered — with the new key saved, or let
+/// in once — or fails. A key that changes again is asked about again, up to
+/// [`HOST_KEY_ASKS`] times per host.
 async fn connect_chain(
     host: &Host,
     mut passwords: Passwords<'_>,
     lends_agent: bool,
+    host_keys: Option<&dyn AskHostKey>,
 ) -> anyhow::Result<SshConnection> {
     let chain = jump_chain(host).await?;
     let background = !matches!(passwords, Passwords::Ask(_));
-    connect_hops(host, &chain, &mut passwords, lends_agent)
-        .await
-        .map_err(|e| if background { for_background(e) } else { e })
+    let mut once: Vec<AcceptOnce> = Vec::new();
+    let mut asked: Vec<(String, u16)> = Vec::new();
+    loop {
+        let e = match connect_hops(host, &chain, &mut passwords, lends_agent, &once).await {
+            Ok(conn) => return Ok(conn),
+            Err(e) => e,
+        };
+        let changed = match e.downcast::<HostKeyChanged>() {
+            Ok(changed) => changed,
+            Err(e) => return Err(e),
+        };
+        let hop = (changed.host.clone(), changed.port);
+        let ask = match host_keys {
+            _ if background => return Err(changed.shown(Shown::Background).into()),
+            Some(ask) if asked.iter().filter(|h| **h == hop).count() < HOST_KEY_ASKS => ask,
+            // Nobody to ask (the TUI), or asked enough: the whole story.
+            _ => return Err(changed.into()),
+        };
+        asked.push(hop.clone());
+        let decision = ask.ask(&changed).await;
+        once.retain(|o| (o.host.as_str(), o.port) != (hop.0.as_str(), hop.1));
+        match decision {
+            Decision::Update => {
+                let (name, port, key) = (hop.0.clone(), hop.1, changed.offered.clone());
+                let saved =
+                    tokio::task::spawn_blocking(move || known_hosts::update(&name, port, &key))
+                        .await
+                        .context("known_hosts update panicked")?;
+                if let Err(e) = saved {
+                    return Err(anyhow!(
+                        "could not save the new host key of {} ({e})",
+                        known_hosts::who(&hop.0, hop.1)
+                    ));
+                }
+                tracing::info!(host = %hop.0, port = hop.1, "saved the changed host key, as the user chose");
+            }
+            Decision::Once => once.push(AcceptOnce {
+                host: hop.0,
+                port: hop.1,
+                key: changed.offered.clone(),
+            }),
+            Decision::Cancel => return Err(changed.shown(Shown::Declined).into()),
+        }
+    }
 }
 
 /// One attempt at the whole chain: the bastions outward, then the target.
@@ -694,6 +773,7 @@ async fn connect_hops(
     chain: &[Host],
     passwords: &mut Passwords<'_>,
     lends_agent: bool,
+    once: &[AcceptOnce],
 ) -> anyhow::Result<SshConnection> {
     // Walk the bastions outward: the first is reached directly, every later one
     // through its predecessor. The target then rides the last hop.
@@ -701,8 +781,10 @@ async fn connect_hops(
     for (i, hop) in chain.iter().enumerate() {
         let key = login_key(hop, &chain[..i]);
         let handle = match jumps.last() {
-            None => connect_direct(hop, &key, passwords, false).await,
-            Some(via) => connect_tunnelled(via, hop, &key, passwords, false).await,
+            None => connect_direct(hop, &key, passwords, false, once_for(once, hop)).await,
+            Some(via) => {
+                connect_tunnelled(via, hop, &key, passwords, false, once_for(once, hop)).await
+            }
         }
         .map_err(|e| at_hop(e, format!("ProxyJump via '{}' failed", hop.name)))
         .map_err(|e| on_the_way_to(e, &host.name))?;
@@ -711,10 +793,17 @@ async fn connect_hops(
 
     let key = login_key(host, chain);
     let handle = match (jumps.last(), chain.last()) {
-        (Some(via), Some(last)) => connect_tunnelled(via, host, &key, passwords, lends_agent)
-            .await
-            .map_err(|e| at_hop(e, format!("connecting via '{}' failed", last.name)))?,
-        _ => connect_direct(host, &key, passwords, lends_agent).await?,
+        (Some(via), Some(last)) => connect_tunnelled(
+            via,
+            host,
+            &key,
+            passwords,
+            lends_agent,
+            once_for(once, host),
+        )
+        .await
+        .map_err(|e| at_hop(e, format!("connecting via '{}' failed", last.name)))?,
+        _ => connect_direct(host, &key, passwords, lends_agent, once_for(once, host)).await?,
     };
 
     Ok(SshConnection {
@@ -789,14 +878,17 @@ async fn jump_chain(host: &Host) -> anyhow::Result<Vec<Host>> {
     Ok(chain)
 }
 
-/// Opens a TCP connection to `host` and authenticates.
+/// Opens a TCP connection to `host` and authenticates. `accept_once`: the
+/// changed key the user let in for this attempt, if any — every dial of the hop
+/// takes it, keyboard-interactive's fresh connection too.
 async fn connect_direct(
     host: &Host,
     key: &str,
     passwords: &mut Passwords<'_>,
     lends_agent: bool,
+    accept_once: Option<&PublicKey>,
 ) -> anyhow::Result<Handle<KnownHostsHandler>> {
-    let dial = || dial_direct(host, lends_agent);
+    let dial = || dial_direct(host, lends_agent, accept_once.cloned());
     finish_auth(dial().await?, host, key, dial, passwords).await
 }
 
@@ -809,8 +901,9 @@ async fn connect_tunnelled(
     key: &str,
     passwords: &mut Passwords<'_>,
     lends_agent: bool,
+    accept_once: Option<&PublicKey>,
 ) -> anyhow::Result<Handle<KnownHostsHandler>> {
-    let dial = || dial_tunnelled(via, host, lends_agent);
+    let dial = || dial_tunnelled(via, host, lends_agent, accept_once.cloned());
     finish_auth(dial().await?, host, key, dial, passwords).await
 }
 
@@ -846,9 +939,13 @@ impl Dialed {
 }
 
 /// Opens a TCP connection to `host` and verifies its host key.
-async fn dial_direct(host: &Host, lends_agent: bool) -> anyhow::Result<Dialed> {
+async fn dial_direct(
+    host: &Host,
+    lends_agent: bool,
+    accept_once: Option<PublicKey>,
+) -> anyhow::Result<Dialed> {
     let addr = format!("{}:{}", host.hostname, host.port);
-    let (handler, link) = known_hosts_handler(host, lends_agent);
+    let (handler, link) = known_hosts_handler(host, lends_agent, accept_once);
     let handle = time::timeout(
         CONNECT_TIMEOUT,
         client::connect(client_config(host), addr, handler),
@@ -870,6 +967,7 @@ async fn dial_tunnelled(
     via: &Handle<KnownHostsHandler>,
     host: &Host,
     lends_agent: bool,
+    accept_once: Option<PublicKey>,
 ) -> anyhow::Result<Dialed> {
     // The originator address is informational; ssh(1) reports the loopback it
     // forwards from, and servers only log it.
@@ -885,7 +983,7 @@ async fn dial_tunnelled(
     .map_err(|_| anyhow!("SSH connection timed out (10 s)"))?
     .with_context(|| format!("open tunnel to {}:{}", host.hostname, host.port))?;
 
-    let (handler, link) = known_hosts_handler(host, lends_agent);
+    let (handler, link) = known_hosts_handler(host, lends_agent, accept_once);
     let handle = time::timeout(
         CONNECT_TIMEOUT,
         client::connect_stream(client_config(host), channel.into_stream(), handler),
@@ -904,7 +1002,11 @@ async fn dial_tunnelled(
 /// The host-key verifier for `host`, and what it will report about the
 /// connection. The lookup uses the target's own hostname/port even over a
 /// tunnel, so `known_hosts` entries match what an `ssh -J` would record.
-fn known_hosts_handler(host: &Host, lends_agent: bool) -> (KnownHostsHandler, Link) {
+fn known_hosts_handler(
+    host: &Host,
+    lends_agent: bool,
+    accept_once: Option<PublicKey>,
+) -> (KnownHostsHandler, Link) {
     let (ended_tx, ended) = watch::channel(());
     let link = Link {
         hung_up: Arc::new(AtomicBool::new(false)),
@@ -916,6 +1018,7 @@ fn known_hosts_handler(host: &Host, lends_agent: bool) -> (KnownHostsHandler, Li
     let handler = KnownHostsHandler {
         host: host.hostname.clone(),
         port: host.port,
+        accept_once,
         hung_up: Arc::clone(&link.hung_up),
         no_method: Arc::clone(&link.no_method),
         new_key: Arc::clone(&link.new_key),
@@ -1846,6 +1949,26 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn only_the_exact_key_is_let_in_once() {
+        let key = || {
+            KeyPair::generate_ed25519()
+                .clone_public_key()
+                .expect("public key")
+        };
+        let (picked, other) = (key(), key());
+        let host = Host {
+            hostname: String::from("10.0.0.5"),
+            port: 22,
+            ..Host::default()
+        };
+        let (handler, _link) = known_hosts_handler(&host, false, Some(picked.clone()));
+        assert!(handler.accepts_once(&picked));
+        assert!(!handler.accepts_once(&other));
+        let (handler, _link) = known_hosts_handler(&host, false, None);
+        assert!(!handler.accepts_once(&picked));
+    }
+
+    #[test]
     fn a_changed_host_key_stays_recognisable_through_a_jump_host() {
         let key = || {
             KeyPair::generate_ed25519()
@@ -1871,10 +1994,6 @@ mod tests {
                 .starts_with("ProxyJump via 'bastion' failed: Host key of bastion.lan has changed"),
             "{hop}"
         );
-        // Background work gets the short form, the chain still in front.
-        assert!(for_background(hop).to_string().ends_with(
-            "Host key of bastion.lan has changed (open a terminal to review the new key)"
-        ));
     }
 
     #[test]

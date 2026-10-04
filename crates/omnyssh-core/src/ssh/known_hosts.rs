@@ -119,7 +119,6 @@ pub(crate) fn learn(host: &str, port: u16, key: &PublicKey) -> Result<(), russh:
 /// Saves `key` as the one `host:port` shows now, in `~/.ssh/known_hosts`, in
 /// place of the saved keys of its type. A key pinned in the Windows build's old
 /// file stays there: the main file is read first, so the new key decides.
-#[allow(dead_code)] // Called by the asking connection in Task L3; the attribute goes then.
 pub(crate) fn update(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
     let path = path()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory"))?;

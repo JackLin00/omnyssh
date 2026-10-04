@@ -164,6 +164,23 @@ pub enum CoreEvent {
         retry: bool,
         new_host_key: Option<String>,
     },
+    /// The host key of `host:port` no longer matches `known_hosts`, on a
+    /// connection to `host_name` the user started (a terminal or files). The
+    /// connection was turned down and waits for
+    /// [`crate::ssh::host_key::answer`]: save the new key and connect again,
+    /// connect again letting this one key in once, or give up. `jump_for` names
+    /// the host a bastion was on the way to; `saved` are the keys of the offered
+    /// type pinned in `file`. The key itself never leaves the core.
+    HostKeyChanged {
+        request_id: u64,
+        host_name: HostId,
+        host: String,
+        port: u16,
+        jump_for: Option<String>,
+        file: String,
+        saved: Vec<KeyFingerprint>,
+        offered: KeyFingerprint,
+    },
 
     // -----------------------------------------------------------------------
     // Update checker events
@@ -172,6 +189,15 @@ pub enum CoreEvent {
     UpdateAvailable(crate::update::UpdateInfo),
     /// A self-update finished — `Ok` on success, `Err` with a message on failure.
     UpdateInstalled(Result<(), String>),
+}
+
+/// A host key's type and SHA-256 fingerprint, as a host-key question shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyFingerprint {
+    /// `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa`, …
+    pub key_type: String,
+    /// `SHA256:…`, as `ssh-keygen -l` prints it.
+    pub fingerprint: String,
 }
 
 // ---------------------------------------------------------------------------

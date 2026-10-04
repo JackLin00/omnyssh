@@ -883,6 +883,16 @@ impl App {
                 });
             }
 
+            // The TUI never asks about a changed host key: its connections refuse
+            // one with the whole story. Should a question reach it anyway, the
+            // connection is not left waiting.
+            CoreEvent::HostKeyChanged { request_id, .. } => {
+                let _ = omnyssh_core::ssh::host_key::answer(
+                    request_id,
+                    omnyssh_core::ssh::host_key::Decision::Cancel,
+                );
+            }
+
             // ----------------------------------------------------------------
             // Update checker events
             // ----------------------------------------------------------------
