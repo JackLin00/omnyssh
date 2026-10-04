@@ -33,6 +33,7 @@ use tokio::sync::watch;
 use tokio::time;
 
 use crate::ssh::client::Host;
+use crate::ssh::host_key::{self, HostKeyChanged, Shown};
 use crate::ssh::identity::{self, IdentityError};
 use crate::ssh::known_hosts::{self, Verdict};
 use crate::ssh::password::{self, AskPassword, Method, NoAnswer, Prompt};
@@ -62,7 +63,7 @@ pub(crate) struct KnownHostsHandler {
     new_key: Arc<Mutex<Option<String>>>,
     /// Why the host key was turned down, for the user; russh itself only says
     /// "Unknown server key".
-    refusal: Arc<Mutex<Option<String>>>,
+    refusal: Arc<Mutex<Option<Refusal>>>,
     /// Whether this connection lends the local agent (`ssh -A`). Only a
     /// terminal's target does; any other gets its agent channels closed.
     lends_agent: bool,
@@ -73,12 +74,19 @@ pub(crate) struct KnownHostsHandler {
     ended: watch::Sender<()>,
 }
 
+/// Why a host key was turned down.
+enum Refusal {
+    Changed(Box<HostKeyChanged>),
+    /// Anything else, already worded for the user.
+    Other(String),
+}
+
 /// What a connection's [`KnownHostsHandler`] reports while it runs.
 struct Link {
     hung_up: Arc<AtomicBool>,
     no_method: Arc<AtomicBool>,
     new_key: Arc<Mutex<Option<String>>>,
-    refusal: Arc<Mutex<Option<String>>>,
+    refusal: Arc<Mutex<Option<Refusal>>>,
     /// Changes (to closed) once the session is over.
     ended: watch::Receiver<()>,
 }
@@ -99,7 +107,8 @@ impl Link {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         match (e, refusal) {
-            (russh::Error::UnknownKey, Some(why)) => Refused(why).into(),
+            (russh::Error::UnknownKey, Some(Refusal::Changed(changed))) => (*changed).into(),
+            (russh::Error::UnknownKey, Some(Refusal::Other(why))) => Refused(why).into(),
             (e, _) => anyhow::Error::new(e).context("SSH connection failed"),
         }
     }
@@ -145,13 +154,21 @@ impl client::Handler for KnownHostsHandler {
                 return Ok(true);
             }
             // A previously recorded key changed — refuse; possible MITM.
-            Verdict::Changed(file) => {
+            Verdict::Changed { file, saved } => {
+                let changed = HostKeyChanged::new(
+                    &self.host,
+                    self.port,
+                    file,
+                    saved,
+                    server_public_key.clone(),
+                );
                 tracing::warn!(
                     host = %self.host,
                     port = self.port,
+                    reason = %changed,
                     "server key mismatch in known_hosts — possible MITM attack, refusing connection"
                 );
-                known_hosts::changed_message(&self.host, self.port, &file, &fingerprint)
+                Refusal::Changed(Box::new(changed))
             }
             // Unreadable or corrupt known_hosts — fail closed rather than
             // accept an unverified key.
@@ -161,7 +178,9 @@ impl client::Handler for KnownHostsHandler {
                     error = %e,
                     "known_hosts check failed; refusing connection"
                 );
-                known_hosts::unreadable_message(&self.host, self.port, &file, &e)
+                Refusal::Other(known_hosts::unreadable_message(
+                    &self.host, self.port, &file, &e,
+                ))
             }
         };
         *self
@@ -248,7 +267,8 @@ async fn lend_agent(mut channel: russh::Channel<client::Msg>, mut ended: watch::
 // ---------------------------------------------------------------------------
 
 /// A connection the server turned away on purpose: it refused every credential,
-/// or its host key no longer matches `known_hosts`. A type of its own so a caller
+/// or its host key could not be checked. A changed host key is a
+/// [`HostKeyChanged`]. A type of its own so a caller
 /// that reconnects by itself can stop instead of piling up failed logins.
 #[derive(Debug)]
 pub(crate) struct Refused(String);
@@ -265,6 +285,7 @@ impl std::error::Error for Refused {}
 pub(crate) fn is_refused(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
         cause.is::<Refused>()
+            || cause.is::<HostKeyChanged>()
             || matches!(
                 cause.downcast_ref::<russh::Error>(),
                 Some(russh::Error::UnknownKey)
@@ -276,6 +297,10 @@ pub(crate) fn is_refused(e: &anyhow::Error) -> bool {
 /// before, but a refusal or a locked key stays recognisable through the jump
 /// chain.
 fn at_hop(e: anyhow::Error, context: String) -> anyhow::Error {
+    // Kept whole, with the key, so the connection can still ask about it.
+    if let Some(changed) = host_key::changed(&e) {
+        return changed.clone().within(context).into();
+    }
     let message = format!("{context}: {e:#}");
     if let Some(locked) = e
         .chain()
@@ -297,6 +322,22 @@ fn at_hop(e: anyhow::Error, context: String) -> anyhow::Error {
         Refused(message).into()
     } else {
         anyhow!(message)
+    }
+}
+
+/// A changed host key met on a bastion, marked as met on the way to `target`.
+fn on_the_way_to(e: anyhow::Error, target: &str) -> anyhow::Error {
+    match e.downcast::<HostKeyChanged>() {
+        Ok(changed) => changed.jump_host_for(target).into(),
+        Err(e) => e,
+    }
+}
+
+/// A changed host key as background work words it.
+fn for_background(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast::<HostKeyChanged>() {
+        Ok(changed) => changed.shown(Shown::Background).into(),
+        Err(e) => e,
     }
 }
 
@@ -641,26 +682,39 @@ async fn connect_chain(
     lends_agent: bool,
 ) -> anyhow::Result<SshConnection> {
     let chain = jump_chain(host).await?;
+    let background = !matches!(passwords, Passwords::Ask(_));
+    connect_hops(host, &chain, &mut passwords, lends_agent)
+        .await
+        .map_err(|e| if background { for_background(e) } else { e })
+}
 
+/// One attempt at the whole chain: the bastions outward, then the target.
+async fn connect_hops(
+    host: &Host,
+    chain: &[Host],
+    passwords: &mut Passwords<'_>,
+    lends_agent: bool,
+) -> anyhow::Result<SshConnection> {
     // Walk the bastions outward: the first is reached directly, every later one
     // through its predecessor. The target then rides the last hop.
     let mut jumps: Vec<Handle<KnownHostsHandler>> = Vec::with_capacity(chain.len());
     for (i, hop) in chain.iter().enumerate() {
         let key = login_key(hop, &chain[..i]);
         let handle = match jumps.last() {
-            None => connect_direct(hop, &key, &mut passwords, false).await,
-            Some(via) => connect_tunnelled(via, hop, &key, &mut passwords, false).await,
+            None => connect_direct(hop, &key, passwords, false).await,
+            Some(via) => connect_tunnelled(via, hop, &key, passwords, false).await,
         }
-        .map_err(|e| at_hop(e, format!("ProxyJump via '{}' failed", hop.name)))?;
+        .map_err(|e| at_hop(e, format!("ProxyJump via '{}' failed", hop.name)))
+        .map_err(|e| on_the_way_to(e, &host.name))?;
         jumps.push(handle);
     }
 
-    let key = login_key(host, &chain);
+    let key = login_key(host, chain);
     let handle = match (jumps.last(), chain.last()) {
-        (Some(via), Some(last)) => connect_tunnelled(via, host, &key, &mut passwords, lends_agent)
+        (Some(via), Some(last)) => connect_tunnelled(via, host, &key, passwords, lends_agent)
             .await
             .map_err(|e| at_hop(e, format!("connecting via '{}' failed", last.name)))?,
-        _ => connect_direct(host, &key, &mut passwords, lends_agent).await?,
+        _ => connect_direct(host, &key, passwords, lends_agent).await?,
     };
 
     Ok(SshConnection {
@@ -1788,6 +1842,40 @@ async fn collect_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::keys::key::KeyPair;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_changed_host_key_stays_recognisable_through_a_jump_host() {
+        let key = || {
+            KeyPair::generate_ed25519()
+                .clone_public_key()
+                .expect("public key")
+        };
+        let changed = anyhow::Error::from(HostKeyChanged::new(
+            "bastion.lan",
+            22,
+            PathBuf::from("/k/known_hosts"),
+            vec![key()],
+            key(),
+        ));
+        let hop = on_the_way_to(
+            at_hop(changed, String::from("ProxyJump via 'bastion' failed")),
+            "db",
+        );
+        assert!(is_refused(&hop));
+        let found = host_key::changed(&hop).expect("still a changed host key");
+        assert_eq!(found.jump_for.as_deref(), Some("db"));
+        assert!(
+            hop.to_string()
+                .starts_with("ProxyJump via 'bastion' failed: Host key of bastion.lan has changed"),
+            "{hop}"
+        );
+        // Background work gets the short form, the chain still in front.
+        assert!(for_background(hop).to_string().ends_with(
+            "Host key of bastion.lan has changed (open a terminal to review the new key)"
+        ));
+    }
 
     #[test]
     fn a_locked_key_stays_recognisable_through_a_jump_host() {

@@ -21,8 +21,12 @@ pub(crate) enum Verdict {
     Known,
     /// No key of this type is saved for the host.
     Unknown,
-    /// A saved key of the same type differs.
-    Changed(PathBuf),
+    /// A saved key of the same type differs. `saved` are the keys of that type
+    /// `file` holds for the host.
+    Changed {
+        file: PathBuf,
+        saved: Vec<PublicKey>,
+    },
     /// The file could not be read or parsed, or there is no home to find it in.
     Unreadable(PathBuf, russh::keys::Error),
 }
@@ -76,8 +80,12 @@ fn check_in(files: &[PathBuf], host: &str, port: u16, key: &PublicKey) -> Verdic
         if saved.contains(key) {
             return Verdict::Known;
         }
-        if saved.iter().any(|k| same_type(k, key)) {
-            return Verdict::Changed(file.clone());
+        let same: Vec<PublicKey> = saved.into_iter().filter(|k| same_type(k, key)).collect();
+        if !same.is_empty() {
+            return Verdict::Changed {
+                file: file.clone(),
+                saved: same,
+            };
         }
     }
     Verdict::Unknown
@@ -332,7 +340,7 @@ fn signs_with(key: &PublicKey, algo: &key::Name) -> bool {
 }
 
 /// The host as a refusal names it.
-fn who(host: &str, port: u16) -> String {
+pub(crate) fn who(host: &str, port: u16) -> String {
     if port == 22 {
         host.to_string()
     } else {
@@ -410,7 +418,7 @@ mod tests {
             Verdict::Known
         ));
         match check_in(&files, "10.0.0.5", 22, &pubkey(&other)) {
-            Verdict::Changed(path) => assert_eq!(path, file),
+            Verdict::Changed { file: path, .. } => assert_eq!(path, file),
             _ => panic!("expected a changed key"),
         }
         assert!(matches!(
@@ -444,7 +452,7 @@ mod tests {
         // The legacy pin still refuses a key nobody saved elsewhere...
         write(&legacy, &[line("vm", &pubkey(&stale))]);
         match check_in(&files, "vm", 22, &pubkey(&server)) {
-            Verdict::Changed(path) => assert_eq!(path, legacy),
+            Verdict::Changed { file: path, .. } => assert_eq!(path, legacy),
             _ => panic!("expected the legacy pin to refuse"),
         }
         // ...until the key is saved in the primary file, which is read first.
@@ -457,7 +465,7 @@ mod tests {
         write(&primary, &[line("vm", &pubkey(&stale))]);
         write(&legacy, &[line("vm", &pubkey(&server))]);
         match check_in(&files, "vm", 22, &pubkey(&server)) {
-            Verdict::Changed(path) => assert_eq!(path, primary),
+            Verdict::Changed { file: path, .. } => assert_eq!(path, primary),
             _ => panic!("expected the primary pin to refuse"),
         }
     }
@@ -484,7 +492,7 @@ mod tests {
         ));
         assert!(matches!(
             check_in(&files, "Build.Corp.lan", 22, &pubkey(&other)),
-            Verdict::Changed(_)
+            Verdict::Changed { .. }
         ));
     }
 
@@ -542,7 +550,7 @@ mod tests {
         ));
         // Another RSA key is a changed one, not a new type to trust.
         match check_in(&files, "vm", 22, &rsa()) {
-            Verdict::Changed(path) => assert_eq!(path, file),
+            Verdict::Changed { file: path, .. } => assert_eq!(path, file),
             _ => panic!("an RSA key under another hash name slipped past the pin"),
         }
     }
@@ -844,6 +852,26 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(read(&real), format!("{}\n", line("vm", &new)));
+    }
+
+    #[test]
+    fn a_changed_verdict_lists_the_saved_keys_of_the_offered_type_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let ecdsa = russh::keys::parse_public_key_base64(
+            "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBAdX7uLfmKNNWdDCmvSEIf+RcVQX7pM+\
+             X+JsRGPG88ZBnYMJCOypWfiNliHIPyo8fNivzpE4a6ZynYc8KHiEz+4=",
+        )
+        .expect("ecdsa key");
+        let (old, new) = (ed25519(), ed25519());
+        write(&file, &[line("vm", &ecdsa), line("vm", &old)]);
+        match check_in(std::slice::from_ref(&file), "vm", 22, &new) {
+            Verdict::Changed { file: path, saved } => {
+                assert_eq!(path, file);
+                assert_eq!(saved, vec![old]);
+            }
+            _ => panic!("expected a changed key"),
+        }
     }
 
     /// The old file is where russh-keys itself pins keys on Windows.

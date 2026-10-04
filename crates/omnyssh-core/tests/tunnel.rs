@@ -588,7 +588,7 @@ async fn a_locked_key_waits_for_its_passphrase() {
     );
 }
 
-/// A host key that no longer matches `known_hosts` is refused for good.
+/// A host key that no longer matches `known_hosts` is refused for good, with a pointer to the terminal that can review it.
 #[tokio::test]
 async fn a_changed_host_key_fails_without_a_retry() {
     isolate_home();
@@ -621,7 +621,8 @@ async fn a_changed_host_key_fails_without_a_retry() {
         .await
     {
         TunnelStatus::Failed(reason) => assert!(
-            reason.contains("has changed") && reason.contains(&*known_hosts.to_string_lossy()),
+            reason.contains("has changed")
+                && reason.contains("open a terminal to review the new key"),
             "{reason}"
         ),
         other => panic!("expected Failed, got {other:?}"),

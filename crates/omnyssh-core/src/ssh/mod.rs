@@ -5,6 +5,7 @@
 /// Context with service discovery and Auto SSH Key Setup for secure authentication.
 pub mod client;
 pub mod discovery;
+pub mod host_key;
 pub mod identity;
 pub mod jump;
 pub mod key_setup;
