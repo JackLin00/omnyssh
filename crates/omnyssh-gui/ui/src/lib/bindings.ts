@@ -502,6 +502,20 @@ async answerPassword(requestId: number, password: string | null) : Promise<Resul
 }
 },
 /**
+ * Answer the `host-key-changed` question `request_id`: `update` puts the new
+ * key in `~/.ssh/known_hosts` in place of the old one and connects, `once`
+ * connects letting that key in this once, `cancel` gives the connection up.
+ * Only the choice crosses: the key stays in the core.
+ */
+async answerHostKey(requestId: number, decision: HostKeyDecisionDto) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("answer_host_key", { requestId, decision }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Minimize and close to the tray, or not. Resolves to what this desktop allows —
  * a tray at all, and minimizing into it; what it does not, the window keeps doing
  * as before.
@@ -584,6 +598,7 @@ async saveUpdateConfig(config: UpdateConfigDto) : Promise<Result<null, CommandEr
 export const events = __makeEvents__<{
 error: Error,
 filePreview: FilePreview,
+hostKeyChanged: HostKeyChanged,
 hostStatusChanged: HostStatusChanged,
 hostsLoaded: HostsLoaded,
 keyPassphraseRequired: KeyPassphraseRequired,
@@ -607,6 +622,7 @@ updateAvailable: UpdateAvailable
 }>({
 error: "error",
 filePreview: "file-preview",
+hostKeyChanged: "host-key-changed",
 hostStatusChanged: "host-status-changed",
 hostsLoaded: "hosts-loaded",
 keyPassphraseRequired: "key-passphrase-required",
@@ -679,6 +695,17 @@ export type HostDto = { name: string; hostname: string; user: string; port: numb
  */
 export type HostInputDto = { name: string; hostname: string; user: string; port: number; identityFile?: string | null; password?: string | null; proxyJump?: string | null; tags: string[]; notes?: string | null; monitoring?: MonitorModeDto | null; monitorPort?: number | null; localForwards: LocalForwardDto[]; tunnelAutostart: boolean; forwardAgent: boolean }
 /**
+ * A host key no longer matches `known_hosts` on a connection the user started
+ * (a terminal or files); `jumpFor` names the host a bastion was on the way to.
+ * Answered with `answer_host_key`: only the choice crosses back, never a key.
+ */
+export type HostKeyChanged = { requestId: number; hostName: string; host: string; port: number; jumpFor: string | null; file: string; saved: KeyFingerprintDto[]; offered: KeyFingerprintDto }
+/**
+ * The answer to a changed host key, mirrors `Decision`. Only the choice
+ * crosses: the frontend cannot hand the core a key.
+ */
+export type HostKeyDecisionDto = "update" | "once" | "cancel"
+/**
  * Host origin, mirrors `omnyssh_core::ssh::client::HostSource`.
  */
 export type HostSourceDto = "sshConfig" | "manual"
@@ -691,6 +718,11 @@ export type HostStatusChanged = { hostName: string; status: ConnectionStatusDto 
  * cache; the bridge does not map `HostsLoaded` (tech-gui.md §3.4).
  */
 export type HostsLoaded = HostDto[]
+/**
+ * A host key's type and fingerprint, as the host-key dialog shows it. Never the
+ * key itself.
+ */
+export type KeyFingerprintDto = { keyType: string; fingerprint: string }
 /**
  * A private key is encrypted and no passphrase is cached yet. Frontends prompt
  * once per key path; the passphrase never crosses back out of the backend.

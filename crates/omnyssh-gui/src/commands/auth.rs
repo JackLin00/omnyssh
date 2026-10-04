@@ -1,6 +1,6 @@
-//! Unlock passphrase-protected identity files and answer login-password
-//! prompts (in-memory only).
+//! Unlock passphrase-protected identity files, answer login-password prompts (in-memory only) and changed host keys.
 
+use crate::dto::HostKeyDecisionDto;
 use crate::error::CommandError;
 
 /// Decrypt `key_path` with `passphrase` and remember it for this process. Only a
@@ -28,6 +28,18 @@ pub async fn unlock_identity(key_path: String, passphrase: String) -> Result<(),
 #[specta::specta]
 pub fn answer_password(request_id: u64, password: Option<String>) -> Result<(), CommandError> {
     omnyssh_core::ssh::password::answer(request_id, password).map_err(|e| CommandError {
+        message: e.to_string(),
+    })
+}
+
+/// Answer the `host-key-changed` question `request_id`: `update` puts the new
+/// key in `~/.ssh/known_hosts` in place of the old one and connects, `once`
+/// connects letting that key in this once, `cancel` gives the connection up.
+/// Only the choice crosses: the key stays in the core.
+#[tauri::command]
+#[specta::specta]
+pub fn answer_host_key(request_id: u64, decision: HostKeyDecisionDto) -> Result<(), CommandError> {
+    omnyssh_core::ssh::host_key::answer(request_id, decision.into()).map_err(|e| CommandError {
         message: e.to_string(),
     })
 }

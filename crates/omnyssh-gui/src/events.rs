@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dto::{
-    ConnectionStatusDto, FileEntryDto, HostDto, KeySetupStepDto, MetricsDto, ServiceDto,
-    TransferProgressDto, TunnelStatusDto, UpdateInfoDto,
+    ConnectionStatusDto, FileEntryDto, HostDto, KeyFingerprintDto, KeySetupStepDto, MetricsDto,
+    ServiceDto, TransferProgressDto, TunnelStatusDto, UpdateInfoDto,
 };
 
 /// Full host list broadcast. Emitted by `reload_hosts` after refreshing the
@@ -198,6 +198,22 @@ pub struct PasswordRequired {
     pub login: String,
     pub retry: bool,
     pub new_host_key: Option<String>,
+}
+
+/// A host key no longer matches `known_hosts` on a connection the user started
+/// (a terminal or files); `jumpFor` names the host a bastion was on the way to.
+/// Answered with `answer_host_key`: only the choice crosses back, never a key.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct HostKeyChanged {
+    pub request_id: u64,
+    pub host_name: String,
+    pub host: String,
+    pub port: u16,
+    pub jump_for: Option<String>,
+    pub file: String,
+    pub saved: Vec<KeyFingerprintDto>,
+    pub offered: KeyFingerprintDto,
 }
 
 /// A background error surfaced to the user.

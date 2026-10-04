@@ -9,10 +9,11 @@ use omnyssh_core::config::quick_commands::{Ending, PayloadKind, QuickCommand, Qu
 use omnyssh_core::config::serial_devices::{LineEnding, SerialDevice};
 use omnyssh_core::config::snippets::{Snippet, SnippetScope};
 use omnyssh_core::event::{
-    DetectedService, MetricValue, Metrics, ProcessInfo, ServiceKind, ServiceMetric,
+    DetectedService, KeyFingerprint, MetricValue, Metrics, ProcessInfo, ServiceKind, ServiceMetric,
 };
 use omnyssh_core::serial::{FlowControl, Parity, PortInfo, SerialConfig, StopBits};
 use omnyssh_core::ssh::client::{ConnectionStatus, Host, HostSource, MonitorMode};
+use omnyssh_core::ssh::host_key::Decision;
 use omnyssh_core::ssh::key_setup::KeySetupStep;
 use omnyssh_core::ssh::sftp::FileEntry;
 use omnyssh_core::ssh::tunnel::{LocalForward, TunnelStatus};
@@ -865,6 +866,44 @@ impl From<QuickGroupDto> for QuickGroup {
     }
 }
 
+/// A host key's type and fingerprint, as the host-key dialog shows it. Never the
+/// key itself.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyFingerprintDto {
+    pub key_type: String,
+    pub fingerprint: String,
+}
+
+impl From<&KeyFingerprint> for KeyFingerprintDto {
+    fn from(key: &KeyFingerprint) -> Self {
+        Self {
+            key_type: key.key_type.clone(),
+            fingerprint: key.fingerprint.clone(),
+        }
+    }
+}
+
+/// The answer to a changed host key, mirrors `Decision`. Only the choice
+/// crosses: the frontend cannot hand the core a key.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum HostKeyDecisionDto {
+    Update,
+    Once,
+    Cancel,
+}
+
+impl From<HostKeyDecisionDto> for Decision {
+    fn from(decision: HostKeyDecisionDto) -> Self {
+        match decision {
+            HostKeyDecisionDto::Update => Decision::Update,
+            HostKeyDecisionDto::Once => Decision::Once,
+            HostKeyDecisionDto::Cancel => Decision::Cancel,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1417,6 +1456,33 @@ mod tests {
         assert_eq!(
             wire(TunnelStatus::Failed(String::from("port 80 in use"))),
             serde_json::json!({"kind": "failed", "message": "port 80 in use"})
+        );
+    }
+
+    #[test]
+    fn a_host_key_decision_reads_as_its_lowercase_name() {
+        use omnyssh_core::ssh::host_key::Decision;
+        for (wire, decision) in [
+            ("\"update\"", Decision::Update),
+            ("\"once\"", Decision::Once),
+            ("\"cancel\"", Decision::Cancel),
+        ] {
+            let dto: HostKeyDecisionDto = serde_json::from_str(wire).expect(wire);
+            assert_eq!(Decision::from(dto), decision);
+        }
+        assert!(serde_json::from_str::<HostKeyDecisionDto>("\"trust\"").is_err());
+    }
+
+    #[test]
+    fn a_key_fingerprint_crosses_as_type_and_fingerprint() {
+        let key = omnyssh_core::event::KeyFingerprint {
+            key_type: String::from("ssh-ed25519"),
+            fingerprint: String::from("SHA256:abc"),
+        };
+        let dto = KeyFingerprintDto::from(&key);
+        assert_eq!(
+            serde_json::to_value(&dto).unwrap(),
+            serde_json::json!({ "keyType": "ssh-ed25519", "fingerprint": "SHA256:abc" })
         );
     }
 }

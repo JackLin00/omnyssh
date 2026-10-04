@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 use tokio::sync::mpsc;
 
-use crate::dto::{FileEntryDto, TransferProgressDto, TunnelStatusDto};
+use crate::dto::{FileEntryDto, KeyFingerprintDto, TransferProgressDto, TunnelStatusDto};
 use crate::events;
 use crate::state::GuiState;
 
@@ -77,6 +77,28 @@ pub async fn forward_core_events(app: AppHandle, mut rx: mpsc::Receiver<CoreEven
                     login,
                     retry,
                     new_host_key,
+                }
+                .emit(&app);
+            }
+            CoreEvent::HostKeyChanged {
+                request_id,
+                host_name,
+                host,
+                port,
+                jump_for,
+                file,
+                saved,
+                offered,
+            } => {
+                let _ = events::HostKeyChanged {
+                    request_id,
+                    host_name,
+                    host,
+                    port,
+                    jump_for,
+                    file,
+                    saved: saved.iter().map(KeyFingerprintDto::from).collect(),
+                    offered: KeyFingerprintDto::from(&offered),
                 }
                 .emit(&app);
             }

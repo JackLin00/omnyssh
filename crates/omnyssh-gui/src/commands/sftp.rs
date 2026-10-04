@@ -8,6 +8,7 @@ use tauri::{AppHandle, State};
 use tokio::sync::mpsc;
 
 use omnyssh_core::event::CoreEvent;
+use omnyssh_core::ssh::host_key::HostKeyPrompter;
 use omnyssh_core::ssh::identity;
 use omnyssh_core::ssh::password::Prompter;
 use omnyssh_core::ssh::sftp::{
@@ -43,7 +44,10 @@ pub async fn sftp_open(
     // The prompt goes out on the engine channel: this tab's own channel only
     // carries `sftp-*` events.
     let prompter = Prompter::new(state.engine_sender(), &host_name);
-    let manager = match SftpManager::connect(&host, tx, prompter).await {
+    // A changed host key is asked about on the engine channel too.
+    let host_keys = HostKeyPrompter::new(state.engine_sender(), &host_name);
+    let manager = match SftpManager::connect_asking_host_keys(&host, tx, prompter, host_keys).await
+    {
         Ok(manager) => manager,
         Err(e) => {
             if let Some(path) = omnyssh_core::ssh::session::passphrase_required(&e) {

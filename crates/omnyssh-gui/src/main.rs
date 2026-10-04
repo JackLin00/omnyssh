@@ -14,7 +14,7 @@ mod events;
 mod state;
 mod tray;
 
-use commands::auth::{answer_password, unlock_identity};
+use commands::auth::{answer_host_key, answer_password, unlock_identity};
 use commands::hosts::{
     delete_host, duplicate_host, list_hosts, refresh_metrics, reload_hosts, save_host,
 };
@@ -140,6 +140,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             refresh_metrics,
             unlock_identity,
             answer_password,
+            answer_host_key,
             set_tray_behavior,
             set_global_hotkey,
             check_update,
@@ -169,6 +170,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             events::UpdateAvailable,
             events::KeyPassphraseRequired,
             events::PasswordRequired,
+            events::HostKeyChanged,
             events::Error
         ])
 }
@@ -373,7 +375,8 @@ fn main() {
             // The additive PTY raw-byte tap (§3.6): the manager mirrors each session's
             // bytes into `raw_tx`; a forwarder demuxes them into per-tab channels.
             let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<(SessionId, Vec<u8>)>(256);
-            let pty = PtyManager::with_raw_output(raw_tx);
+            // The GUI answers host-key questions (`answer_host_key`); the TUI does not.
+            let pty = PtyManager::with_raw_output(raw_tx).asking_host_keys();
 
             // Pre-load the shared host config so the first `list_hosts` paints
             // immediately. A load failure here is non-fatal — the frontend's
