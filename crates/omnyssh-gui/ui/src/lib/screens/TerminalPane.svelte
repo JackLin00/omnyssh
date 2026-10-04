@@ -32,6 +32,8 @@
   import { matchTerminalAction, formatChord, quickSlot, type TerminalAction } from './terminalShortcuts';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { quickCommandBytes } from '$lib/stores/quickCommands';
+  import { terminalFontSize } from '$lib/stores/terminalPrefs';
+  import { attachWheelZoom } from './terminalZoom';
   import { isMac } from '$lib/platform';
   import type { SplitDir } from './splitLayout';
   import type { TerminalBytes } from '$lib/bindings';
@@ -159,10 +161,22 @@
   let connected = false;
   let ready = $state(false);
   let themeUnsub: (() => void) | undefined;
+  let fontSizeUnsub: (() => void) | undefined;
   let mouseClipboardOff: (() => void) | undefined;
+  let zoomOff: (() => void) | undefined;
   let exitOff: (() => void) | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let fitScheduled = false;
+  // The small "<n> px" badge shown in this pane when Ctrl+wheel changes the font size.
+  let sizeBadge = $state<number | null>(null);
+  let badgeTimer: ReturnType<typeof setTimeout> | undefined;
+  function flashSize(): void {
+    sizeBadge = get(terminalFontSize);
+    clearTimeout(badgeTimer);
+    badgeTimer = setTimeout(() => {
+      sizeBadge = null;
+    }, 1000);
+  }
   // The top-edge fade dissolves scrolled output into the top edge, but never the live
   // prompt: after `clear`/Ctrl+L the cursor homes to the top, so the fade must lift
   // there (see terminalFade). Recomputed after every write too, since those resets
@@ -204,9 +218,10 @@
       ]);
       if (destroyed) return;
 
+      let lastFontSize = get(terminalFontSize);
       term = new Terminal({
         fontFamily: MONO,
-        fontSize: 13,
+        fontSize: lastFontSize,
         cursorBlink: true,
         scrollback: 5000,
         // 3, not xterm's higher presets: it rescues truly unreadable pairs a program
@@ -222,6 +237,12 @@
       term.loadAddon(searchAddon);
       term.open(container);
       mouseClipboardOff = attachMouseClipboard(term, container, true);
+      // Ctrl+wheel over the terminal steps the shared font size; swallowed in the
+      // capture phase so the webview never page-zooms (see terminalZoom.ts).
+      zoomOff = attachWheelZoom(container, (d) => {
+        terminalFontSize.step(d);
+        flashSize();
+      });
       term.onScroll(syncScrolled);
       // The shell's own title (user@host: dir) names the pane when it sets one.
       term.onTitleChange((t) => (title = t));
@@ -231,6 +252,16 @@
       // theme flips. Its synchronous first call (pre-paint) also sets the initial theme.
       themeUnsub = terminalColors.subscribe((c) => {
         if (term) term.options.theme = c;
+      });
+      // Every terminal shares one font size: apply it live and refit (which also tells
+      // the backend to resize the PTY), skipping the initial fire that matches what the
+      // terminal was already created with.
+      fontSizeUnsub = terminalFontSize.subscribe((n) => {
+        if (term && n !== lastFontSize) {
+          term.options.fontSize = n;
+          scheduleFit();
+        }
+        lastFontSize = n;
       });
 
       // Route raw output into xterm. The channel is typed `number[]`, but the raw path
@@ -317,7 +348,10 @@
   onDestroy(() => {
     destroyed = true;
     themeUnsub?.();
+    fontSizeUnsub?.();
     mouseClipboardOff?.();
+    zoomOff?.();
+    clearTimeout(badgeTimer);
     exitOff?.();
     resizeObserver?.disconnect();
     // Idempotent: a remote-exit teardown already dropped this id backend-side (§3.4).
@@ -466,6 +500,14 @@
       class="absolute right-1.5 {titled ? 'top-8' : 'top-9'} z-20 max-w-[calc(100%-0.75rem)]"
     >
       <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
+    </div>
+  {/if}
+  {#if sizeBadge !== null}
+    <div
+      class="pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 rounded-md bg-surface-raised px-3 py-1.5 text-sm font-medium text-fg shadow-soft"
+      aria-live="polite"
+    >
+      {sizeBadge} px
     </div>
   {/if}
 </div>

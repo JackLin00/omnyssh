@@ -101,6 +101,11 @@ async function boot(
             case 'terminal_resize':
             case 'terminal_close':
               return Promise.resolve(null);
+            // The layout drives the tray on every boot (§4.3), whether or not a test
+            // opens Settings; without a real reply, Settings' `$traySupport.available`
+            // would read off a null.
+            case 'set_tray_behavior':
+              return Promise.resolve({ available: true, minimize: true });
             case 'plugin:event|listen': {
               const { event, handler } = args as { event: string; handler: number };
               (listeners[event] ||= []).push(handler);
@@ -202,6 +207,57 @@ test('a remote exit (terminal-exited) tears the tab down', async ({ page }) => {
 
   await expect(page.getByRole('button', { name: 'web-1 · terminal', exact: true })).toHaveCount(0);
   await expect(page.locator('.xterm')).toHaveCount(0);
+});
+
+test('Ctrl + mouse wheel resizes the terminal text, with a fading badge, a Settings control, and persistence', async ({
+  page
+}) => {
+  await boot(page);
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+
+  // xterm 6 paints glyphs on canvas, but still sets the font size on `.xterm-rows`
+  // (used for accessibility/selection), so its computed style tracks the real size.
+  const fontSize = () =>
+    page.evaluate(() => {
+      const rows = document.querySelector('.xterm-rows');
+      return rows ? getComputedStyle(rows).fontSize : null;
+    });
+  await expect.poll(fontSize).toBe('13px');
+
+  // Ctrl+wheel, scrolled "up" (negative deltaY): two 50px steps magnify by 2 (13 -> 15).
+  await page.locator('.xterm-screen').dispatchEvent('wheel', {
+    deltaY: -100,
+    ctrlKey: true,
+    bubbles: true,
+    cancelable: true
+  });
+  await expect.poll(fontSize).toBe('15px');
+  await expect(page.getByText('15 px')).toBeVisible();
+  // The badge fades out after about a second.
+  await expect(page.getByText('15 px')).toHaveCount(0, { timeout: 2000 });
+
+  // Settings, Terminal shows the same value; Reset brings both it and the live
+  // terminal (still mounted behind Settings) back to the default.
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
+  const input = page.getByLabel('Terminal font size');
+  await expect(input).toHaveValue('15');
+
+  await page.getByRole('button', { name: 'Reset', exact: true }).click();
+  await expect(input).toHaveValue('13');
+  await expect.poll(fontSize).toBe('13px');
+
+  // Step to a non-default size from Settings, then reload: a freshly opened terminal
+  // remembers it, rather than starting back at the default.
+  await page.getByRole('button', { name: 'Increase font size' }).click();
+  await expect(input).toHaveValue('14');
+
+  await page.reload();
+  await expect(page.getByText('web-1', { exact: true })).toBeVisible();
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+  await expect.poll(fontSize).toBe('14px');
 });
 
 test('Ctrl+Shift+F opens find, searches incrementally, re-presses reselect, and Escape closes it and returns focus', async ({

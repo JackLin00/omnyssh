@@ -11,7 +11,14 @@
   import GlobalHotkeySetting from './GlobalHotkeySetting.svelte';
   import { theme } from '$lib/stores/theme';
   import { streamerMode } from '$lib/stores/streamer';
-  import { copyOnSelect, rightClickPaste } from '$lib/stores/terminalPrefs';
+  import {
+    copyOnSelect,
+    rightClickPaste,
+    terminalFontSize,
+    FONT_SIZE_MIN,
+    FONT_SIZE_MAX,
+    FONT_SIZE_DEFAULT
+  } from '$lib/stores/terminalPrefs';
   import { refreshInterval, REFRESH_OPTIONS } from '$lib/stores/settings';
   import { traySupport, trayBehavior } from '$lib/stores/tray';
   import { isMac } from '$lib/platform';
@@ -78,6 +85,14 @@
     'rounded-lg px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
   const segState = (active: boolean): string =>
     active ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-surface-inset hover:text-fg';
+  const stepBtn =
+    'grid h-7 w-7 shrink-0 place-items-center rounded-full border border-default text-fg transition ' +
+    'hover:border-strong hover:bg-accent hover:text-accent-fg ' +
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+  const resetBtn =
+    'shrink-0 rounded-full border border-default px-3 py-1 text-xs text-muted transition ' +
+    'hover:border-strong hover:bg-accent hover:text-accent-fg disabled:cursor-not-allowed disabled:opacity-40 ' +
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
 </script>
 
 <section class="mx-auto h-full max-w-2xl p-6">
@@ -160,6 +175,47 @@
           true,
           () => rightClickPaste.toggle()
         )}
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <p class="text-sm">Font size</p>
+            <p class="text-xs text-muted">Ctrl + mouse wheel in a terminal changes it too.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              class={stepBtn}
+              aria-label="Decrease font size"
+              onclick={() => terminalFontSize.step(-1)}
+            >
+              −
+            </button>
+            <input
+              type="number"
+              class="w-16 rounded-lg bg-surface-inset px-2 py-1 text-center text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus"
+              min={FONT_SIZE_MIN}
+              max={FONT_SIZE_MAX}
+              aria-label="Terminal font size"
+              value={$terminalFontSize}
+              onchange={(e) => terminalFontSize.set(Number((e.target as HTMLInputElement).value))}
+            />
+            <button
+              type="button"
+              class={stepBtn}
+              aria-label="Increase font size"
+              onclick={() => terminalFontSize.step(1)}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              class={resetBtn}
+              disabled={$terminalFontSize === FONT_SIZE_DEFAULT}
+              onclick={() => terminalFontSize.reset()}
+            >
+              Reset
+            </button>
+          </div>
+        </div>
       </div>
     </Surface>
 

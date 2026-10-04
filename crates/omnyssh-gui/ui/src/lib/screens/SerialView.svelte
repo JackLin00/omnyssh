@@ -22,12 +22,13 @@
   import { matchTerminalAction, quickSlot } from './terminalShortcuts';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { quickCommandBytes } from '$lib/stores/quickCommands';
-  import { serialTimestamps } from '$lib/stores/terminalPrefs';
+  import { serialTimestamps, terminalFontSize } from '$lib/stores/terminalPrefs';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
   import type { SerialExitDto, TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
   import { HIGHLIGHT_LIMIT } from './terminalSearch';
   import QuickCommandBar from './QuickCommandBar.svelte';
+  import { attachWheelZoom } from './terminalZoom';
 
   let { session, active }: { session: Session; active: boolean } = $props();
   // SerialConnect always spawns serial tabs with their options, fixed for the tab's life.
@@ -68,9 +69,21 @@
   const formatter = new SerialFormatter(display, stamped);
   const history = new ByteHistory(HISTORY_LIMIT);
   let themeUnsub: (() => void) | undefined;
+  let fontSizeUnsub: (() => void) | undefined;
   let mouseClipboardOff: (() => void) | undefined;
+  let zoomOff: (() => void) | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let fitScheduled = false;
+  // The small "<n> px" badge shown in this tab when Ctrl+wheel changes the font size.
+  let sizeBadge = $state<number | null>(null);
+  let badgeTimer: ReturnType<typeof setTimeout> | undefined;
+  function flashSize(): void {
+    sizeBadge = get(terminalFontSize);
+    clearTimeout(badgeTimer);
+    badgeTimer = setTimeout(() => {
+      sizeBadge = null;
+    }, 1000);
+  }
 
   // Chunked and serialized like TerminalView's input, so a large paste stays in order.
   let writeChain: Promise<void> = Promise.resolve();
@@ -157,9 +170,10 @@
       ]);
       if (destroyed) return;
 
+      let lastFontSize = get(terminalFontSize);
       term = new Terminal({
         fontFamily: MONO,
-        fontSize: 13,
+        fontSize: lastFontSize,
         scrollback: 10000,
         // MCUs print bare LF line ends; without this every line would stair-step.
         convertEol: true,
@@ -179,6 +193,12 @@
       term.open(container);
       // Receive-only monitor tabs send nothing, so right-click keeps its native menu.
       mouseClipboardOff = attachMouseClipboard(term, container, opts.mode === 'terminal');
+      // Ctrl+wheel over the terminal steps the shared font size; swallowed in the
+      // capture phase so the webview never page-zooms (see terminalZoom.ts).
+      zoomOff = attachWheelZoom(container, (d) => {
+        terminalFontSize.step(d);
+        flashSize();
+      });
       // Copy and find (both modes) and paste (terminal mode) follow Settings → Keyboard
       // shortcuts; the pane chords mean nothing in a serial tab, so those keys go to the
       // device. A held paste chord repeats keydown with no keyup between; only the first
@@ -210,6 +230,15 @@
       });
       themeUnsub = terminalColors.subscribe((c) => {
         if (term) term.options.theme = c;
+      });
+      // Every terminal shares one font size: apply it live and refit, skipping the
+      // initial fire that matches what the terminal was already created with.
+      fontSizeUnsub = terminalFontSize.subscribe((n) => {
+        if (term && n !== lastFontSize) {
+          term.options.fontSize = n;
+          scheduleFit();
+        }
+        lastFontSize = n;
       });
 
       // The raw path delivers an ArrayBuffer despite the `number[]` type (see TerminalView).
@@ -270,7 +299,10 @@
   onDestroy(() => {
     destroyed = true;
     themeUnsub?.();
+    fontSizeUnsub?.();
     mouseClipboardOff?.();
+    zoomOff?.();
+    clearTimeout(badgeTimer);
     resizeObserver?.disconnect();
     if (serialId != null) void serialClose(serialId).catch(() => {});
     term?.dispose();
@@ -342,6 +374,14 @@
     {#if searchOpen && searchAddon}
       <div class="absolute right-3 top-2 z-20 max-w-[calc(100%-1.5rem)]">
         <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
+      </div>
+    {/if}
+    {#if sizeBadge !== null}
+      <div
+        class="pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 rounded-md bg-surface-raised px-3 py-1.5 text-sm font-medium text-fg shadow-soft"
+        aria-live="polite"
+      >
+        {sizeBadge} px
       </div>
     {/if}
   </div>
