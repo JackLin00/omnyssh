@@ -8,7 +8,10 @@ import type {
   HostDto,
   HostInputDto,
   HostKeyDecisionDto,
+  LogModeDto,
+  LogStatusDto,
   QuickGroupDto,
+  SaveKindDto,
   SerialConfigDto,
   SerialDeviceDto,
   SerialExitDto,
@@ -344,5 +347,50 @@ export async function answerPassword(requestId: number, password: string | null)
 /** Answer a changed host key: save it and connect, connect once, or give up. */
 export async function answerHostKey(requestId: number, decision: HostKeyDecisionDto): Promise<void> {
   const res = await commands.answerHostKey(requestId, decision);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Ask where to save a session log or an export, starting from `defaultName`; `null`
+ *  when the user cancels. Only a path returned here can be logged or exported to. */
+export async function pickSavePath(defaultName: string, kind: SaveKindDto): Promise<string | null> {
+  const res = await commands.pickSavePath(defaultName, kind);
+  if (res.status === 'error') throw new Error(res.error.message);
+  return res.data;
+}
+
+/** Start logging a terminal or serial session into `path`; `header` is the first line. */
+export async function logStart(
+  sessionId: number,
+  path: string,
+  timestamps: boolean,
+  mode: LogModeDto,
+  header: string
+): Promise<void> {
+  const res = await commands.logStart(sessionId, path, timestamps, mode, header);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Stop logging a session; `log-stopped` follows. */
+export async function logStop(sessionId: number): Promise<void> {
+  const res = await commands.logStop(sessionId);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** The file a session is logged into and the bytes written, or `null` if it is not. */
+export async function logStatus(sessionId: number): Promise<LogStatusDto | null> {
+  const res = await commands.logStatus(sessionId);
+  if (res.status === 'error') throw new Error(res.error.message);
+  return res.data;
+}
+
+/** Write an export to `path`, a path from `pickSavePath`. */
+export async function saveTextFile(path: string, text: string): Promise<void> {
+  const res = await commands.saveTextFile(path, text);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Show a saved log or export in the system file manager. */
+export async function revealPath(path: string): Promise<void> {
+  const res = await commands.revealPath(path);
   if (res.status === 'error') throw new Error(res.error.message);
 }

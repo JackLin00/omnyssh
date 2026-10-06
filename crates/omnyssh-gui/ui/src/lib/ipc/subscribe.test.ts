@@ -38,6 +38,7 @@ vi.mock('$lib/bindings', () => {
       keyPassphraseRequired: channel('keyPassphraseRequired'),
       passwordRequired: channel('passwordRequired'),
       hostKeyChanged: channel('hostKeyChanged'),
+      logStopped: channel('logStopped'),
       error: channel('error')
     }
   };
@@ -54,6 +55,8 @@ import { lastError } from '$lib/stores/notifications';
 import { passphrasePrompt, passphraseQueue } from '$lib/stores/passphrase';
 import { passwordPrompt, passwordQueue } from '$lib/stores/password';
 import { hostKeyPrompt, hostKeyQueue } from '$lib/stores/hostKey';
+import { sessionLogs, logStarted } from '$lib/stores/sessionLogs';
+import { statusNotice } from '$lib/stores/notifications';
 import { startEventBridge } from './subscribe';
 
 describe('startEventBridge', () => {
@@ -119,6 +122,15 @@ describe('startEventBridge', () => {
     listeners.hostKeyChanged({ payload: second });
     expect(get(hostKeyPrompt)).toEqual(first);
     expect(get(hostKeyQueue)).toEqual([first, second]);
+  });
+
+  it('log-stopped drops the log and says where it was saved', async () => {
+    await startEventBridge();
+    logStarted(42, '/logs/web-1.log');
+    listeners.logStopped({ payload: { sessionId: 42, path: '/logs/web-1.log', bytes: 3, error: null } });
+    expect(get(sessionLogs).has(42)).toBe(false);
+    expect(get(statusNotice)?.message).toBe('Saved log to /logs/web-1.log');
+    statusNotice.set(null);
   });
 
   it('terminal-exited closes the tab whose backend id matches', async () => {
