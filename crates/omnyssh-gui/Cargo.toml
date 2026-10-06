@@ -60,6 +60,13 @@ serde_json = "1"
 # the frontend never calls its JS API (only our own `set_global_hotkey` command), so
 # there is no npm package and no npm/crate version pair to keep aligned.
 tauri-plugin-global-shortcut = "=2.3.2"
+# The save dialog of the session logs and exports (plan N). Pinned to 2.7.3, not a
+# bare "2": 2.8.0+ requires tauri >=2.12, and the core crate here is locked at 2.11.x.
+# Rust-side only, like the global hotkey: no npm package, no permission granted.
+tauri-plugin-dialog = "=2.7.3"
+# Never called: pins the dialog plugin's own dependency, whose 2.6.0+ requires tauri
+# >=2.12 and would otherwise move the core crate off 2.11.x.
+tauri-plugin-fs = "=2.5.2"
 
 # To restore SIGPIPE after a failed `exec` in the AppImage render retry — `std` resets
 # it as part of the child setup it runs in this process and never puts it back — and to

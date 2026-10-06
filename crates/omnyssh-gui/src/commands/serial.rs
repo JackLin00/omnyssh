@@ -6,12 +6,14 @@
 use omnyssh_core::config::serial_devices::{
     load_serial_devices, save_serial_devices, SerialDevice,
 };
+use omnyssh_core::event::SessionId;
 use omnyssh_core::serial::{self, SerialOutput, SerialSession};
 use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::dto::{SerialConfigDto, SerialDeviceDto, SerialExitDto, SerialPortDto, TerminalBytes};
 use crate::error::CommandError;
+use crate::session_log::SessionLogs;
 use crate::state::GuiState;
 
 /// The serial ports present right now. Async: enumeration can take 100ms+ on
@@ -43,17 +45,21 @@ pub async fn serial_open(
     on_exit: Channel<SerialExitDto>,
 ) -> Result<u64, CommandError> {
     let id = state.allocate_session();
+    let logs = state.logs();
     let config = config.into();
     let session = tauri::async_runtime::spawn_blocking(move || {
-        SerialSession::open(&config, move |out| match out {
-            SerialOutput::Data(bytes) => {
-                let _ = on_output.send(TerminalBytes(bytes));
-            }
-            SerialOutput::Closed(Some(error)) => {
-                let _ = on_exit.send(SerialExitDto { error });
-            }
-            // Closed by the user: the tab is already gone.
-            SerialOutput::Closed(None) => {}
+        SerialSession::open(&config, move |out| {
+            route_output(
+                &logs,
+                id,
+                out,
+                |bytes| {
+                    let _ = on_output.send(TerminalBytes(bytes));
+                },
+                |error| {
+                    let _ = on_exit.send(SerialExitDto { error });
+                },
+            )
         })
     })
     .await
@@ -65,6 +71,29 @@ pub async fn serial_open(
     })?;
     state.insert_serial(id, session);
     Ok(id)
+}
+
+/// Pass one event of serial session `id` on: received bytes to its log, if one is
+/// being written, and to the tab; a failure ends the log, then reaches the tab.
+fn route_output(
+    logs: &SessionLogs,
+    id: SessionId,
+    out: SerialOutput,
+    data: impl FnOnce(Vec<u8>),
+    exit: impl FnOnce(String),
+) {
+    match out {
+        SerialOutput::Data(bytes) => {
+            logs.write(id, &bytes);
+            data(bytes);
+        }
+        SerialOutput::Closed(Some(error)) => {
+            logs.stop(id);
+            exit(error);
+        }
+        // Closed by the user: the tab is already gone, and `serial_close` ends the log.
+        SerialOutput::Closed(None) => {}
+    }
 }
 
 /// Send keystrokes to a serial port.
@@ -87,11 +116,16 @@ pub fn serial_write(
 #[specta::specta]
 pub async fn serial_close(state: State<'_, GuiState>, session_id: u64) -> Result<(), CommandError> {
     let session = state.take_serial(session_id);
-    tauri::async_runtime::spawn_blocking(move || drop(session))
-        .await
-        .map_err(|e| CommandError {
-            message: format!("serial close task panicked: {e}"),
-        })
+    let logs = state.logs();
+    // The log ends after the drop, which hands over the last bytes read.
+    tauri::async_runtime::spawn_blocking(move || {
+        drop(session);
+        logs.stop(session_id);
+    })
+    .await
+    .map_err(|e| CommandError {
+        message: format!("serial close task panicked: {e}"),
+    })
 }
 
 /// The saved serial devices, for the dashboard's cards.
@@ -170,6 +204,8 @@ mod tests {
     use super::*;
     use omnyssh_core::config::serial_devices::LineEnding;
     use omnyssh_core::serial::{FlowControl, Parity, StopBits};
+    use omnyssh_core::session_log::{SessionLogger, TextLogger, NATIVE_NEWLINE};
+    use std::sync::{Arc, Mutex};
 
     fn device(name: &str, port: &str) -> SerialDevice {
         SerialDevice {
@@ -227,5 +263,42 @@ mod tests {
         let saved = SerialDevice::from(dto);
         assert_eq!(saved.name, "board");
         assert_eq!(saved.notes, None);
+    }
+
+    #[test]
+    fn serial_output_reaches_the_log_and_a_failure_ends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("COM3.log");
+        let logs = SessionLogs::default();
+        let stops = Arc::new(Mutex::new(0));
+        let count = Arc::clone(&stops);
+        logs.on_stopped(move |_| *count.lock().unwrap() += 1);
+        let logger = SessionLogger::Text(TextLogger::new(false, NATIVE_NEWLINE));
+        logs.start(4, &path, logger, "# COM3").unwrap();
+
+        let mut shown = Vec::new();
+        route_output(
+            &logs,
+            4,
+            SerialOutput::Data(b"boot ok\n".to_vec()),
+            |b| shown = b,
+            |_| {},
+        );
+        assert_eq!(shown, b"boot ok\n");
+        let mut why = None;
+        route_output(
+            &logs,
+            4,
+            SerialOutput::Closed(Some("unplugged".to_string())),
+            |_| {},
+            |e| why = Some(e),
+        );
+        assert_eq!(why.as_deref(), Some("unplugged"));
+        assert!(!logs.is_logging(4));
+        assert_eq!(*stops.lock().unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("# COM3{NATIVE_NEWLINE}boot ok{NATIVE_NEWLINE}")
+        );
     }
 }

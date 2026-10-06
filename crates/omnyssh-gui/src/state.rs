@@ -3,13 +3,15 @@
 //! per-session terminal channels, and the session registry that maps public ids to
 //! the core's inner handles. The shared engine channel feeds the bridge.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use omnyssh_core::event::{CoreEvent, SessionId, TransferId};
 use omnyssh_core::serial::SerialSession;
+use omnyssh_core::session_log::SessionLogger;
 use omnyssh_core::ssh::client::Host;
 use omnyssh_core::ssh::pool::PollManager;
 use omnyssh_core::ssh::pty::PtyManager;
@@ -19,6 +21,7 @@ use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
 use crate::dto::{HostDto, TerminalBytes, TunnelStatusDto};
+use crate::session_log::SessionLogs;
 
 /// Metric poll cadence. Mirrors the TUI's fixed interval; a configurable refresh
 /// interval lands with settings in Stage 4.3 (tech-gui.md §4.3).
@@ -64,6 +67,11 @@ impl SessionRegistry {
         Some(inner)
     }
 
+    /// The public id of a live terminal's PTY inner id (core → frontend).
+    pub fn public_of(&self, inner: SessionId) -> Option<SessionId> {
+        self.public_by_pty.get(&inner).copied()
+    }
+
     /// Drop a terminal by inner id (remote exit), returning its public id.
     pub fn remove_by_pty(&mut self, inner: SessionId) -> Option<SessionId> {
         let public = self.public_by_pty.remove(&inner)?;
@@ -106,6 +114,14 @@ pub struct GuiState {
     /// The last status of every tunnel that has not stopped, replayed to a
     /// frontend that reloads while its tunnels keep running.
     tunnel_statuses: Mutex<HashMap<String, TunnelStatusDto>>,
+    /// Session logs being written, keyed by public session id. Shared with each
+    /// serial session's output callback and main.rs's flush tick.
+    logs: Arc<SessionLogs>,
+    /// Every path the user picked in a save dialog this run: the only files the
+    /// log and export commands write, and the only ones `reveal_path` shows.
+    picked_paths: Mutex<HashSet<PathBuf>>,
+    /// The folder of the last picked path, where the next save dialog opens.
+    save_dir: Mutex<Option<PathBuf>>,
     /// Shared engine channel the bridge drains; cloned to `PollManager`/`PtyManager`.
     engine_tx: mpsc::Sender<CoreEvent>,
 }
@@ -127,6 +143,9 @@ impl GuiState {
             tunnels: Mutex::new(TunnelManager::new(engine_tx.clone())),
             tunnels_autostarted: AtomicBool::new(false),
             tunnel_statuses: Mutex::new(HashMap::new()),
+            logs: Arc::new(SessionLogs::default()),
+            picked_paths: Mutex::new(HashSet::new()),
+            save_dir: Mutex::new(None),
             engine_tx,
         }
     }
@@ -405,11 +424,21 @@ impl GuiState {
                 .expect("term_channels lock poisoned")
                 .remove(&inner);
         }
+        self.logs.stop(public);
     }
 
-    /// Route a raw PTY chunk (keyed by inner id) into its tab's channel. Called by
-    /// the raw-output forwarder; unknown/closed ids are dropped (§3.6).
+    /// Route a raw PTY chunk (keyed by inner id) into its tab's channel, and into
+    /// its session log if one is being written. Called by the raw-output forwarder;
+    /// unknown/closed ids are dropped (§3.6).
     pub fn send_terminal_output(&self, inner: SessionId, bytes: Vec<u8>) {
+        let public = self
+            .sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .public_of(inner);
+        if let Some(public) = public {
+            self.logs.write(public, &bytes);
+        }
         let channel = self
             .term_channels
             .lock()
@@ -438,6 +467,9 @@ impl GuiState {
             .lock()
             .expect("term_channels lock poisoned")
             .remove(&inner);
+        if let Some(public) = public {
+            self.logs.stop(public);
+        }
         public
     }
 
@@ -542,12 +574,85 @@ impl GuiState {
             .expect("serial lock poisoned")
             .remove(&id)
     }
+
+    /// The session logs, for a serial session's output callback and the flush tick.
+    pub fn logs(&self) -> Arc<SessionLogs> {
+        Arc::clone(&self.logs)
+    }
+
+    /// Remember a path the user picked in a save dialog, and its folder for the
+    /// next one. Returns the path as the frontend will hand it back.
+    pub fn remember_save_path(&self, path: PathBuf) -> String {
+        if let Some(dir) = path.parent() {
+            *self.save_dir.lock().expect("save_dir lock poisoned") = Some(dir.to_path_buf());
+        }
+        let shown = path.to_string_lossy().into_owned();
+        self.picked_paths
+            .lock()
+            .expect("picked_paths lock poisoned")
+            .insert(path);
+        shown
+    }
+
+    /// Where the next save dialog opens: the folder of the last pick, if any.
+    pub fn save_dir(&self) -> Option<PathBuf> {
+        self.save_dir
+            .lock()
+            .expect("save_dir lock poisoned")
+            .clone()
+    }
+
+    /// `path` if the user picked it in a save dialog this run. The webview can
+    /// write, or show in the file manager, nothing else.
+    pub fn picked_path(&self, path: &str) -> Result<PathBuf, String> {
+        let path = PathBuf::from(path);
+        if self
+            .picked_paths
+            .lock()
+            .expect("picked_paths lock poisoned")
+            .contains(&path)
+        {
+            Ok(path)
+        } else {
+            Err("Choose where to save it first".to_string())
+        }
+    }
+
+    /// Start logging the live terminal or serial session `id` into `path`, a path
+    /// picked in a save dialog, with `header` as the file's first line.
+    pub fn start_log(
+        &self,
+        id: SessionId,
+        path: &str,
+        logger: SessionLogger,
+        header: &str,
+    ) -> Result<(), String> {
+        let path = self.picked_path(path)?;
+        let terminal = self
+            .sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .pty_inner(id)
+            .is_some();
+        let live = terminal
+            || self
+                .serial
+                .lock()
+                .expect("serial lock poisoned")
+                .contains_key(&id);
+        if !live {
+            return Err("That session has ended".to_string());
+        }
+        self.logs.start(id, &path, logger, header)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_log::Stopped;
     use omnyssh_core::serial::SerialOutput;
+    use omnyssh_core::session_log::{TextLogger, NATIVE_NEWLINE};
 
     #[test]
     fn public_ids_are_unique_and_monotonic() {
@@ -847,5 +952,91 @@ mod tests {
         // Unknown ids are a no-op, like the terminal commands.
         state.write_serial(id, b"late");
         assert!(state.take_serial(id).is_none());
+    }
+
+    /// A state with one open terminal, its public and inner ids, and the log stops
+    /// it reports. Its connect fails in the background, which these tests ignore:
+    /// they feed the raw tap directly.
+    fn logging_terminal() -> (GuiState, SessionId, SessionId, Arc<Mutex<Vec<Stopped>>>) {
+        let (engine_tx, _engine_rx) = mpsc::channel::<CoreEvent>(8);
+        let (raw_tx, _raw_rx) = mpsc::channel(8);
+        let state = GuiState::new(engine_tx, PtyManager::with_raw_output(raw_tx));
+        state.set_hosts(vec![Host {
+            name: "h".to_string(),
+            ..Host::default()
+        }]);
+        let public = state
+            .open_terminal("h", 80, 24, Channel::new(|_| Ok(())))
+            .unwrap();
+        let inner = state.sessions.lock().unwrap().pty_inner(public).unwrap();
+        let stops = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&stops);
+        state
+            .logs()
+            .on_stopped(move |s| sink.lock().unwrap().push(s));
+        (state, public, inner, stops)
+    }
+
+    fn text() -> SessionLogger {
+        SessionLogger::Text(TextLogger::new(false, NATIVE_NEWLINE))
+    }
+
+    #[tokio::test]
+    async fn a_terminal_log_records_the_raw_output_until_the_pane_closes() {
+        let (state, public, inner, stops) = logging_terminal();
+        let dir = tempfile::tempdir().unwrap();
+        let path = state.remember_save_path(dir.path().join("h.log"));
+
+        state.start_log(public, &path, text(), "# h").unwrap();
+        state.send_terminal_output(inner, b"\x1b[1mhello\x1b[0m\r\n".to_vec());
+        state.close_terminal(public);
+        // Gone with its pane: nothing more is written.
+        state.send_terminal_output(inner, b"late\r\n".to_vec());
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("# h{NATIVE_NEWLINE}hello{NATIVE_NEWLINE}")
+        );
+        let stops = stops.lock().unwrap();
+        assert_eq!(stops.len(), 1);
+        assert_eq!(
+            (stops[0].session_id, stops[0].error.as_deref()),
+            (public, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_exit_stops_the_log() {
+        let (state, public, inner, stops) = logging_terminal();
+        let dir = tempfile::tempdir().unwrap();
+        let path = state.remember_save_path(dir.path().join("h.log"));
+        state.start_log(public, &path, text(), "# h").unwrap();
+        state.send_terminal_output(inner, b"logout".to_vec());
+
+        assert_eq!(state.terminal_exited(inner), Some(public));
+        assert!(!state.logs().is_logging(public));
+        assert_eq!(stops.lock().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("# h{NATIVE_NEWLINE}logout{NATIVE_NEWLINE}")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_log_needs_a_picked_path_and_a_live_session() {
+        let (state, public, _inner, _stops) = logging_terminal();
+        let dir = tempfile::tempdir().unwrap();
+        let unpicked = dir.path().join("unpicked.log");
+        let err = state
+            .start_log(public, &unpicked.to_string_lossy(), text(), "#")
+            .unwrap_err();
+        assert_eq!(err, "Choose where to save it first");
+        assert!(!unpicked.exists());
+        let path = state.remember_save_path(dir.path().join("h.log"));
+        assert_eq!(state.save_dir(), Some(dir.path().to_path_buf()));
+        assert_eq!(
+            state.start_log(999, &path, text(), "#").unwrap_err(),
+            "That session has ended"
+        );
     }
 }

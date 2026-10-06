@@ -7,6 +7,7 @@ pub mod hotkey;
 pub mod keysetup;
 pub mod quick_commands;
 pub mod serial;
+pub mod session_log;
 pub mod sftp;
 pub mod snippets;
 pub mod terminal;

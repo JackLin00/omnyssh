@@ -270,6 +270,77 @@ async deleteSerialDevice(name: string) : Promise<Result<null, CommandError>> {
 }
 },
 /**
+ * Ask where to save, starting from `default_name` in the folder of the last
+ * save (the Documents folder the first time). `None` when the user cancels.
+ * Overwriting an existing file is confirmed by the dialog itself.
+ */
+async pickSavePath(defaultName: string, kind: SaveKindDto) : Promise<Result<string | null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pick_save_path", { defaultName, kind }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Start logging session `session_id` into `path` (from `pick_save_path`), with
+ * `header` as the first line. `timestamps` stamps each text line; a hex log is
+ * never stamped.
+ */
+async logStart(sessionId: number, path: string, timestamps: boolean, mode: LogModeDto, header: string) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("log_start", { sessionId, path, timestamps, mode, header }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stop logging a session; `log-stopped` follows. A no-op when it is not logged.
+ */
+async logStop(sessionId: number) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("log_stop", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The file a session is logged into and the bytes written so far, if it is.
+ */
+async logStatus(sessionId: number) : Promise<Result<LogStatusDto | null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("log_status", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Write an export (`\n`-separated lines) to `path`, from `pick_save_path`, with
+ * this platform's line ends.
+ */
+async saveTextFile(path: string, text: string) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_text_file", { path, text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Show a saved log or export, selected, in the system file manager.
+ */
+async revealPath(path: string) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reveal_path", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Every group with its commands.
  */
 async listQuickCommands() : Promise<Result<QuickGroupDto[], CommandError>> {
@@ -606,6 +677,7 @@ keySetupComplete: KeySetupComplete,
 keySetupFailed: KeySetupFailed,
 keySetupProgress: KeySetupProgress,
 keySetupRollback: KeySetupRollback,
+logStopped: LogStopped,
 metricsUpdated: MetricsUpdated,
 passwordRequired: PasswordRequired,
 servicesDetected: ServicesDetected,
@@ -630,6 +702,7 @@ keySetupComplete: "key-setup-complete",
 keySetupFailed: "key-setup-failed",
 keySetupProgress: "key-setup-progress",
 keySetupRollback: "key-setup-rollback",
+logStopped: "log-stopped",
 metricsUpdated: "metrics-updated",
 passwordRequired: "password-required",
 servicesDetected: "services-detected",
@@ -765,6 +838,20 @@ export type LineEndingDto = "cr" | "lf" | "crlf"
  */
 export type LocalForwardDto = { bindAddress?: string | null; bindPort: number; remoteHost: string; remotePort: number }
 /**
+ * How a session log writes what arrives: plain text, or a hex dump (a serial tab
+ * showing HEX when the log started).
+ */
+export type LogModeDto = "text" | "hex"
+/**
+ * A session log being written: its file and the bytes written so far.
+ */
+export type LogStatusDto = { path: string; bytes: number }
+/**
+ * A session log stopped: asked to, its session ended, or writing failed
+ * (`error`). Whatever was written before stays in the file.
+ */
+export type LogStopped = { sessionId: number; path: string; bytes: number; error: string | null }
+/**
  * A metrics snapshot for a host (tech-gui.md §4.1). The core's `Instant` is
  * flattened to `ageSeconds` (seconds since the sample) so it can serialise.
  */
@@ -799,6 +886,10 @@ export type PayloadKindDto = "text" | "hex"
 export type ProcessDto = { name: string; cpuPercent: number; memPercent: number }
 export type QuickCommandDto = { label: string; kind: PayloadKindDto; payload: string; ending: EndingDto }
 export type QuickGroupDto = { name: string; commands: QuickCommandDto[] }
+/**
+ * What a save dialog is for: a session log, or an export of what a terminal shows.
+ */
+export type SaveKindDto = "log" | "export"
 /**
  * The line settings a serial tab opens with.
  */

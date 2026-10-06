@@ -904,6 +904,31 @@ impl From<HostKeyDecisionDto> for Decision {
     }
 }
 
+/// What a save dialog is for: a session log, or an export of what a terminal shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SaveKindDto {
+    Log,
+    Export,
+}
+
+/// How a session log writes what arrives: plain text, or a hex dump (a serial tab
+/// showing HEX when the log started).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum LogModeDto {
+    Text,
+    Hex,
+}
+
+/// A session log being written: its file and the bytes written so far.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LogStatusDto {
+    pub path: String,
+    pub bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1483,6 +1508,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&dto).unwrap(),
             serde_json::json!({ "keyType": "ssh-ed25519", "fingerprint": "SHA256:abc" })
+        );
+    }
+
+    #[test]
+    fn the_log_choices_cross_in_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&SaveKindDto::Export).unwrap(),
+            "\"export\""
+        );
+        let mode: LogModeDto = serde_json::from_str("\"hex\"").unwrap();
+        assert_eq!(mode, LogModeDto::Hex);
+        let status = LogStatusDto {
+            path: "/tmp/a.log".to_string(),
+            bytes: 12,
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({ "path": "/tmp/a.log", "bytes": 12 })
         );
     }
 }

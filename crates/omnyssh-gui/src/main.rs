@@ -11,7 +11,6 @@ mod commands;
 mod dto;
 mod error;
 mod events;
-#[allow(dead_code)] // Wired up in N3.
 mod session_log;
 mod state;
 mod tray;
@@ -26,6 +25,9 @@ use commands::quick_commands::{list_quick_commands, save_quick_commands};
 use commands::serial::{
     delete_serial_device, list_serial_devices, save_serial_device, serial_close, serial_list_ports,
     serial_open, serial_write,
+};
+use commands::session_log::{
+    log_start, log_status, log_stop, pick_save_path, reveal_path, save_text_file,
 };
 use commands::sftp::{
     list_local_dir, list_local_roots, preview_local_file, sftp_close, sftp_delete, sftp_download,
@@ -44,7 +46,7 @@ use state::GuiState;
 use tauri::webview::PageLoadEvent;
 use tauri::Manager;
 use tauri_plugin_window_state::StateFlags;
-use tauri_specta::{collect_commands, collect_events, Builder};
+use tauri_specta::{collect_commands, collect_events, Builder, Event};
 
 // Absolute at build time, so the export target is independent of the run CWD.
 const BINDINGS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/src/lib/bindings.ts");
@@ -122,6 +124,12 @@ fn specta_builder() -> Builder<tauri::Wry> {
             list_serial_devices,
             save_serial_device,
             delete_serial_device,
+            pick_save_path,
+            log_start,
+            log_stop,
+            log_status,
+            save_text_file,
+            reveal_path,
             list_quick_commands,
             save_quick_commands,
             sftp_open,
@@ -173,6 +181,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             events::KeyPassphraseRequired,
             events::PasswordRequired,
             events::HostKeyChanged,
+            events::LogStopped,
             events::Error
         ])
 }
@@ -276,6 +285,8 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Opens the support dialog's GitHub/Telegram links in the default browser.
         .plugin(tauri_plugin_opener::init())
+        // The save dialog of the session logs and exports, called from Rust only.
+        .plugin(tauri_plugin_dialog::init())
         // Reads the clipboard for the terminals' right-click paste.
         .plugin(tauri_plugin_clipboard_manager::init())
         // The global show/hide hotkey (plan J): no shortcut pre-registered here — the
@@ -387,6 +398,20 @@ fn main() {
             if let Ok(hosts) = omnyssh_core::config::load_all_hosts() {
                 gui_state.set_hosts(hosts);
             }
+            // Every stop of a session log reaches the frontend, which shows the notice.
+            let logs = gui_state.logs();
+            let notify = app.handle().clone();
+            logs.on_stopped(move |stopped| {
+                let _ = events::LogStopped::from(stopped).emit(&notify);
+            });
+            // A quiet session's buffered lines still reach the disk within a second.
+            tauri::async_runtime::spawn(async move {
+                let mut tick = tokio::time::interval(session_log::FLUSH_INTERVAL);
+                loop {
+                    tick.tick().await;
+                    logs.flush_idle();
+                }
+            });
             app.manage(gui_state);
 
             // Spawn the forwarders after `manage` so both can reach `GuiState` via
@@ -403,7 +428,16 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("failed to launch OmnySSH Desktop")
-        .run(tray::on_run_event);
+        .run(|app, event| {
+            // Quitting exits the process without running destructors: close the session
+            // logs first, or their buffered tails are lost.
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<GuiState>() {
+                    state.logs().stop_all();
+                }
+            }
+            tray::on_run_event(app, event);
+        });
 }
 
 #[cfg(test)]

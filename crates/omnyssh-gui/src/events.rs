@@ -9,6 +9,7 @@ use crate::dto::{
     ConnectionStatusDto, FileEntryDto, HostDto, KeyFingerprintDto, KeySetupStepDto, MetricsDto,
     ServiceDto, TransferProgressDto, TunnelStatusDto, UpdateInfoDto,
 };
+use crate::session_log::Stopped;
 
 /// Full host list broadcast. Emitted by `reload_hosts` after refreshing the
 /// cache; the bridge does not map `HostsLoaded` (tech-gui.md §3.4).
@@ -214,6 +215,28 @@ pub struct HostKeyChanged {
     pub file: String,
     pub saved: Vec<KeyFingerprintDto>,
     pub offered: KeyFingerprintDto,
+}
+
+/// A session log stopped: asked to, its session ended, or writing failed
+/// (`error`). Whatever was written before stays in the file.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct LogStopped {
+    pub session_id: u64,
+    pub path: String,
+    pub bytes: u64,
+    pub error: Option<String>,
+}
+
+impl From<Stopped> for LogStopped {
+    fn from(s: Stopped) -> Self {
+        Self {
+            session_id: s.session_id,
+            path: s.path,
+            bytes: s.bytes,
+            error: s.error,
+        }
+    }
 }
 
 /// A background error surfaced to the user.
