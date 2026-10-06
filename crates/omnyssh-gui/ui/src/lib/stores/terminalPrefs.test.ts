@@ -113,3 +113,22 @@ describe('terminal font size', () => {
     expect(get(terminalFontSize)).toBe(16);
   });
 });
+
+describe('session log timestamps', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    backend.get.mockReset();
+    backend.set.mockReset().mockResolvedValue(undefined);
+    backend.save.mockReset().mockResolvedValue(undefined);
+  });
+
+  it('default to on, and a flip persists', async () => {
+    let prefs = await fresh();
+    expect(get(prefs.logTimestamps)).toBe(true);
+    prefs.logTimestamps.toggle();
+    expect(localStorage.getItem('omnyssh-log-timestamps')).toBe('false');
+    await vi.waitFor(() => expect(backend.set).toHaveBeenCalledWith('logTimestamps', false));
+    prefs = await fresh();
+    expect(get(prefs.logTimestamps)).toBe(false);
+  });
+});

@@ -10,6 +10,7 @@
     copyOnSelect,
     rightClickPaste,
     serialTimestamps,
+    logTimestamps,
     terminalFontSize
   } from '$lib/stores/terminalPrefs';
   import { terminalScheme } from '$lib/stores/terminalScheme';
@@ -35,6 +36,7 @@
     void copyOnSelect.hydrate();
     void rightClickPaste.hydrate();
     void serialTimestamps.hydrate();
+    void logTimestamps.hydrate();
     void terminalFontSize.hydrate();
     void terminalScheme.hydrate();
     void terminalShortcuts.hydrate();

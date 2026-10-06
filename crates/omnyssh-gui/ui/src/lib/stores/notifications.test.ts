@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
-import { lastError, ERROR_TTL_MS } from './notifications';
+import { lastError, statusNotice, ERROR_TTL_MS } from './notifications';
 
 describe('lastError — auto-clearing status-bar error', () => {
   afterEach(() => {
@@ -38,5 +38,28 @@ describe('lastError — auto-clearing status-bar error', () => {
     // No lingering timer resurrects a cleared error.
     vi.advanceTimersByTime(ERROR_TTL_MS * 2);
     expect(get(lastError)).toBeNull();
+  });
+});
+
+describe('statusNotice — a confirmation that clears itself', () => {
+  afterEach(() => {
+    statusNotice.set(null);
+    vi.useRealTimers();
+  });
+
+  it('keeps its file path and clears after the same TTL', () => {
+    vi.useFakeTimers();
+    statusNotice.set({ message: 'Saved log to /tmp/a.log', path: '/tmp/a.log' });
+    expect(get(statusNotice)?.path).toBe('/tmp/a.log');
+    vi.advanceTimersByTime(ERROR_TTL_MS);
+    expect(get(statusNotice)).toBeNull();
+  });
+
+  it('has a timer of its own, apart from the error one', () => {
+    vi.useFakeTimers();
+    statusNotice.set({ message: 'saved' });
+    lastError.set('boom');
+    lastError.set(null);
+    expect(get(statusNotice)?.message).toBe('saved');
   });
 });

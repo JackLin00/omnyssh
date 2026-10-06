@@ -74,6 +74,8 @@ export const copyOnSelect = persistedFlag('omnyssh-copy-on-select', 'copyOnSelec
 export const rightClickPaste = persistedFlag('omnyssh-right-click-paste', 'rightClickPaste', true);
 /** Stamp a serial monitor's lines with their arrival time. */
 export const serialTimestamps = persistedFlag('omnyssh-serial-timestamps', 'serialTimestamps', false);
+/** Start each line of a session log with the date and time it arrived. */
+export const logTimestamps = persistedFlag('omnyssh-log-timestamps', 'logTimestamps', true);
 
 function persistedNumber(
   localKey: string,
