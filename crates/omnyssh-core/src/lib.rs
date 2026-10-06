@@ -8,6 +8,7 @@
 pub mod config;
 pub mod event;
 pub mod serial;
+pub mod session_log;
 pub mod ssh;
 pub mod update;
 pub mod utils;
