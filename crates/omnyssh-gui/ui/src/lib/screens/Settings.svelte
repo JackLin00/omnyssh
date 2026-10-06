@@ -14,6 +14,7 @@
   import {
     copyOnSelect,
     rightClickPaste,
+    logTimestamps,
     terminalFontSize,
     FONT_SIZE_MIN,
     FONT_SIZE_MAX,
@@ -174,6 +175,13 @@
           $rightClickPaste,
           true,
           () => rightClickPaste.toggle()
+        )}
+        {@render traySwitch(
+          'Timestamps in session logs',
+          'Start each line of a session log with the date and time it arrived.',
+          $logTimestamps,
+          true,
+          () => logTimestamps.toggle()
         )}
         <div class="flex items-center justify-between gap-4">
           <div class="min-w-0">

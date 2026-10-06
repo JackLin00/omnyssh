@@ -19,12 +19,16 @@
   import { terminalDidExit } from '$lib/ipc/router';
   import { lastError } from '$lib/stores/notifications';
   import { dialogs } from '$lib/stores/dialogs';
+  import { hosts } from '$lib/stores/hosts';
+  import { sessionLogs, startSessionLog, exportText } from '$lib/stores/sessionLogs';
   import {
     terminalOpen,
     terminalWrite,
     terminalResize,
     terminalClose,
-    terminalPaste
+    terminalPaste,
+    logStop,
+    logStatus
   } from '$lib/ipc/commands';
   import { shouldFadeTop } from './terminalFade';
   import { chunkBytes, layoutFallback } from './terminalInput';
@@ -32,13 +36,14 @@
   import { matchTerminalAction, formatChord, quickSlot, type TerminalAction } from './terminalShortcuts';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { quickCommandBytes } from '$lib/stores/quickCommands';
-  import { terminalFontSize } from '$lib/stores/terminalPrefs';
+  import { logTimestamps, terminalFontSize } from '$lib/stores/terminalPrefs';
   import { attachWheelZoom } from './terminalZoom';
   import { isMac } from '$lib/platform';
   import type { SplitDir } from './splitLayout';
   import type { TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
   import { HIGHLIGHT_LIMIT } from './terminalSearch';
+  import { bufferText, formatBytes, sshLogDetail } from './sessionLog';
 
   let {
     hostName,
@@ -156,7 +161,8 @@
   let searchAddon = $state<SearchAddon>();
   let searchOpen = $state(false);
   let searchFocus = $state(0);
-  let termId: number | undefined;
+  // Reactive for the log buttons, which wait for it.
+  let termId = $state<number>();
   let destroyed = false;
   let connected = false;
   let ready = $state(false);
@@ -420,7 +426,88 @@
     const chord = $terminalShortcuts[action];
     return chord ? ` (${formatChord(chord, isMac)})` : '';
   }
+
+  // Session log (plan N): the backend records this pane's raw output into a file.
+  const logging = $derived(termId != null && $sessionLogs.has(termId));
+  const canLog = $derived(termId != null && status === 'connected');
+  /** The save dialog is open: a second click must not open another. */
+  let picking = $state(false);
+  /** The stop button's tooltip: the file and how much is in it, read on hover. */
+  let logTitle = $state('');
+  const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+  async function toggleLog(): Promise<void> {
+    const id = termId;
+    if (id == null || picking) return;
+    if (logging) {
+      await logStop(id).catch((e) => lastError.set(`Stop logging: ${message(e)}`));
+      return;
+    }
+    picking = true;
+    try {
+      await startSessionLog({
+        sessionId: id,
+        name: hostName,
+        detail: sshLogDetail(get(hosts).find((h) => h.name === hostName)),
+        mode: 'text',
+        timestamps: get(logTimestamps)
+      });
+    } catch (e) {
+      lastError.set(`Logging failed: ${message(e)}`);
+    } finally {
+      picking = false;
+    }
+  }
+
+  async function refreshLogTitle(): Promise<void> {
+    if (termId == null || !logging) return;
+    const s = await logStatus(termId).catch(() => null);
+    logTitle = s ? `Stop logging (${s.path}, ${formatBytes(s.bytes)})` : '';
+  }
+
+  function exportContents(): void {
+    if (!term || picking) return;
+    const text = bufferText(term.buffer.active);
+    picking = true;
+    exportText(hostName, text)
+      .catch((e) => lastError.set(`Export failed: ${message(e)}`))
+      .finally(() => (picking = false));
+  }
 </script>
+
+<!-- The log and export buttons, in the hover toolbar (one pane) or the title bar
+     (split). Recording shows a filled red dot. -->
+{#snippet logButtons(cls: string, style: string, size: number)}
+  <button
+    type="button"
+    class="{cls} disabled:cursor-not-allowed disabled:opacity-40"
+    {style}
+    title={logging ? logTitle || 'Stop logging' : 'Start logging'}
+    aria-label={logging ? 'Stop logging' : 'Start logging'}
+    aria-pressed={logging}
+    disabled={!canLog || picking}
+    onpointerenter={refreshLogTitle}
+    onfocus={refreshLogTitle}
+    onclick={toggleLog}
+  >
+    {#if logging}
+      <span class="grid place-items-center text-status-crit"><Icon name="recording" {size} /></span>
+    {:else}
+      <Icon name="record" {size} />
+    {/if}
+  </button>
+  <button
+    type="button"
+    class="{cls} disabled:cursor-not-allowed disabled:opacity-40"
+    {style}
+    title="Export contents"
+    aria-label="Export contents"
+    disabled={!ready || picking}
+    onclick={exportContents}
+  >
+    <Icon name="download" {size} />
+  </button>
+{/snippet}
 
 <!-- Clicking anywhere in the pane, or xterm's textarea taking focus, makes it the
      tab's focused pane. -->
@@ -465,6 +552,7 @@
         >
           {title || hostName}
         </span>
+        {@render logButtons(titleBtn, '', 13)}
         <button type="button" class={titleBtn} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
           <Icon name="splitRight" size={13} />
         </button>
@@ -481,8 +569,9 @@
   {#if !titled}
     <div
       bind:this={toolbar}
-      class="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100"
+      class="peer absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100"
     >
+      {@render logButtons(toolBtn, toolBtnStyle, 14)}
       <button type="button" class={toolBtn} style={toolBtnStyle} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
         <Icon name="splitRight" size={14} />
       </button>
@@ -493,6 +582,17 @@
         <Icon name="close" size={14} />
       </button>
     </div>
+    {#if logging}
+      <!-- The toolbar shows only on hover or focus; recording shows all the time, and
+           steps aside while the toolbar is up. -->
+      <div
+        class="pointer-events-none absolute right-2.5 top-2.5 z-10 text-status-crit transition group-hover:opacity-0 peer-focus-within:opacity-0"
+        role="img"
+        aria-label="Recording"
+      >
+        <Icon name="recording" size={12} />
+      </div>
+    {/if}
   {/if}
   {#if searchOpen && searchAddon}
     <div

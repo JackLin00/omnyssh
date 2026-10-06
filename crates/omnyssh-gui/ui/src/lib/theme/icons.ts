@@ -33,4 +33,6 @@ export type IconName =
   | 'star'
   | 'tunnel'
   | 'chevronUp'
-  | 'chevronDown';
+  | 'chevronDown'
+  | 'record'
+  | 'recording';

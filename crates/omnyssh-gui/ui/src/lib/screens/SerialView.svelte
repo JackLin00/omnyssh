@@ -16,19 +16,22 @@
   import { sessions, type Session } from '$lib/stores/sessions';
   import { lastError } from '$lib/stores/notifications';
   import { dialogs } from '$lib/stores/dialogs';
-  import { serialOpen, serialWrite, serialClose } from '$lib/ipc/commands';
+  import { serialOpen, serialWrite, serialClose, logStop, logStatus } from '$lib/ipc/commands';
+  import { sessionLogs, startSessionLog, exportText } from '$lib/stores/sessionLogs';
   import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
   import { chunkBytes } from './terminalInput';
   import { matchTerminalAction, quickSlot } from './terminalShortcuts';
   import { terminalShortcuts } from '$lib/stores/terminalShortcuts';
   import { quickCommandBytes } from '$lib/stores/quickCommands';
-  import { serialTimestamps, terminalFontSize } from '$lib/stores/terminalPrefs';
+  import { logTimestamps, serialTimestamps, terminalFontSize } from '$lib/stores/terminalPrefs';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
   import type { SerialExitDto, TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
   import { HIGHLIGHT_LIMIT } from './terminalSearch';
   import QuickCommandBar from './QuickCommandBar.svelte';
   import { attachWheelZoom } from './terminalZoom';
+  import { describeLine } from './serialForm';
+  import { bufferText, formatBytes, serialLogName } from './sessionLog';
 
   let { session, active }: { session: Session; active: boolean } = $props();
   // SerialConnect always spawns serial tabs with their options, fixed for the tab's life.
@@ -55,7 +58,8 @@
   let searchAddon = $state<SearchAddon>();
   let searchOpen = $state(false);
   let searchFocus = $state(0);
-  let serialId: number | undefined;
+  // Reactive for the Log button, which waits for it.
+  let serialId = $state<number>();
   let destroyed = false;
   let failed = false;
   let ready = $state(false);
@@ -129,6 +133,53 @@
     history.clear();
     formatter.reset(display, stamped);
     term?.write('\x1bc');
+  }
+
+  // Session log (plan N): the backend records what the port sends into a file, as the
+  // display showed it when the log started (text, or a hex dump).
+  // svelte-ignore state_referenced_locally
+  const logName = serialLogName(session.hostName, opts.config.port);
+  const logging = $derived(serialId != null && $sessionLogs.has(serialId));
+  let picking = $state(false);
+  let logTitle = $state('');
+  const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+  async function toggleLog(): Promise<void> {
+    const id = serialId;
+    if (id == null || picking) return;
+    if (logging) {
+      await logStop(id).catch((e) => lastError.set(`Stop logging: ${message(e)}`));
+      return;
+    }
+    picking = true;
+    try {
+      await startSessionLog({
+        sessionId: id,
+        name: logName,
+        detail: describeLine(opts.config),
+        mode: display,
+        timestamps: get(logTimestamps)
+      });
+    } catch (e) {
+      lastError.set(`Logging failed: ${message(e)}`);
+    } finally {
+      picking = false;
+    }
+  }
+
+  async function refreshLogTitle(): Promise<void> {
+    if (serialId == null || !logging) return;
+    const s = await logStatus(serialId).catch(() => null);
+    logTitle = s ? `Stop logging (${s.path}, ${formatBytes(s.bytes)})` : '';
+  }
+
+  function exportContents(): void {
+    if (!term || picking) return;
+    const text = bufferText(term.buffer.active);
+    picking = true;
+    exportText(logName, text)
+      .catch((e) => lastError.set(`Export failed: ${message(e)}`))
+      .finally(() => (picking = false));
   }
 
   function openSearch(): void {
@@ -368,6 +419,24 @@
       </button>
     {/if}
     <Button variant="ghost" title="Clear the output" onclick={clear}>Clear</Button>
+    <button
+      type="button"
+      class="flex items-center gap-1.5 rounded-full border border-default px-3 py-0.5 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus {logging
+        ? 'text-fg'
+        : 'text-muted hover:text-fg'} disabled:cursor-not-allowed disabled:opacity-40"
+      aria-pressed={logging}
+      disabled={!canSend || picking}
+      title={logging ? logTitle || 'Stop logging' : 'Log what arrives to a file'}
+      onpointerenter={refreshLogTitle}
+      onfocus={refreshLogTitle}
+      onclick={toggleLog}
+    >
+      {#if logging}<span class="h-2 w-2 rounded-full bg-status-crit" aria-hidden="true"></span>{/if}
+      Log
+    </button>
+    <Button variant="ghost" title="Export the output to a file" disabled={!ready || picking} onclick={exportContents}>
+      Export
+    </Button>
   </div>
   <div class="relative min-h-0 flex-1 px-2 pt-2" style="background: {$terminalColors.background}">
     <div bind:this={container} class="h-full w-full"></div>

@@ -128,5 +128,9 @@
     <path d="M4 7h16" />
     <path d="m16 21 4-4-4-4" />
     <path d="M20 17H4" />
+  {:else if name === 'record'}
+    <circle cx="12" cy="12" r="6" />
+  {:else if name === 'recording'}
+    <circle cx="12" cy="12" r="6" fill="currentColor" />
   {/if}
 </svg>
