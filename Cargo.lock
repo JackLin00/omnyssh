@@ -3409,6 +3409,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tauri-specta",
+ "tempfile",
  "tokio",
  "webkit2gtk",
  "x11-dl",

@@ -80,3 +80,5 @@ webkit2gtk = "2"
 [dev-dependencies]
 # Property-based coverage of snippet param substitution (tech-gui.md §6.4, §7 Stage 2.2).
 proptest = "1"
+# Scratch directories for the session log tests.
+tempfile = "3"

@@ -11,6 +11,8 @@ mod commands;
 mod dto;
 mod error;
 mod events;
+#[allow(dead_code)] // Wired up in N3.
+mod session_log;
 mod state;
 mod tray;
 
