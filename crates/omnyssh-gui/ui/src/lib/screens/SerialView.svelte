@@ -31,7 +31,7 @@
   import QuickCommandBar from './QuickCommandBar.svelte';
   import { attachWheelZoom } from './terminalZoom';
   import { describeLine } from './serialForm';
-  import { bufferText, formatBytes, serialLogName } from './sessionLog';
+  import { bufferText, formatBytes, logButtonDisabled, serialLogName } from './sessionLog';
 
   let { session, active }: { session: Session; active: boolean } = $props();
   // SerialConnect always spawns serial tabs with their options, fixed for the tab's life.
@@ -142,6 +142,11 @@
   const logging = $derived(serialId != null && $sessionLogs.has(serialId));
   let picking = $state(false);
   let logTitle = $state('');
+  // Cleared the moment recording stops, so the next recording's tooltip can't start
+  // out showing a stale path or size from the one before it.
+  $effect(() => {
+    if (!logging) logTitle = '';
+  });
   const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
   async function toggleLog(): Promise<void> {
@@ -425,7 +430,7 @@
         ? 'text-fg'
         : 'text-muted hover:text-fg'} disabled:cursor-not-allowed disabled:opacity-40"
       aria-pressed={logging}
-      disabled={!canSend || picking}
+      disabled={logButtonDisabled(canSend, logging, picking)}
       title={logging ? logTitle || 'Stop logging' : 'Log what arrives to a file'}
       onpointerenter={refreshLogTitle}
       onfocus={refreshLogTitle}

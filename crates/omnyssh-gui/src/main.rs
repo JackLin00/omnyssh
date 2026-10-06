@@ -285,7 +285,10 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Opens the support dialog's GitHub/Telegram links in the default browser.
         .plugin(tauri_plugin_opener::init())
-        // The save dialog of the session logs and exports, called from Rust only.
+        // The save dialog of the session logs and exports, called from Rust only. This
+        // plugin also offers message/ask/confirm dialogs that replace the webview's own
+        // window.alert/confirm, but capabilities/default.json grants none of its JS
+        // commands, so the frontend must not call them.
         .plugin(tauri_plugin_dialog::init())
         // Reads the clipboard for the terminals' right-click paste.
         .plugin(tauri_plugin_clipboard_manager::init())

@@ -618,6 +618,34 @@ impl GuiState {
         }
     }
 
+    /// Whether the terminal or serial session `id` is still live.
+    fn session_live(&self, id: SessionId) -> bool {
+        let terminal = self
+            .sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .pty_inner(id)
+            .is_some();
+        terminal
+            || self
+                .serial
+                .lock()
+                .expect("serial lock poisoned")
+                .contains_key(&id)
+    }
+
+    /// Stop `id`'s log if the session it was opened for has since ended. Closes the
+    /// race between `start_log`'s liveness check and the log actually opening: the
+    /// session can end in between (a remote exit, a port unplugged), and without this
+    /// the log would stay open forever with nothing left to tell it to stop. Reports
+    /// through the normal `log-stopped` path; a no-op when the session is still live
+    /// or nothing is being logged.
+    fn stop_log_if_session_ended(&self, id: SessionId) {
+        if !self.session_live(id) {
+            self.logs.stop(id);
+        }
+    }
+
     /// Start logging the live terminal or serial session `id` into `path`, a path
     /// picked in a save dialog, with `header` as the file's first line.
     pub fn start_log(
@@ -628,22 +656,12 @@ impl GuiState {
         header: &str,
     ) -> Result<(), String> {
         let path = self.picked_path(path)?;
-        let terminal = self
-            .sessions
-            .lock()
-            .expect("sessions lock poisoned")
-            .pty_inner(id)
-            .is_some();
-        let live = terminal
-            || self
-                .serial
-                .lock()
-                .expect("serial lock poisoned")
-                .contains_key(&id);
-        if !live {
+        if !self.session_live(id) {
             return Err("That session has ended".to_string());
         }
-        self.logs.start(id, &path, logger, header)
+        self.logs.start(id, &path, logger, header)?;
+        self.stop_log_if_session_ended(id);
+        Ok(())
     }
 }
 
@@ -1038,5 +1056,58 @@ mod tests {
             state.start_log(999, &path, text(), "#").unwrap_err(),
             "That session has ended"
         );
+    }
+
+    #[tokio::test]
+    async fn a_session_that_ends_right_after_the_log_opens_still_gets_stopped() {
+        let (state, public, _inner, stops) = logging_terminal();
+        let dir = tempfile::tempdir().unwrap();
+        let path = state.remember_save_path(dir.path().join("h.log"));
+        state.start_log(public, &path, text(), "# h").unwrap();
+        assert!(state.logs().is_logging(public));
+
+        // Simulate the session ending between `start_log`'s liveness check and the
+        // log actually opening: drop its registry entry directly, bypassing
+        // `close_terminal`/`terminal_exited`, which would otherwise stop the log
+        // themselves and mask the race this is testing.
+        state
+            .sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .remove_by_public(public);
+
+        // The re-check `start_log` runs right after a successful `logs.start()`.
+        state.stop_log_if_session_ended(public);
+
+        assert!(!state.logs().is_logging(public));
+        let stops = stops.lock().unwrap();
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0].session_id, public);
+    }
+
+    #[tokio::test]
+    async fn start_log_refuses_a_path_another_session_is_already_logging_to() {
+        let (engine_tx, _engine_rx) = mpsc::channel::<CoreEvent>(8);
+        let (raw_tx, _raw_rx) = mpsc::channel(8);
+        let state = GuiState::new(engine_tx, PtyManager::with_raw_output(raw_tx));
+        state.set_hosts(vec![Host {
+            name: "h".to_string(),
+            ..Host::default()
+        }]);
+        let a = state
+            .open_terminal("h", 80, 24, Channel::new(|_| Ok(())))
+            .unwrap();
+        let b = state
+            .open_terminal("h", 80, 24, Channel::new(|_| Ok(())))
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = state.remember_save_path(dir.path().join("shared.log"));
+
+        state.start_log(a, &path, text(), "# a").unwrap();
+        assert_eq!(
+            state.start_log(b, &path, text(), "# b").unwrap_err(),
+            "That file is being logged to"
+        );
+        assert!(!state.logs().is_logging(b));
     }
 }

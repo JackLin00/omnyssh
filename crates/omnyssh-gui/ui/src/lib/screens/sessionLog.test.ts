@@ -3,6 +3,7 @@ import {
   bufferText,
   defaultFileName,
   formatBytes,
+  logButtonDisabled,
   logHeader,
   safeFileName,
   serialLogName,
@@ -99,5 +100,25 @@ describe('bufferText', () => {
 
   it('is empty for an empty terminal', () => {
     expect(bufferText(buffer(8, [{ text: '' }, { text: '' }]))).toBe('');
+  });
+});
+
+describe('logButtonDisabled', () => {
+  it('stays enabled to stop while recording, even once a new one could not start', () => {
+    expect(logButtonDisabled(false, true, false)).toBe(false);
+    expect(logButtonDisabled(true, true, false)).toBe(false);
+  });
+
+  it('is disabled when neither starting nor stopping is possible', () => {
+    expect(logButtonDisabled(false, false, false)).toBe(true);
+  });
+
+  it('is enabled to start when nothing is being logged yet', () => {
+    expect(logButtonDisabled(true, false, false)).toBe(false);
+  });
+
+  it('is disabled while the save dialog is open, logging or not', () => {
+    expect(logButtonDisabled(true, false, true)).toBe(true);
+    expect(logButtonDisabled(false, true, true)).toBe(true);
   });
 });

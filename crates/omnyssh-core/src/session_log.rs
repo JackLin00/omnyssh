@@ -14,6 +14,13 @@ pub const NATIVE_NEWLINE: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 /// Bytes per row of a hex log, matching the serial tab's HEX display.
 pub const HEX_ROW: usize = 16;
 
+/// The longest an OSC/DCS/SOS/PM/APC string is let run before it is aborted (back to
+/// ground, the string discarded) rather than kept forever. A real one is at most a
+/// title or a hyperlink, a few hundred bytes; this only guards against a stray,
+/// unterminated opener — a corrupted stream, say — holding the logger "inside a
+/// sequence" for the rest of the session and blanking everything after it.
+const MAX_STRING: usize = 4096;
+
 /// Where the stripper is inside the output stream.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Seq {
@@ -48,6 +55,9 @@ pub struct TextLogger {
     /// The start of a UTF-8 character whose remaining bytes are still to come.
     pending: Vec<u8>,
     seq: Seq,
+    /// Characters counted into the OSC/DCS/SOS/PM/APC string in progress, if any;
+    /// see [`MAX_STRING`].
+    string_len: usize,
     /// Nothing written on the current line yet.
     line_start: bool,
 }
@@ -60,6 +70,7 @@ impl TextLogger {
             newline,
             pending: Vec::new(),
             seq: Seq::Ground,
+            string_len: 0,
             line_start: true,
         }
     }
@@ -70,8 +81,13 @@ impl TextLogger {
     pub fn feed(&mut self, bytes: &[u8], at: NaiveDateTime) -> String {
         let text = self.decode(bytes);
         let mut out = String::with_capacity(text.len());
+        // Every line this chunk opens shares the same arrival time, so the stamp is
+        // formatted once here rather than once per line.
+        let stamp = self
+            .timestamps
+            .then(|| at.format("[%Y-%m-%d %H:%M:%S%.3f] ").to_string());
         for c in text.chars() {
-            self.step(c, &mut out, at);
+            self.step(c, &mut out, stamp.as_deref());
         }
         out
     }
@@ -122,7 +138,7 @@ impl TextLogger {
         text
     }
 
-    fn step(&mut self, c: char, out: &mut String, at: NaiveDateTime) {
+    fn step(&mut self, c: char, out: &mut String, stamp: Option<&str>) {
         // CAN and SUB abort any sequence; ESC starts a new one from anywhere,
         // which also makes `ESC \` (ST) end an OSC or a DCS.
         match c {
@@ -137,33 +153,37 @@ impl TextLogger {
             _ => {}
         }
         match self.seq {
-            Seq::Ground => self.ground(c, out, at),
+            Seq::Ground => self.ground(c, out, stamp),
             Seq::Esc => match c {
                 '[' => self.seq = Seq::Csi,
-                ']' => self.seq = Seq::Osc,
-                'P' | 'X' | '^' | '_' => self.seq = Seq::Str,
+                ']' => self.enter_string(Seq::Osc),
+                'P' | 'X' | '^' | '_' => self.enter_string(Seq::Str),
                 '\u{20}'..='\u{2f}' => self.seq = Seq::EscIntermediate,
                 '\u{30}'..='\u{7e}' => self.seq = Seq::Ground,
-                c => self.inside_sequence(c, out, at),
+                c => self.inside_sequence(c, out, stamp),
             },
             Seq::EscIntermediate => match c {
                 '\u{20}'..='\u{2f}' => {}
                 '\u{30}'..='\u{7e}' => self.seq = Seq::Ground,
-                c => self.inside_sequence(c, out, at),
+                c => self.inside_sequence(c, out, stamp),
             },
             Seq::Csi => match c {
                 '\u{20}'..='\u{3f}' => {}
                 '\u{40}'..='\u{7e}' => self.seq = Seq::Ground,
-                c => self.inside_sequence(c, out, at),
+                c => self.inside_sequence(c, out, stamp),
             },
             Seq::Osc => {
                 if c == '\u{07}' || c == '\u{9c}' {
                     self.seq = Seq::Ground;
+                } else {
+                    self.grow_string(c);
                 }
             }
             Seq::Str => {
                 if c == '\u{9c}' {
                     self.seq = Seq::Ground;
+                } else {
+                    self.grow_string(c);
                 }
             }
         }
@@ -172,50 +192,68 @@ impl TextLogger {
     /// A character that is no part of the escape or CSI sequence in progress. A C0
     /// control still acts, as a terminal executes it there; DEL is ignored; anything
     /// else breaks the sequence off and is handled as plain text.
-    fn inside_sequence(&mut self, c: char, out: &mut String, at: NaiveDateTime) {
+    fn inside_sequence(&mut self, c: char, out: &mut String, stamp: Option<&str>) {
         match c {
-            '\u{00}'..='\u{1f}' => self.control(c, out, at),
+            '\u{00}'..='\u{1f}' => self.control(c, out, stamp),
             '\u{7f}' => {}
             c => {
                 self.seq = Seq::Ground;
-                self.ground(c, out, at);
+                self.ground(c, out, stamp);
             }
         }
     }
 
-    fn ground(&mut self, c: char, out: &mut String, at: NaiveDateTime) {
+    fn ground(&mut self, c: char, out: &mut String, stamp: Option<&str>) {
         match c {
-            '\u{00}'..='\u{1f}' => self.control(c, out, at),
+            '\u{00}'..='\u{1f}' => self.control(c, out, stamp),
             '\u{7f}' => {}
             // The C1 forms of CSI, OSC and the DCS/SOS/PM/APC strings.
             '\u{9b}' => self.seq = Seq::Csi,
-            '\u{9d}' => self.seq = Seq::Osc,
-            '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => self.seq = Seq::Str,
+            '\u{9d}' => self.enter_string(Seq::Osc),
+            '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => self.enter_string(Seq::Str),
             // Every other C1 control.
             '\u{80}'..='\u{9f}' => {}
-            c => self.print(c, out, at),
+            c => self.print(c, out, stamp),
         }
     }
 
-    fn control(&mut self, c: char, out: &mut String, at: NaiveDateTime) {
+    fn control(&mut self, c: char, out: &mut String, stamp: Option<&str>) {
         match c {
             '\n' => {
                 out.push_str(self.newline);
                 self.line_start = true;
             }
-            '\t' => self.print(c, out, at),
+            '\t' => self.print(c, out, stamp),
             _ => {}
         }
     }
 
-    fn print(&mut self, c: char, out: &mut String, at: NaiveDateTime) {
+    fn print(&mut self, c: char, out: &mut String, stamp: Option<&str>) {
         if self.line_start {
-            if self.timestamps {
-                out.push_str(&at.format("[%Y-%m-%d %H:%M:%S%.3f] ").to_string());
+            if let Some(stamp) = stamp {
+                out.push_str(stamp);
             }
             self.line_start = false;
         }
         out.push(c);
+    }
+
+    /// Start an OSC or a DCS/SOS/PM/APC string, with its running length reset.
+    fn enter_string(&mut self, seq: Seq) {
+        self.seq = seq;
+        self.string_len = 0;
+    }
+
+    /// Count one more character into the OSC/DCS/SOS/PM/APC string in progress, and
+    /// abort it — back to ground, discarding it — once it passes [`MAX_STRING`].
+    /// Without this, one unterminated string (a stray `ESC ]` with no BEL/ST ever
+    /// following, say from a corrupted stream) would swallow the rest of the session
+    /// as "inside a sequence" and blank the log from there on.
+    fn grow_string(&mut self, c: char) {
+        self.string_len += c.len_utf8();
+        if self.string_len > MAX_STRING {
+            self.seq = Seq::Ground;
+        }
     }
 }
 
@@ -340,6 +378,26 @@ mod tests {
             plain(&[b"a\x1bP1$r0m\x1b\\b\x1bXsos\x1b\\c\x1b^pm\x1b\\d\x1b_apc\x1b\\e\n"]),
             "abcde\n"
         );
+    }
+
+    #[test]
+    fn an_unterminated_osc_past_the_cap_is_abandoned_so_the_log_does_not_go_blank() {
+        let mut log = TextLogger::new(false, "\n");
+        let mut chunk = b"\x1b]0;".to_vec();
+        // No BEL or ST ever arrives: without a cap this would stay "inside a
+        // sequence" and swallow every byte for the rest of the session.
+        chunk.extend(std::iter::repeat_n(b'x', MAX_STRING + 100));
+        log.feed(&chunk, at(0, 0, 0, 0));
+        assert_eq!(log.feed(b"ok\n", at(0, 0, 0, 0)), "ok\n");
+    }
+
+    #[test]
+    fn a_dcs_string_is_capped_the_same_way() {
+        let mut log = TextLogger::new(false, "\n");
+        let mut chunk = b"\x1bP".to_vec();
+        chunk.extend(std::iter::repeat_n(b'y', MAX_STRING + 1));
+        log.feed(&chunk, at(0, 0, 0, 0));
+        assert_eq!(log.feed(b"ok\n", at(0, 0, 0, 0)), "ok\n");
     }
 
     #[test]

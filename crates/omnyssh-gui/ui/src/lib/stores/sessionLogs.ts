@@ -26,7 +26,17 @@ export function logStarted(sessionId: number, path: string, at: number = Date.no
   sessionLogs.update((m) => new Map(m).set(sessionId, { path, startedAt: at }));
 }
 
+/** Ids with a `logStart` command in flight: `log-stopped` for one of these can land
+ *  before the command resolves — the session can end right after the log opens
+ *  (backend's own race guard), racing the awaited `logStart` here. */
+const starting = new Set<number>();
+/** Ids from `starting` a `log-stopped` landed on while still in flight, so the
+ *  resolved `logStart` below knows not to add a now-already-stopped session back
+ *  into `sessionLogs`. */
+const stoppedWhileStarting = new Set<number>();
+
 export function applyLogStopped(p: LogStopped): void {
+  if (starting.has(p.sessionId)) stoppedWhileStarting.add(p.sessionId);
   sessionLogs.update((m) => {
     if (!m.has(p.sessionId)) return m;
     const next = new Map(m);
@@ -59,8 +69,17 @@ export interface LogTarget {
 export async function startSessionLog(t: LogTarget): Promise<boolean> {
   const path = await pickSavePath(defaultFileName(t.name, new Date(), 'log'), 'log');
   if (!path) return false;
-  await logStart(t.sessionId, path, t.timestamps, t.mode, logHeader(t.name, t.detail, new Date()));
-  logStarted(t.sessionId, path);
+  starting.add(t.sessionId);
+  let stoppedMidFlight = false;
+  try {
+    await logStart(t.sessionId, path, t.timestamps, t.mode, logHeader(t.name, t.detail, new Date()));
+  } finally {
+    starting.delete(t.sessionId);
+    stoppedMidFlight = stoppedWhileStarting.delete(t.sessionId);
+  }
+  // A log-stopped for this id already arrived (and already updated the status bar)
+  // while the command was in flight — do not resurrect it as still logging.
+  if (!stoppedMidFlight) logStarted(t.sessionId, path);
   return true;
 }
 

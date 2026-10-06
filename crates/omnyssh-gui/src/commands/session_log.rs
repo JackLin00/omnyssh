@@ -120,6 +120,11 @@ pub async fn save_text_file(
     text: String,
 ) -> Result<(), CommandError> {
     let path = state.picked_path(&path).map_err(failed)?;
+    // A log open on this same path would otherwise be truncated out from under its
+    // writer by this export.
+    if state.logs().is_logging_path(&path) {
+        return Err(failed("That file is being logged to"));
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let text = text.replace('\n', NATIVE_NEWLINE);
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))

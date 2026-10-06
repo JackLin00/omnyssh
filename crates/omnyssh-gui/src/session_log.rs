@@ -113,6 +113,13 @@ impl SessionLogs {
         self.lock().contains_key(&id)
     }
 
+    /// Whether some session is currently writing a log to `path`. Checked before a
+    /// second log or an export would otherwise truncate the file out from under its
+    /// open writer.
+    pub fn is_logging_path(&self, path: &Path) -> bool {
+        self.lock().values().any(|log| Path::new(&log.path) == path)
+    }
+
     /// Start logging `id` into `path`, replacing whatever the file held, with
     /// `header` as its first line.
     pub fn start(
@@ -122,9 +129,13 @@ impl SessionLogs {
         logger: SessionLogger,
         header: &str,
     ) -> Result<(), String> {
-        // Checked before the file is truncated; `start_with` checks again under the lock.
+        // Checked before the file is truncated; `start_with` checks both again under
+        // the lock.
         if self.is_logging(id) {
             return Err("This session is already being logged".to_string());
+        }
+        if self.is_logging_path(path) {
+            return Err("That file is being logged to".to_string());
         }
         let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.start_with(
@@ -158,6 +169,9 @@ impl SessionLogs {
         let mut logs = self.lock();
         if logs.contains_key(&id) {
             return Err("This session is already being logged".to_string());
+        }
+        if logs.values().any(|l| l.path == log.path) {
+            return Err("That file is being logged to".to_string());
         }
         logs.insert(id, log);
         Ok(())
@@ -298,6 +312,26 @@ mod tests {
         assert!(logs.start(1, &path, text(), "# again").is_err());
         logs.stop(1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), native("# new\n"));
+    }
+
+    #[test]
+    fn a_second_session_cannot_start_a_log_on_a_path_already_being_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.log");
+        let (logs, _) = logs();
+
+        logs.start(1, &path, text(), "# one").unwrap();
+        assert!(!logs.is_logging_path(&dir.path().join("other.log")));
+        assert!(logs.is_logging_path(&path));
+        let err = logs.start(2, &path, text(), "# two").unwrap_err();
+        assert_eq!(err, "That file is being logged to");
+        assert!(!logs.is_logging(2));
+
+        // Freed once the first session's log is stopped.
+        logs.stop(1);
+        assert!(!logs.is_logging_path(&path));
+        logs.start(2, &path, text(), "# two").unwrap();
+        logs.stop(2);
     }
 
     #[test]

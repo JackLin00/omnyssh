@@ -239,9 +239,12 @@ test('a serial tab logs in the display it shows, and exports it', async ({ page 
   expect(pick.defaultName).toMatch(/^COM3_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.log$/);
   await expect(log).toHaveAttribute('aria-pressed', 'true');
 
+  // The log is still open on /logs/picked.log; the backend refuses to export into a
+  // path it is currently logging to, so the export goes to a path of its own.
+  await setNextPath(page, '/logs/com3-export.txt');
   await page.getByRole('button', { name: 'Export the output to a file' }).click();
   await expect.poll(() => calls(page, 'save_text_file')).toEqual([
-    { path: '/logs/picked.log', text: '68 69 0D 0A\n' }
+    { path: '/logs/com3-export.txt', text: '68 69 0D 0A\n' }
   ]);
 
   await log.click();

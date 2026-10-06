@@ -82,3 +82,12 @@ export function bufferText(buf: BufferLike): string {
   while (trimmed.length > 0 && trimmed[trimmed.length - 1] === '') trimmed.pop();
   return trimmed.map((l) => `${l}\n`).join('');
 }
+
+/** Whether the Start/Stop logging toggle should be disabled. A session that can no
+ *  longer start a new recording (disconnected, port closed) can still be mid-way
+ *  through stopping one it already started — e.g. right as the session ends, before
+ *  its `log-stopped` lands — so Stop must stay reachable the whole time `logging` is
+ *  true; only disabled while neither starting nor stopping is possible. */
+export function logButtonDisabled(canStart: boolean, logging: boolean, picking: boolean): boolean {
+  return (!canStart && !logging) || picking;
+}

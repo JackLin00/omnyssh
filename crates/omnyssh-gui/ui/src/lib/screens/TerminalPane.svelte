@@ -43,7 +43,7 @@
   import type { TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
   import { HIGHLIGHT_LIMIT } from './terminalSearch';
-  import { bufferText, formatBytes, sshLogDetail } from './sessionLog';
+  import { bufferText, formatBytes, logButtonDisabled, sshLogDetail } from './sessionLog';
 
   let {
     hostName,
@@ -434,6 +434,11 @@
   let picking = $state(false);
   /** The stop button's tooltip: the file and how much is in it, read on hover. */
   let logTitle = $state('');
+  // Cleared the moment recording stops, so the next recording's tooltip can't start
+  // out showing a stale path or size from the one before it.
+  $effect(() => {
+    if (!logging) logTitle = '';
+  });
   const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
   async function toggleLog(): Promise<void> {
@@ -485,7 +490,7 @@
     title={logging ? logTitle || 'Stop logging' : 'Start logging'}
     aria-label={logging ? 'Stop logging' : 'Start logging'}
     aria-pressed={logging}
-    disabled={!canLog || picking}
+    disabled={logButtonDisabled(canLog, logging, picking)}
     onpointerenter={refreshLogTitle}
     onfocus={refreshLogTitle}
     onclick={toggleLog}

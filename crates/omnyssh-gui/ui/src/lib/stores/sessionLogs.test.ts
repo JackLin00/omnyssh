@@ -71,6 +71,21 @@ describe('sessionLogs', () => {
     expect(get(sessionLogs).size).toBe(0);
   });
 
+  it('a log-stopped landing before logStart resolves is not overwritten by it', async () => {
+    pickSavePath.mockResolvedValue('/logs/web-1.log');
+    // The backend's own race guard (plan N review item 1) — or simply the session
+    // ending — can report log-stopped before the logStart command that opened the
+    // log even resolves: simulated here by firing it from inside the mocked
+    // command, synchronously before that command's own promise settles.
+    logStart.mockImplementation(async () => {
+      applyLogStopped({ sessionId: 7, path: '/logs/web-1.log', bytes: 3, error: null });
+    });
+    expect(await startSessionLog(target)).toBe(true);
+    // Not logging: the in-flight start must not resurrect a log already closed.
+    expect(get(sessionLogs).size).toBe(0);
+    expect(get(statusNotice)?.message).toBe('Saved log to /logs/web-1.log');
+  });
+
   it('a stop drops the log and says where it was saved', () => {
     logStarted(7, '/logs/web-1.log');
     applyLogStopped({ sessionId: 7, path: '/logs/web-1.log', bytes: 10, error: null });
