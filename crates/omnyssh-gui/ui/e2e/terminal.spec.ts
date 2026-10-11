@@ -716,6 +716,14 @@ async function bootSerial(page: Page, quickGroups: unknown[] = []): Promise<void
         // The raw path delivers an ArrayBuffer; mirror that so xterm's Uint8Array wrap works.
         cb?.({ message: new TextEncoder().encode(text).buffer, index: outputIndex++ });
       };
+      // `serial_open`'s exit channel, so a test can make the port go away.
+      let exitChannel: number | undefined;
+      (win as { __failSerial?: (error: string) => void }).__failSerial = (error: string) => {
+        if (exitChannel == null) return;
+        const cb = win[`__cb${exitChannel}`] as ((m: unknown) => void) | undefined;
+        cb?.({ message: { error }, index: 0 });
+      };
+      let nextSerialId = 1;
 
       (win as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
         invoke: (cmd: string, args: Record<string, unknown>) => {
@@ -734,13 +742,16 @@ async function bootSerial(page: Page, quickGroups: unknown[] = []): Promise<void
               return Promise.resolve([{ name: 'COM3', description: null }]);
             case 'serial_open':
               outputChannel = (args.onOutput as { id: number }).id;
-              return Promise.resolve(1);
+              outputIndex = 0;
+              exitChannel = (args.onExit as { id: number }).id;
+              return Promise.resolve(nextSerialId++);
             case 'serial_write': {
               const { data } = args as { data: number[] };
               ((win.__serialWrites ??= []) as number[][]).push(data);
               return Promise.resolve(null);
             }
             case 'serial_close':
+              ((win.__serialCloses ??= []) as number[]).push(args.sessionId as number);
               return Promise.resolve(null);
             case 'plugin:event|listen':
               return Promise.resolve(++cbid);
@@ -829,4 +840,36 @@ test('the serial monitor stamps lines with their arrival time, and remembers the
     'aria-pressed',
     'false'
   );
+});
+
+test('a serial tab whose port went away reconnects in place, keeping its output', async ({ page }) => {
+  await bootSerial(page);
+
+  await page.getByRole('button', { name: 'Serial', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.getByRole('button', { name: 'Open', exact: true }).click();
+  await expect(page.locator('.xterm')).toBeVisible();
+  await sendSerial(page, 'before\r\n');
+  await expect(page.locator('.xterm-rows')).toContainText('before');
+
+  const reconnect = page.getByRole('button', { name: 'Reconnect', exact: true });
+  await expect(reconnect).toHaveCount(0);
+
+  // The adapter is unplugged: the backend reports the failure on the exit channel.
+  await page.evaluate(() =>
+    (window as unknown as { __failSerial?: (e: string) => void }).__failSerial?.('device disconnected')
+  );
+  await expect(reconnect).toBeVisible();
+
+  await reconnect.click();
+  await expect(reconnect).toHaveCount(0);
+  // The dead session is released before the port is reopened under a new id.
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __serialCloses?: number[] }).__serialCloses ?? []))
+    .toEqual([1]);
+
+  // The new session's bytes land after the old ones, in the same tab.
+  await sendSerial(page, 'after\r\n');
+  await expect(page.locator('.xterm-rows')).toContainText('before');
+  await expect(page.locator('.xterm-rows')).toContainText('after');
 });

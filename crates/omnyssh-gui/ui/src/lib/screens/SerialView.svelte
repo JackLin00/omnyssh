@@ -61,7 +61,11 @@
   // Reactive for the Log button, which waits for it.
   let serialId = $state<number>();
   let destroyed = false;
-  let failed = false;
+  // The port failed (or never opened): the toolbar offers Reconnect.
+  let failed = $state(false);
+  let reconnecting = $state(false);
+  // Bumped per open, so a superseded open's exit or late id is ignored.
+  let attempt = 0;
   let ready = $state(false);
   let canSend = $state(false);
   let display = $state<SerialDisplay>('text');
@@ -208,6 +212,70 @@
     }
   }
 
+  /** Open the port on fresh channels. Throws if it can't be opened (missing, or held by
+   *  another program). */
+  async function openPort(): Promise<void> {
+    const mine = ++attempt;
+    failed = false;
+    // The raw path delivers an ArrayBuffer despite the `number[]` type (see TerminalView).
+    const output = new Channel<TerminalBytes>();
+    output.onmessage = (msg) => {
+      const bytes = new Uint8Array(msg as unknown as ArrayBuffer);
+      const at = Date.now();
+      history.push(bytes, at);
+      term?.write(formatter.push(bytes, at));
+    };
+    const exit = new Channel<SerialExitDto>();
+    exit.onmessage = (msg) => {
+      if (destroyed || mine !== attempt) return;
+      // Keep the tab and its output: the log up to the failure is what matters.
+      failed = true;
+      canSend = false;
+      sessions.setStatus(session.id, 'failed');
+      lastError.set(`${opts.config.port}: ${msg.error}`);
+    };
+
+    const id = await serialOpen(opts.config, output, exit);
+    if (destroyed || mine !== attempt) {
+      void serialClose(id).catch(() => {});
+      return;
+    }
+    serialId = id;
+    sessions.setTermId(session.id, id);
+    if (!failed) {
+      sessions.setStatus(session.id, 'connected');
+      canSend = true;
+    }
+  }
+
+  function openFailed(err: unknown): void {
+    lastError.set(err instanceof Error ? err.message : String(err));
+    sessions.setStatus(session.id, 'failed');
+    failed = true;
+    canSend = false;
+  }
+
+  /** Reopen the same port with the same settings, in this tab, after it went away
+   *  (e.g. the USB adapter was unplugged). The output so far stays. */
+  async function reconnect(): Promise<void> {
+    if (reconnecting) return;
+    reconnecting = true;
+    const old = serialId;
+    serialId = undefined;
+    sessions.setStatus(session.id, 'connecting');
+    try {
+      // Release the dead port first, so the reopen isn't refused as busy.
+      if (old != null) await serialClose(old).catch(() => {});
+      if (destroyed) return;
+      await openPort();
+      if (active && get(dialogs).length === 0) term?.focus();
+    } catch (err) {
+      if (!destroyed) openFailed(err);
+    } finally {
+      reconnecting = false;
+    }
+  }
+
   function scheduleFit(): void {
     if (fitScheduled) return;
     fitScheduled = true;
@@ -297,36 +365,13 @@
         lastFontSize = n;
       });
 
-      // The raw path delivers an ArrayBuffer despite the `number[]` type (see TerminalView).
-      const output = new Channel<TerminalBytes>();
-      output.onmessage = (msg) => {
-        const bytes = new Uint8Array(msg as unknown as ArrayBuffer);
-        const at = Date.now();
-        history.push(bytes, at);
-        term?.write(formatter.push(bytes, at));
-      };
-      const exit = new Channel<SerialExitDto>();
-      exit.onmessage = (msg) => {
-        if (destroyed) return;
-        // Keep the tab and its output: the log up to the failure is what matters.
-        failed = true;
-        canSend = false;
-        sessions.setStatus(session.id, 'failed');
-        lastError.set(`${opts.config.port}: ${msg.error}`);
-      };
-
       safeFit();
-      const id = await serialOpen(opts.config, output, exit);
-      if (destroyed) {
-        void serialClose(id).catch(() => {});
-        return;
-      }
-      serialId = id;
-      sessions.setTermId(session.id, id);
-      if (!failed) {
-        sessions.setStatus(session.id, 'connected');
-        canSend = true;
-      }
+      // The port could not be opened (missing, or held by another program): the tab
+      // still comes up, with Reconnect, instead of being left half-built.
+      await openPort().catch((err) => {
+        if (!destroyed) openFailed(err);
+      });
+      if (destroyed) return;
 
       if (opts.mode === 'terminal') {
         term.onData((data) => sendInput(ENCODER.encode(mapEnter(data, opts.enter))));
@@ -345,10 +390,7 @@
     })().catch((err) => {
       // A tab closed while its open was in flight has nothing left to report to.
       if (destroyed) return;
-      // The port could not be opened (missing, or held by another program).
-      lastError.set(err instanceof Error ? err.message : String(err));
-      sessions.setStatus(session.id, 'failed');
-      canSend = false;
+      openFailed(err);
     });
   });
 
@@ -394,6 +436,17 @@
     <span class="font-mono text-fg">{session.hostName}</span>
     <span class="text-faint">{opts.mode === 'monitor' ? 'receive only' : 'terminal'}</span>
     <span class="flex-1"></span>
+    {#if failed || reconnecting}
+      <button
+        type="button"
+        class="rounded-full bg-accent px-3 py-0.5 text-xs text-accent-fg transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus disabled:cursor-not-allowed disabled:opacity-40"
+        disabled={reconnecting}
+        title="Reopen {opts.config.port} with the same settings"
+        onclick={reconnect}
+      >
+        {reconnecting ? 'Reconnecting…' : 'Reconnect'}
+      </button>
+    {/if}
     <div class="flex rounded-full border border-default p-0.5" role="group" aria-label="Display">
       {#each DISPLAYS as d (d)}
         <button
