@@ -423,10 +423,10 @@ fn main() {
             tauri::async_runtime::spawn(bridge::forward_core_events(handle.clone(), engine_rx));
             tauri::async_runtime::spawn(bridge::forward_terminal_output(handle, raw_rx));
 
-            // The pollers and the startup update check are both started by the frontend's
-            // first `reload_hosts`, once its event bridge is listening — starting them
-            // here would race listener registration and drop `HostStatusChanged` /
-            // `UpdateAvailable` before the webview can receive them (§3.4).
+            // The pollers are started by the frontend's first `reload_hosts`, once its
+            // event bridge is listening — starting them here would race listener
+            // registration and drop `HostStatusChanged` before the webview can receive
+            // them (§3.4).
             Ok(())
         })
         .build(tauri::generate_context!())

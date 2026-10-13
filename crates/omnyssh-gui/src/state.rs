@@ -97,9 +97,6 @@ pub struct GuiState {
     transfer_owner: Mutex<HashMap<TransferId, SessionId>>,
     /// Monotonic source for GUI-allocated transfer ids (§3.4).
     next_transfer_id: AtomicU64,
-    /// One-shot latch so the startup update check fires once, on the frontend's first
-    /// `reload_hosts` — i.e. only after its event bridge is listening (§3.4).
-    update_check_started: AtomicBool,
     /// The host with a key-setup in flight, if any. One run at a time, mirroring the
     /// TUI's single-popup model — a second run would race a second `hosts.toml` write
     /// and clobber the progress panel (§4.2).
@@ -137,7 +134,6 @@ impl GuiState {
             serial: Mutex::new(HashMap::new()),
             transfer_owner: Mutex::new(HashMap::new()),
             next_transfer_id: AtomicU64::new(0),
-            update_check_started: AtomicBool::new(false),
             key_setup: Mutex::new(None),
             sessions: Mutex::new(SessionRegistry::default()),
             tunnels: Mutex::new(TunnelManager::new(engine_tx.clone())),
@@ -224,15 +220,6 @@ impl GuiState {
     /// Release the key-setup slot when a run reaches any terminal outcome.
     pub fn end_key_setup(&self) {
         *self.key_setup.lock().expect("key_setup lock poisoned") = None;
-    }
-
-    /// Claim the one-shot startup update check: `true` exactly once, on the first call.
-    /// Driven from `reload_hosts` so the check runs only after the frontend's event
-    /// bridge is listening, never dropping `update-available` on a listener race (§3.4).
-    pub fn claim_update_check(&self) -> bool {
-        self.update_check_started
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
     }
 
     /// Start (or restart) the pollers for the cached hosts. Must run inside the
@@ -818,17 +805,6 @@ mod tests {
 
         state.end_key_setup();
         assert!(state.try_begin_key_setup("web-2").is_ok());
-    }
-
-    #[test]
-    fn update_check_is_claimed_exactly_once() {
-        // The startup update check must fire once (the first reload), never again — so a
-        // later `reload_hosts` (after a host edit) does not re-hit GitHub (§3.4).
-        let (engine_tx, _engine_rx) = mpsc::channel::<CoreEvent>(8);
-        let state = GuiState::new(engine_tx, PtyManager::new());
-        assert!(state.claim_update_check());
-        assert!(!state.claim_update_check());
-        assert!(!state.claim_update_check());
     }
 
     #[test]

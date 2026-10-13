@@ -1,19 +1,17 @@
-//! Update-checker + self-update commands (tech-gui.md §4.3). `check_update` and the
-//! startup check query GitHub through the core `update` module and map to
-//! `UpdateInfoDto`; the banner is driven by those. `install_update` performs the desktop
-//! self-update via `tauri-plugin-updater` — its endpoints + signing key land in Stage 5
-//! (§3.7), so until then it surfaces a clear "not available yet" rather than ever
-//! self-replacing the binary with the core's TUI archive. Update prefs round-trip
-//! through the shared config's `[update]` section.
+//! Update-checker + self-update commands (tech-gui.md §4.3). `check_update` queries
+//! GitHub through the core `update` module and maps to `UpdateInfoDto`; the banner is
+//! driven by it. There is no startup check: updates are only looked for on request.
+//! `install_update` performs the desktop self-update via `tauri-plugin-updater` — its
+//! endpoints + signing key land in Stage 5 (§3.7), so until then it surfaces a clear
+//! "not available yet" rather than ever self-replacing the binary with the core's TUI
+//! archive. Update prefs round-trip through the shared config's `[update]` section.
 
 use tauri::AppHandle;
 use tauri_plugin_updater::UpdaterExt;
-use tokio::sync::mpsc;
 
 use omnyssh_core::config::app_config::{
     load_app_config, save_update_config as core_save_update_config,
 };
-use omnyssh_core::event::CoreEvent;
 use omnyssh_core::update;
 
 use crate::dto::{UpdateConfigDto, UpdateInfoDto};
@@ -85,20 +83,4 @@ pub async fn save_update_config(config: UpdateConfigDto) -> Result<(), CommandEr
         .map_err(|e| CommandError {
             message: e.to_string(),
         })
-}
-
-/// The startup update check (tech-gui.md §3.4/§4.3): honour `check_on_startup` and the
-/// user's skipped version, then emit `UpdateAvailable` on the shared engine channel (the
-/// bridge maps it to `update-available`). Errors are swallowed — a failed check never
-/// disrupts startup.
-pub async fn startup_update_check(engine_tx: mpsc::Sender<CoreEvent>) {
-    let config = load_app_config(None).unwrap_or_default().update;
-    if !config.check_on_startup {
-        return;
-    }
-    if let Some(info) = update::check().await {
-        if info.latest != config.skip_version {
-            let _ = engine_tx.send(CoreEvent::UpdateAvailable(info)).await;
-        }
-    }
 }
