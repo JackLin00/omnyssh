@@ -14,6 +14,7 @@
 //! - Connect timeout: 10 seconds (per hop)
 //! - Command timeout: 30 seconds
 
+use std::borrow::Cow;
 #[cfg(unix)]
 use std::collections::HashSet;
 use std::fmt;
@@ -29,6 +30,7 @@ use async_trait::async_trait;
 use russh::client::{self, Handle};
 use russh::keys::key::PublicKey;
 use russh::ChannelMsg;
+use russh::{kex, AlgorithmKind};
 use tokio::sync::watch;
 use tokio::time;
 
@@ -125,6 +127,21 @@ impl Link {
         match (e, refusal) {
             (russh::Error::UnknownKey, Some(Refusal::Changed(changed))) => (*changed).into(),
             (russh::Error::UnknownKey, Some(Refusal::Other(why))) => Refused(why).into(),
+            // russh's message alone does not say what the server wanted.
+            (russh::Error::NoCommonAlgo { kind, theirs, .. }, _) => {
+                let kind = match kind {
+                    AlgorithmKind::Kex => "key exchange",
+                    AlgorithmKind::Key => "host key",
+                    AlgorithmKind::Cipher => "cipher",
+                    AlgorithmKind::Mac => "MAC",
+                    AlgorithmKind::Compression => "compression",
+                };
+                anyhow!(
+                    "no common {kind} algorithm: the server offers {}",
+                    theirs.join(", ")
+                )
+                .context("SSH connection failed")
+            }
             (e, _) => anyhow::Error::new(e).context("SSH connection failed"),
         }
     }
@@ -893,11 +910,27 @@ pub(crate) async fn connect_budget(host: &Host) -> Duration {
     (CONNECT_TIMEOUT + AGENT_BUDGET) * (hops as u32 + 1)
 }
 
+/// russh's key exchanges, then the SHA-1 ones old servers and appliances still
+/// insist on; a server offering anything newer never gets these.
+const KEX_ORDER: &[kex::Name] = &[
+    kex::CURVE25519,
+    kex::CURVE25519_PRE_RFC_8731,
+    kex::DH_G16_SHA512,
+    kex::DH_G14_SHA256,
+    kex::DH_G14_SHA1,
+    kex::DH_G1_SHA1,
+    kex::EXTENSION_SUPPORT_AS_CLIENT,
+    kex::EXTENSION_SUPPORT_AS_SERVER,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+];
+
 /// The russh client configuration for one hop: timeouts, keepalives, and the
 /// host key types already saved for it first.
 fn client_config(host: &Host) -> Arc<client::Config> {
     Arc::new(client::Config {
         preferred: russh::Preferred {
+            kex: Cow::Borrowed(KEX_ORDER),
             key: known_hosts::preferred(&host.hostname, host.port),
             ..russh::Preferred::DEFAULT
         },
@@ -2055,6 +2088,21 @@ mod tests {
         assert!(!handler.accepts_once(&other));
         let (handler, _link) = known_hosts_handler(&host, false, None);
         assert!(!handler.accepts_once(&picked));
+    }
+
+    #[test]
+    fn a_failed_negotiation_names_what_the_server_offers() {
+        let (_handler, link) = known_hosts_handler(&Host::default(), false, None);
+        let err = link.connect_error(russh::Error::NoCommonAlgo {
+            kind: AlgorithmKind::Key,
+            ours: vec![String::from("ssh-ed25519")],
+            theirs: vec![String::from("ssh-rsa"), String::from("ssh-dss")],
+        });
+        assert_eq!(
+            format!("{err:#}"),
+            "SSH connection failed: no common host key algorithm: \
+             the server offers ssh-rsa, ssh-dss"
+        );
     }
 
     #[test]

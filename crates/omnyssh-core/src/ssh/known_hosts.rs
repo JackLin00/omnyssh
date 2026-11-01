@@ -334,6 +334,17 @@ pub(crate) fn key_type(key: &PublicKey) -> &'static str {
     }
 }
 
+/// russh's host key algorithms, then `ssh-rsa` (SHA-1 signatures) for old
+/// servers that offer nothing newer.
+const HOST_KEY_ORDER: &[key::Name] = &[
+    key::ED25519,
+    key::ECDSA_SHA2_NISTP256,
+    key::ECDSA_SHA2_NISTP521,
+    key::RSA_SHA2_256,
+    key::RSA_SHA2_512,
+    key::SSH_RSA,
+];
+
 /// Host key algorithms for `host:port`, those of the keys saved for it first,
 /// as ssh(1) orders them: a server with several keys then shows the pinned one
 /// rather than one of another type that would be taken as new.
@@ -342,7 +353,7 @@ pub(crate) fn preferred(host: &str, port: u16) -> Cow<'static, [key::Name]> {
 }
 
 fn preferred_in(files: &[PathBuf], host: &str, port: u16) -> Cow<'static, [key::Name]> {
-    let default = russh::Preferred::DEFAULT.key;
+    let default = Cow::Borrowed(HOST_KEY_ORDER);
     let Some(saved) = files
         .iter()
         .filter_map(|file| saved_keys(file, host, port).ok())
@@ -372,7 +383,9 @@ fn same_type(a: &PublicKey, b: &PublicKey) -> bool {
 
 fn signs_with(key: &PublicKey, algo: &key::Name) -> bool {
     match key {
-        PublicKey::RSA { .. } => *algo == key::RSA_SHA2_256 || *algo == key::RSA_SHA2_512,
+        PublicKey::RSA { .. } => {
+            *algo == key::RSA_SHA2_256 || *algo == key::RSA_SHA2_512 || *algo == key::SSH_RSA
+        }
         _ => key.name() == algo.0,
     }
 }
@@ -540,10 +553,7 @@ mod tests {
         let file = dir.path().join("known_hosts");
         write(&file, &[]);
         let files = [file.clone()];
-        assert_eq!(
-            preferred_in(&files, "vm", 22),
-            russh::Preferred::DEFAULT.key
-        );
+        assert_eq!(preferred_in(&files, "vm", 22), HOST_KEY_ORDER);
 
         // ssh(1) before 8.5 pinned ECDSA, which then has to come before Ed25519.
         let ecdsa = russh::keys::parse_public_key_base64(
@@ -554,7 +564,7 @@ mod tests {
         write(&file, &[line("vm", &ecdsa)]);
         let order = preferred_in(&files, "vm", 22);
         assert_eq!(order.first(), Some(&key::ECDSA_SHA2_NISTP256));
-        assert_eq!(order.len(), russh::Preferred::DEFAULT.key.len());
+        assert_eq!(order.len(), HOST_KEY_ORDER.len());
     }
 
     #[test]
@@ -570,7 +580,22 @@ mod tests {
         write(&file, &[line("vm", &p384)]);
         let order = preferred_in(&[file], "vm", 22);
         assert_eq!(order.first(), Some(&key::ECDSA_SHA2_NISTP384));
-        assert_eq!(order.len(), russh::Preferred::DEFAULT.key.len() + 1);
+        assert_eq!(order.len(), HOST_KEY_ORDER.len() + 1);
+    }
+
+    #[test]
+    fn an_rsa_pin_puts_every_rsa_algorithm_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let rsa = pubkey(&KeyPair::generate_rsa(2048, key::SignatureHash::SHA2_256).unwrap());
+        write(&file, &[line("vm", &rsa)]);
+        let order = preferred_in(&[file], "vm", 22);
+        // An old server that signs with SHA-1 only still shows the pinned key.
+        assert_eq!(
+            order[..3],
+            [key::RSA_SHA2_256, key::RSA_SHA2_512, key::SSH_RSA]
+        );
+        assert_eq!(order.len(), HOST_KEY_ORDER.len());
     }
 
     #[test]
