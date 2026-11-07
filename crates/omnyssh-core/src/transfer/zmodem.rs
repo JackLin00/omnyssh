@@ -843,13 +843,16 @@ mod tests {
         // resend the very offset that just failed rather than one further
         // back: `sent` is otherwise strictly increasing round over round, so
         // a repeat (not a strict decrease) is the observable sign of it.
+        // Once the file is fully sent, `sent == total` for a round or two
+        // more (ZEOF, ZFIN) before the next `UploadState`, which is also a
+        // repeat but not a resend: excluded with `sent < total`.
         let mut last_sent: Option<u64> = None;
         let mut resent = false;
         let mut finished = false;
         for _ in 0..100_000 {
             let moved = peer.round(&mut up);
-            if let UploadState::Sending { sent, .. } = up.state() {
-                if last_sent.is_some_and(|prev| sent <= prev) {
+            if let UploadState::Sending { sent, total, .. } = up.state() {
+                if sent < total && last_sent.is_some_and(|prev| sent <= prev) {
                     resent = true;
                 }
                 last_sent = Some(sent);
