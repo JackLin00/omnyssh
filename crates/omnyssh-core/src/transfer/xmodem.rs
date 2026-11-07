@@ -334,8 +334,8 @@ impl Upload for XmodemUpload {
         if let Some(t) = self.resend_at {
             if now >= t {
                 self.resend();
+                return;
             }
-            return;
         }
         if now < self.deadline {
             return;
@@ -906,5 +906,46 @@ mod tests {
         now += ACK_TIMEOUT;
         up.tick(now);
         assert!(up.state().is_final());
+    }
+
+    #[test]
+    fn chatter_during_the_settle_still_times_out() {
+        let t = t0();
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(2048, 18))], t);
+        up.receive(b"C");
+        let block1 = drain(&mut up);
+        up.receive(&[NAK]);
+        let mut now = t;
+        let mut resent = Vec::new();
+        // The device keeps nagging with `C` (or sending line noise) the
+        // whole time: the settle never finishes, but block 1's own deadline
+        // must still fire.
+        while now < t + ACK_TIMEOUT {
+            now += Duration::from_millis(100);
+            up.tick(now);
+            resent.extend(drain(&mut up));
+            up.receive(b"C");
+        }
+        assert_eq!(
+            resent, block1,
+            "block 1 should have been resent by its deadline"
+        );
+        // Keep up the chatter through MAX_RETRIES more deadlines: the retry
+        // budget still runs out and the upload gives up.
+        let mut tail = Vec::new();
+        for _ in 0..MAX_RETRIES {
+            let until = now + ACK_TIMEOUT;
+            while now < until {
+                now += Duration::from_millis(100);
+                up.tick(now);
+                tail.extend(drain(&mut up));
+                up.receive(b"C");
+            }
+        }
+        assert_eq!(
+            up.state(),
+            UploadState::Failed("too many retries at block 1".into())
+        );
+        assert!(tail.ends_with(&CANCEL_SEQUENCE));
     }
 }
