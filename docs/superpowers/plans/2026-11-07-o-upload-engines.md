@@ -37,6 +37,11 @@ cargo 命令都在仓库根目录执行。这台机器磁盘很紧张（`target/
    - 握手：10 s 内没有 ZRINIT 就失败，提示检查 lrzsz；等待期间每 2 s 重发一次 ZRQINIT（`Sender::timeout()`）。
    - "已经握手"的判定：出现过 `ReadFile` 或 `FileCompleted`。`zmodem2` 不单独报告收到 ZRINIT。
    - 握手之后接收端 30 s 没有任何字节就失败。`rz` 每几个子包确认一次，只有链路断了才会这么久没动静。
+   - **（执行中修改，提交 b38c72a、1a7a6ca、42f84f0，以仓库代码为准）**：
+     - **不发 ZRQINIT**：`rz` 启动时会主动发 ZRINIT。设备上没有 `rz` 时，shell 会把我们的 ZRQINIT 回显回来，`zmodem2` 对任何不认识的帧头都回一个 ZRQINIT，于是在 shell 里无限循环，还会被当成命令执行。现在 `rz` 应答之前，ZRQINIT 和 ZNAK 一律不发出；没装 `rz` 时，超时之前什么都不会发进 shell。
+     - **握手超时改成 25 s**：`rz` 大约每 10 s 才重发一次 ZRINIT，第一个丢了也来得及等到重发。"已应答"的判定提前到：收到输入之后产生了非 ZRQINIT、非 ZNAK 的输出（也就是 ZFILE）。
+     - **按进度判断卡住**：取代原来的"30 s 没收到字节"。60 s 内既没有交出待发的字节，也没有读文件或完成文件，就失败（`the transfer stalled (no progress for 60 s)`）。原因：`zmodem2` 握手之后从不重发，会忽略 `rz` 的重发和 ZFERR，而 `rz` 自己的重发又会一直刷新"收到字节"的计时，导致挂住好几分钟。时间戳在 `tick` 里取，电脑睡眠唤醒后不会误判。最低支持 2400 波特率。
+     - 文件名超过 256 字节（`zmodem2` 的上限）时，直接给出清楚的失败提示。
 6. **XMODEM/YMODEM 细节**：
    - 接收端发 `C` 就用 CRC-16 和 1K 块（剩余不超过 128 字节时，最后一块用 128 字节块，少填充）；发 NAK 就用 8 位校验和和 128 字节块。模式由第一个文件开始时决定。
    - 最后一块用 0x1A 填充。YMODEM 的 0 号块是 `名字 NUL 大小 空格 mtime(八进制) NUL`，用 0 填充；信息超过 128 字节时用 1K 的 0 号块。批量结束用全 0 的 0 号块。
@@ -60,7 +65,7 @@ cargo 命令都在仓库根目录执行。这台机器磁盘很紧张（`target/
 9. **`transmit` 每次最多 8 KiB**（`TRANSMIT_CHUNK`）。调用方只在自己的缓冲排空后才再要，这样串口线程的 `pending` 有上限，SSH 的 `channel.data` 也不会一次压太多。
 10. **接口与 spec 的出入**：`UploadFile.reader` 是 `Box<dyn Source>`（`Read + Seek + Send`），不是 `Read + Send`，因为 ZMODEM 会按接收端的 ZRPOS 回到某个偏移重发。另外加了 `modified` 字段，以及 `UploadFile::open`、`Protocol::batch`、`UploadState::is_final` 三个小工具。
 
-> **执行记录**：Task 2 按计划代码提交后，代码审查发现上面这两处协议问题，已经在后续三个提交里修复并补了测试（`transfer::xmodem` 从 14 个测试增加到 21 个）。Task 2 下面的代码块是最初版本，最终代码以仓库为准。
+> **执行记录**：Task 2、Task 3 按计划代码提交后，代码审查又发现了上面标注的几处协议和计时问题，都已经在后续提交里修复并补了测试（`transfer` 从计划中的 26 个测试增加到 46 个以上）。Task 2、Task 3 下面的代码块是最初版本，最终代码以仓库为准。
 
 ---
 

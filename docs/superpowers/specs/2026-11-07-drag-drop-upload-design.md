@@ -35,7 +35,7 @@
 - **SFTP**：终端不受影响，不禁用输入。进度用同一个进度条显示，数据来自现有的 `transfer-progress` 事件。
 
 ### 各协议怎么启动
-- **ZMODEM**：自动向会话写入 `rz -b\r`（`-b` 二进制），然后等对方回 `ZRINIT`。不加 `-e`：`zmodem2` 不支持"转义全部控制字符"（spike 中 `rz -be` 握手失败）；ZMODEM 标准转义已覆盖 ZDLE、DLE、XON、XOFF，软件流控的串口也安全。
+- **ZMODEM**：自动向会话写入 `rz -b\r`（`-b` 二进制），然后等 `rz` 主动发来的 `ZRINIT`；我们不发 ZRQINIT（没装 `rz` 时 shell 会把它回显回来，造成死循环）。不加 `-e`：`zmodem2` 不支持"转义全部控制字符"（spike 中 `rz -be` 握手失败）；ZMODEM 标准转义已覆盖 ZDLE、DLE、XON、XOFF，软件流控的串口也安全。
 - **YMODEM / XMODEM**：什么都不发，等接收端发起（`C` 或 NAK）。用户需要先在设备上执行 `loady`、`loadx`、`rb`、`rx` 这类命令。等待期间进度条显示"等待接收端…"。
 - **SFTP**：上传到 `upload_dir/<文件名>`。`~` 和 `~/x` 转换为 SFTP 的相对路径 `.` 和 `x`，SFTP 的相对路径以 home 为基准。
 
@@ -132,7 +132,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 
 | 情况 | 处理 |
 |---|---|
-| ZMODEM 发出 `rz` 后 10 秒没收到 `ZRINIT` | 发取消序列，报失败："设备未响应 rz，确认已安装 lrzsz" |
+| ZMODEM 发出 `rz` 后 25 秒没收到 `ZRINIT`（覆盖 `rz` 两次约 10 秒一次的重发） | 发取消序列，报失败："设备未响应 rz，确认已安装 lrzsz" |
 | X/YMODEM 等接收端超过 60 秒 | 报失败："接收端未就绪（是否已执行 loady/loadx？）" |
 | 同一个块重传超过 10 次 | 发 CAN，报失败："重传过多（块 N）" |
 | 对端发来 CAN CAN 或 `ZABORT`/`ZCAN` | 报失败："设备取消了传输" |
@@ -162,6 +162,14 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 - **前端**：
   - Vitest：命中判断、协议决策；
   - Playwright e2e：用 stub 的 `__TAURI_INTERNALS__` 模拟拖放事件和 `upload-progress`、`upload-finished`，验证遮罩、进度条、输入禁用和取消。
+
+## 接入时的注意事项（引擎实现与审查中发现，供接入与界面计划使用）
+- 写入 `rz -b\r` 之后、读取下一批输出之前，必须先把 `Ctrl::Upload` 交给会话；否则 `rz` 的第一个 ZRINIT 会被当成普通输出显示到终端里。两者走同一个控制通道、按顺序处理即可满足。
+- GUI 在写入 `rz -b\r` **之前**就要检查文件：大于 4 GiB、文件名超过 256 字节、文件夹、XMODEM 多文件，都直接拒绝，不要先启动 `rz` 再失败。
+- 多文件 YMODEM 发给 U-Boot `loady`：U-Boot 只收第一个文件。界面上拖入多个文件且协议是 YMODEM 时，给出提示。
+- ZMODEM 的"跳过"不一定是"文件已存在"，`rz` 无法创建文件时也会跳过。界面文字写"已跳过"，不要写"已存在"。
+- 进度可能倒退（ZRPOS 回退重发）；跳过或空文件之后，状态会继续显示上一个文件的 100%，直到下一个文件开始读数据。
+- 引擎在 60 s 内没有进度就判定卡住，最低支持 2400 波特率。
 
 ## 不在本次范围内
 - 下载：`sz`，以及设备主动发起 ZMODEM 时的自动检测。
