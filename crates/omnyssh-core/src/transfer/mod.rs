@@ -15,6 +15,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 mod xmodem;
+mod zmodem;
 
 /// How much one [`Upload::transmit`] call adds at most. The caller only asks
 /// again once it has sent it all, so this bounds what sits in its buffer.
@@ -124,6 +125,28 @@ pub trait Upload: Send {
     /// What the device sent after the transfer ended (rz's trailing output,
     /// the shell prompt), to show in the terminal.
     fn leftover(&mut self) -> Vec<u8>;
+}
+
+/// Starts an upload. `files` must not be empty, and XMODEM takes exactly one
+/// (see [`Protocol::batch`]); callers check both first.
+pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dyn Upload> {
+    assert!(!files.is_empty(), "an upload needs a file");
+    match protocol {
+        Protocol::Zmodem => Box::new(zmodem::ZmodemUpload::new(files, now)),
+        Protocol::Ymodem => Box::new(xmodem::XmodemUpload::new(
+            xmodem::Variant::Ymodem,
+            files,
+            now,
+        )),
+        Protocol::Xmodem => {
+            assert!(files.len() == 1, "XMODEM sends one file");
+            Box::new(xmodem::XmodemUpload::new(
+                xmodem::Variant::Xmodem,
+                files,
+                now,
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
