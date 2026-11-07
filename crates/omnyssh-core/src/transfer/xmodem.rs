@@ -27,6 +27,20 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Sends of one block after the first, before the transfer gives up.
 const MAX_RETRIES: u32 = 10;
+/// How long the line must stay quiet, after a NAK or a CRC `C` asks us to
+/// resend, before we actually do: a burst of several then causes one resend,
+/// not one per byte, and an ACK that was already on its way for an earlier
+/// duplicate can't be mistaken for the next block's.
+const SETTLE: Duration = Duration::from_millis(200);
+
+/// What we send to cancel: 10 CANs, enough to get past the receiver's typical
+/// 2-CAN debounce and any input buffering, then 10 backspaces to erase an
+/// echoed command line. Matches lrzsz's `canit()` and gets past U-Boot's
+/// xyzModem, whose `xyzModem_CAN_COUNT` is 3.
+const CANCEL_SEQUENCE: [u8; 20] = [
+    CAN, CAN, CAN, CAN, CAN, CAN, CAN, CAN, CAN, CAN, //
+    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Variant {
@@ -72,6 +86,10 @@ pub(crate) struct XmodemUpload {
     acked: u64,
     retries: u32,
     deadline: Instant,
+    /// A resend is due at this time. Every byte received meanwhile pushes it
+    /// back by `SETTLE` and is otherwise dropped (it is not an answer: it is
+    /// noise, or a duplicate from before the line settles).
+    resend_at: Option<Instant>,
     now: Instant,
     out: Vec<u8>,
     /// The last byte received was CAN; two in a row cancel.
@@ -95,6 +113,7 @@ impl XmodemUpload {
             acked: 0,
             retries: 0,
             deadline: now + START_TIMEOUT,
+            resend_at: None,
             now,
             out: Vec::new(),
             saw_can: false,
@@ -115,6 +134,10 @@ impl XmodemUpload {
             return;
         }
         self.saw_can = false;
+        if self.resend_at.is_some() {
+            self.resend_at = Some(self.now + SETTLE);
+            return;
+        }
         let start = b == CRC_START || b == NAK;
         match self.phase {
             Phase::Start if start => {
@@ -132,6 +155,7 @@ impl XmodemUpload {
             }
             Phase::HeaderAck if b == ACK => {
                 self.phase = Phase::DataStart;
+                self.retries = 0;
                 self.deadline = self.now + ACK_TIMEOUT;
             }
             Phase::DataStart if start => self.send_data_block(),
@@ -157,8 +181,13 @@ impl XmodemUpload {
                 sent_files: self.files.len(),
                 skipped: 0,
             }),
-            Phase::HeaderAck | Phase::BlockAck | Phase::EotAck | Phase::EndAck if b == NAK => {
-                self.resend()
+            // A NAK, or (in CRC mode) a `C`: the receiver wants a resend.
+            // Wait for the line to settle, so a burst causes one resend, not
+            // one per byte.
+            Phase::HeaderAck | Phase::BlockAck | Phase::EotAck | Phase::EndAck
+                if b == NAK || b == CRC_START =>
+            {
+                self.resend_at = Some(self.now + SETTLE);
             }
             // Anything else (a banner, line noise, an echo) is not an answer.
             _ => {}
@@ -253,11 +282,13 @@ impl XmodemUpload {
     }
 
     fn resend(&mut self) {
+        self.resend_at = None;
         self.retries += 1;
         if self.retries > MAX_RETRIES {
             let what = match self.phase {
                 Phase::BlockAck => format!("block {}", self.blocks),
                 Phase::EotAck => "end of file".to_string(),
+                Phase::EndAck => "the end of the batch".to_string(),
                 _ => "the file header".to_string(),
             };
             self.fail(format!("too many retries at {what}"));
@@ -271,12 +302,13 @@ impl XmodemUpload {
     /// Our side gives up: tell the receiver too.
     fn fail(&mut self, message: String) {
         self.out.clear();
-        self.out.extend_from_slice(&[CAN, CAN]);
+        self.out.extend_from_slice(&CANCEL_SEQUENCE);
         self.finish(UploadState::Failed(message));
     }
 
     fn finish(&mut self, state: UploadState) {
         self.phase = Phase::Final;
+        self.resend_at = None;
         self.state = state;
     }
 }
@@ -299,6 +331,12 @@ impl Upload for XmodemUpload {
 
     fn tick(&mut self, now: Instant) {
         self.now = now;
+        if let Some(t) = self.resend_at {
+            if now >= t {
+                self.resend();
+            }
+            return;
+        }
         if now < self.deadline {
             return;
         }
@@ -316,7 +354,7 @@ impl Upload for XmodemUpload {
             return;
         }
         self.out.clear();
-        self.out.extend_from_slice(&[CAN, CAN]);
+        self.out.extend_from_slice(&CANCEL_SEQUENCE);
         self.finish(UploadState::Cancelled);
     }
 
@@ -503,12 +541,22 @@ mod tests {
     }
 
     /// Runs an upload against `rx` until neither side has anything to say.
-    fn run(up: &mut dyn Upload, rx: &mut Receiver) {
+    /// `start` is the `Instant` the upload was created with: when the upload
+    /// has nothing to send, the clock is moved forward by `SETTLE` and ticked,
+    /// to let a pending resend (the receiver's first YMODEM EOT NAK, say) go
+    /// out.
+    fn run(up: &mut dyn Upload, rx: &mut Receiver, start: Instant) {
         up.receive(&[rx.start_byte()]);
+        let mut now = start;
         for _ in 0..100_000 {
-            let out = drain(up);
+            let mut out = drain(up);
             if out.is_empty() {
-                return;
+                now += SETTLE;
+                up.tick(now);
+                out = drain(up);
+                if out.is_empty() {
+                    return;
+                }
             }
             let reply = rx.feed(&out);
             up.receive(&reply);
@@ -523,10 +571,11 @@ mod tests {
 
     #[test]
     fn xmodem_crc_sends_1k_blocks_and_pads_the_last() {
+        let t = t0();
         let data = bytes(3000, 1);
-        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a.bin", data.clone())], t0());
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a.bin", data.clone())], t);
         let mut rx = Receiver::new(false, true);
-        run(&mut up, &mut rx);
+        run(&mut up, &mut rx, t);
         assert!(rx.done);
         assert_eq!(rx.kinds, vec![STX, STX, STX]);
         let got = &rx.files[0].2;
@@ -544,20 +593,22 @@ mod tests {
 
     #[test]
     fn a_short_tail_goes_in_a_128_byte_block() {
+        let t = t0();
         let data = bytes(1100, 2);
-        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a.bin", data.clone())], t0());
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a.bin", data.clone())], t);
         let mut rx = Receiver::new(false, true);
-        run(&mut up, &mut rx);
+        run(&mut up, &mut rx, t);
         assert_eq!(rx.kinds, vec![STX, SOH]);
         assert_eq!(&rx.files[0].2[..1100], &data[..]);
     }
 
     #[test]
     fn nak_start_falls_back_to_checksum_and_128_byte_blocks() {
+        let t = t0();
         let data = bytes(300, 3);
-        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a.bin", data.clone())], t0());
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a.bin", data.clone())], t);
         let mut rx = Receiver::new(false, false);
-        run(&mut up, &mut rx);
+        run(&mut up, &mut rx, t);
         assert!(rx.done);
         assert_eq!(rx.kinds, vec![SOH, SOH, SOH]);
         assert_eq!(&rx.files[0].2[..300], &data[..]);
@@ -565,6 +616,7 @@ mod tests {
 
     #[test]
     fn ymodem_sends_a_batch_with_names_sizes_and_an_end_block() {
+        let t = t0();
         let a = bytes(5000, 4);
         let b = bytes(10, 5);
         let files = vec![
@@ -572,9 +624,9 @@ mod tests {
             file("b.txt", b.clone()),
             file("empty", vec![]),
         ];
-        let mut up = XmodemUpload::new(Variant::Ymodem, files, t0());
+        let mut up = XmodemUpload::new(Variant::Ymodem, files, t);
         let mut rx = Receiver::new(true, true);
-        run(&mut up, &mut rx);
+        run(&mut up, &mut rx, t);
         assert!(rx.done);
         let names: Vec<_> = rx.files.iter().map(|f| (f.0.as_str(), f.1)).collect();
         assert_eq!(
@@ -617,10 +669,13 @@ mod tests {
 
     #[test]
     fn nak_resends_the_same_block_and_ack_moves_on() {
-        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(2048, 6))], t0());
+        let t = t0();
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(2048, 6))], t);
         up.receive(b"C");
         let first = drain(&mut up);
         up.receive(&[NAK]);
+        assert!(drain(&mut up).is_empty());
+        up.tick(t + SETTLE);
         assert_eq!(drain(&mut up), first);
         up.receive(&[ACK]);
         let second = drain(&mut up);
@@ -646,7 +701,7 @@ mod tests {
         }
         now += ACK_TIMEOUT;
         up.tick(now);
-        assert_eq!(drain(&mut up), vec![CAN, CAN]);
+        assert_eq!(drain(&mut up), CANCEL_SEQUENCE.to_vec());
         assert_eq!(
             up.state(),
             UploadState::Failed("too many retries at block 1".into())
@@ -689,7 +744,7 @@ mod tests {
         drain(&mut up);
         up.cancel();
         assert_eq!(up.state(), UploadState::Cancelled);
-        assert_eq!(drain(&mut up), vec![CAN, CAN]);
+        assert_eq!(drain(&mut up), CANCEL_SEQUENCE.to_vec());
         up.receive(b"=> ");
         assert_eq!(up.leftover(), b"=> ");
     }
@@ -736,10 +791,120 @@ mod tests {
         };
         let mut up = XmodemUpload::new(Variant::Xmodem, vec![f], t0());
         up.receive(b"C");
-        assert_eq!(drain(&mut up), vec![CAN, CAN]);
+        assert_eq!(drain(&mut up), CANCEL_SEQUENCE.to_vec());
         assert_eq!(
             up.state(),
             UploadState::Failed("could not read a: disk gone".into())
         );
+    }
+
+    #[test]
+    fn a_burst_of_naks_resends_once() {
+        let t = t0();
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(100, 10))], t);
+        up.receive(b"C");
+        let block = drain(&mut up);
+        up.receive(&[NAK, NAK]);
+        assert!(drain(&mut up).is_empty());
+        up.tick(t + SETTLE);
+        assert_eq!(drain(&mut up), block);
+        assert!(drain(&mut up).is_empty());
+    }
+
+    #[test]
+    fn a_c_while_waiting_asks_for_a_resend() {
+        let t = t0();
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(100, 11))], t);
+        up.receive(b"C");
+        let block = drain(&mut up);
+        up.receive(b"C");
+        assert!(drain(&mut up).is_empty());
+        up.tick(t + SETTLE);
+        assert_eq!(drain(&mut up), block);
+    }
+
+    #[test]
+    fn an_ack_during_the_settle_is_dropped() {
+        let t = t0();
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(2048, 12))], t);
+        up.receive(b"C");
+        let block1 = drain(&mut up);
+        up.receive(&[NAK]);
+        up.tick(t + Duration::from_millis(100));
+        up.receive(&[ACK]);
+        assert!(drain(&mut up).is_empty());
+        up.tick(t + Duration::from_millis(100) + SETTLE - Duration::from_millis(1));
+        assert!(drain(&mut up).is_empty());
+        up.tick(t + Duration::from_millis(100) + SETTLE);
+        assert_eq!(drain(&mut up), block1);
+    }
+
+    #[test]
+    fn bytes_during_the_settle_push_the_resend_back() {
+        let t = t0();
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(2048, 13))], t);
+        up.receive(b"C");
+        let block1 = drain(&mut up);
+        up.receive(&[NAK]);
+        up.tick(t + Duration::from_millis(150));
+        up.receive(&[0xFF]); // noise: not CAN/ACK/NAK/C, pushes the resend back
+        up.tick(t + Duration::from_millis(250));
+        assert!(drain(&mut up).is_empty());
+        up.tick(t + Duration::from_millis(350));
+        assert_eq!(drain(&mut up), block1);
+    }
+
+    #[test]
+    fn block_numbers_wrap_after_255() {
+        let t = t0();
+        let data = bytes(300 * 1024, 14);
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a.bin", data.clone())], t);
+        let mut rx = Receiver::new(false, true);
+        run(&mut up, &mut rx, t);
+        assert!(rx.done);
+        assert_eq!(rx.files[0].2, data);
+    }
+
+    #[test]
+    fn ymodem_in_checksum_mode() {
+        let t = t0();
+        let a = bytes(500, 15);
+        let b = bytes(20, 16);
+        let files = vec![file("a.bin", a.clone()), file("b.txt", b.clone())];
+        let mut up = XmodemUpload::new(Variant::Ymodem, files, t);
+        let mut rx = Receiver::new(true, false);
+        run(&mut up, &mut rx, t);
+        assert!(rx.done);
+        let names: Vec<_> = rx.files.iter().map(|f| (f.0.as_str(), f.1)).collect();
+        assert_eq!(names, vec![("a.bin", Some(500)), ("b.txt", Some(20))]);
+        assert_eq!(&rx.files[0].2[..500], &a[..]);
+        assert_eq!(&rx.files[1].2[..20], &b[..]);
+    }
+
+    #[test]
+    fn header_retries_do_not_count_against_block_1() {
+        let t = t0();
+        let mut up = XmodemUpload::new(Variant::Ymodem, vec![file("a", bytes(10, 17))], t);
+        up.receive(b"C");
+        let header = drain(&mut up);
+        let mut now = t;
+        for _ in 0..8 {
+            up.receive(&[NAK]);
+            now += SETTLE;
+            up.tick(now);
+            assert_eq!(drain(&mut up), header);
+        }
+        up.receive(&[ACK]);
+        up.receive(b"C");
+        let block1 = drain(&mut up);
+        for _ in 0..MAX_RETRIES {
+            now += ACK_TIMEOUT;
+            up.tick(now);
+            assert_eq!(drain(&mut up), block1);
+        }
+        assert!(!up.state().is_final());
+        now += ACK_TIMEOUT;
+        up.tick(now);
+        assert!(up.state().is_final());
     }
 }
