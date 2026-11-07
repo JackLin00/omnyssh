@@ -42,10 +42,11 @@ cargo 命令都在仓库根目录执行。这台机器磁盘很紧张（`target/
    - 最后一块用 0x1A 填充。YMODEM 的 0 号块是 `名字 NUL 大小 空格 mtime(八进制) NUL`，用 0 填充；信息超过 128 字节时用 1K 的 0 号块。批量结束用全 0 的 0 号块。
    - YMODEM 接收端（`rb`）对第一个 EOT 回 NAK，第二个才回 ACK，所以 EOT 被 NAK 时照常重发。
    - 等应答时，`C` 和其他杂字节一概忽略。如果把迟到的 `C` 当作 NAK 去重发 1 号块，接收端会多回一个 ACK，被我们当成 2 号块的确认，传输就错位了。
-   - 每块等 10 s，超时重发；同一块重发超过 10 次就失败（`too many retries at block N`），并发 `CAN CAN`。连续收到两个 CAN 算对端取消。
+   - 每块等 10 s，超时重发；同一块重发超过 10 次就失败（`too many retries at block N`），并发取消序列。连续收到两个 CAN 算对端取消。
+   - **（执行中补充，提交 f6e4ccd、644b726、3eac7d7）收到 NAK 不立即重发**：先等线路静默 200 ms（`SETTLE`），期间收到的字节全部丢掉（CAN 检测照常），再重发一次，和 lrzsz 一样。否则连续两个 NAK 会让同一块发两次，接收端的第二个 ACK 会被当成下一块的确认，造成错位。等待期间块的 10 s 超时照常生效，持续的杂字节不会让传输挂住。等结束块应答时，即使正在等重发，ACK 也照常算数。`C` 在等应答时仍然忽略：慢速链路上迟到的 `C` 可能比这一块的 ACK 先到，把它当 NAK 会再次造成错位。
    - 等接收端开始：第一个文件等 60 s（用户还要在设备上输入 `loady`），提示里点名 `loady/loadx`；后续文件或数据开始等 10 s。
 7. **取消和失败时的输出**：
-   - XMODEM/YMODEM：清掉还没发的字节，改为发 `CAN CAN`。
+   - XMODEM/YMODEM：清掉还没发的字节，改为发 `CANCEL_SEQUENCE`，即 10 个 CAN 加 10 个退格。（执行中修改：原来只发 `CAN CAN`，但 U-Boot 的 xyzModem 要 3 个 CAN 才会取消。）
    - ZMODEM：`fail()` 清掉我们自己缓冲里还没交出去的字节，再调用 `Sender::abort()`，后者发 10 个 CAN 加 10 个退格。
    - 进入最终状态后，`receive` 收到的字节全部进 `leftover`。正常结束（`SessionCompleted`）时，没处理完的输入也进 `leftover`（里面可能有 `rz` 最后一帧尾部的 CR LF，无害）。中止（`Aborted`）时，没处理完的输入直接丢掉，因为那是协议字节，显示在终端里只是乱码。
 8. **消息用英文**：界面文字都是英文（Log、Export、Show in folder），所以 `UploadState::Failed` 里的消息也用英文。spec 里的中文提示只是意思，实际文本以这里为准：
@@ -58,6 +59,8 @@ cargo 命令都在仓库根目录执行。这台机器磁盘很紧张（`target/
    - `NAME is larger than ZMODEM's 4 GiB limit`
 9. **`transmit` 每次最多 8 KiB**（`TRANSMIT_CHUNK`）。调用方只在自己的缓冲排空后才再要，这样串口线程的 `pending` 有上限，SSH 的 `channel.data` 也不会一次压太多。
 10. **接口与 spec 的出入**：`UploadFile.reader` 是 `Box<dyn Source>`（`Read + Seek + Send`），不是 `Read + Send`，因为 ZMODEM 会按接收端的 ZRPOS 回到某个偏移重发。另外加了 `modified` 字段，以及 `UploadFile::open`、`Protocol::batch`、`UploadState::is_final` 三个小工具。
+
+> **执行记录**：Task 2 按计划代码提交后，代码审查发现上面这两处协议问题，已经在后续三个提交里修复并补了测试（`transfer::xmodem` 从 14 个测试增加到 21 个）。Task 2 下面的代码块是最初版本，最终代码以仓库为准。
 
 ---
 

@@ -73,7 +73,7 @@ pub trait Upload: Send {
     fn transmit(&mut self, out: &mut Vec<u8>);
     /// 处理超时和重传，时间由调用方注入。
     fn tick(&mut self, now: Instant);
-    /// 发出取消序列：ZMODEM 发 8 个 CAN 加 8 个退格，X/YMODEM 发 CAN CAN。
+    /// 发出取消序列：三种协议都发 10 个 CAN 加 10 个退格（和 lrzsz 的 canit() 相同；U-Boot 要 3 个 CAN 才取消）。
     fn cancel(&mut self);
     fn state(&self) -> UploadState;
     /// 结束后多收到的字节（比如 ZMODEM 的 "OO"、shell 提示符），交还给终端显示。
