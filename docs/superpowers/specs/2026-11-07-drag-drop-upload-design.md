@@ -35,7 +35,7 @@
 - **SFTP**：终端不受影响，不禁用输入。进度用同一个进度条显示，数据来自现有的 `transfer-progress` 事件。
 
 ### 各协议怎么启动
-- **ZMODEM**：自动向会话写入 `rz -be\r`（`-b` 二进制，`-e` 转义控制字符），然后等对方回 `ZRINIT`。
+- **ZMODEM**：自动向会话写入 `rz -b\r`（`-b` 二进制），然后等对方回 `ZRINIT`。不加 `-e`：`zmodem2` 不支持"转义全部控制字符"（spike 中 `rz -be` 握手失败）；ZMODEM 标准转义已覆盖 ZDLE、DLE、XON、XOFF，软件流控的串口也安全。
 - **YMODEM / XMODEM**：什么都不发，等接收端发起（`C` 或 NAK）。用户需要先在设备上执行 `loady`、`loadx`、`rb`、`rx` 这类命令。等待期间进度条显示"等待接收端…"。
 - **SFTP**：上传到 `upload_dir/<文件名>`。`~` 和 `~/x` 转换为 SFTP 的相对路径 `.` 和 `x`，SFTP 的相对路径以 home 为基准。
 
@@ -44,7 +44,10 @@
 ### core：`omnyssh-core/src/transfer/`
 - `mod.rs`：定义接口、`Protocol` 和 `start()`。
 - `xmodem.rs`：XMODEM 和 YMODEM 共用分块、CRC 和 ACK 状态机。YMODEM 多一个 0 号块（文件名 NUL 大小）和批量结束的空 0 号块。
-- `zmodem.rs`：只实现发送方向。实现计划的第一步是 spike `zmodem2` crate：它能和真实的 `rz` 互通，就把它包在接口后面；不能，就自己实现 ZMODEM 发送端。对外接口都一样。
+- `zmodem.rs`：只实现发送方向，包装 `zmodem2` 0.7.3 的 `Sender`（sans-IO，`poll()` 返回 `WriteWire`/`ReadFile`/`Event`/`Idle`）。
+  - 2026-11-07 spike 已验证：和 lrzsz 0.12.21 的 `rz -b` 经管道互传 1 MB 随机文件 + 小文件 + 空文件，SHA-256 一致，用时约 0.17 s；目标文件已存在时 `rz` 回 `ZSKIP`，引擎照常继续下一个。
+  - `FileInfo` 必须带 `with_modified(本地 mtime)` 和 `with_mode(0o100644)`：不带时 `rz` 会把文件时间写成乱值（spike 中出现 2446 年），权限变成 `0600`。
+  - `zmodem2` 对 `ZSKIP` 只发 `FileCompleted`，不单独报告。判断方法：`FileCompleted` 时这个文件一个数据块都没读过，而且文件大小大于 0，就记为跳过。
 
 ```rust
 pub enum Protocol { Zmodem, Ymodem, Xmodem }
@@ -91,7 +94,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
   4. 状态和上一次不同时，调用 `on_output(SerialOutput::Upload(state))`。
 - 进入 `Done`、`Failed` 或 `Cancelled` 后，把 `leftover()` 作为普通的 `Data` 交还，然后回到正常模式。
 - 现有的"有界写、不 flush"策略不变。
-- 传输期间收到的 `Ctrl::Write` 照常进入 `pending`。GUI 已经禁用了输入，这条路径只用于 ZMODEM 启动前写入 `rz -be\r`。
+- 传输期间收到的 `Ctrl::Write` 照常进入 `pending`。GUI 已经禁用了输入，这条路径只用于 ZMODEM 启动前写入 `rz -b\r`。
 
 ### SSH 接入：`ssh/pty.rs` 的 pump 循环
 - `Ctrl` 新增 `Upload(Box<dyn Upload>)` 和 `CancelUpload`。`CoreEvent` 新增 `UploadState(SessionId, UploadState)`。
@@ -110,7 +113,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 - 命令负责：
   - 检查路径（文件夹、XMODEM 多文件、会话已有传输进行中都直接返回错误）；
   - 打开文件，取文件名和大小；
-  - ZMODEM 时先写入 `rz -be\r`，再发 `Ctrl::Upload`。
+  - ZMODEM 时先写入 `rz -b\r`，再发 `Ctrl::Upload`。
 - SFTP 协议走 `terminal_upload`，分支到现有的 `SftpManager`：
   - 第一次拖放时，在后台为这个主机开一个 SFTP 会话并缓存，SSH 标签关闭时一起关掉；
   - 每个文件依次调用现有的上传路径。
@@ -136,7 +139,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 | 用户点取消 | 引擎发取消序列，最多等 2 秒排空发送缓冲，然后报"已取消" |
 | 本地读文件出错 | 发 CAN，报失败，附上 I/O 错误 |
 | 传输中串口拔出或 SSH 断开 | 传输随会话结束，`upload-finished` 报"连接中断"。串口重连后不会续传 |
-| ZMODEM 收到 `ZSKIP` | 这个文件记为跳过，继续下一个，最终结果里写跳过的数量 |
+| ZMODEM 收到 `ZSKIP` | 这个文件记为跳过（判断方法见上），继续下一个，最终结果里写跳过的数量 |
 | SFTP 失败 | 沿用现有的错误信息，通过 `upload-finished` 报告 |
 
 所有结束情况都会退出传输模式、恢复键盘输入，并在终端里打印一行结果。
@@ -152,7 +155,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
     - 用最小接收端模拟器覆盖握手、多文件、`ZSKIP`、取消、`ZRINIT` 超时。
 - **互通测试**（`omnyssh-core/tests/transfer_lrzsz.rs`，用 `#[ignore]` 标记，本机有 lrzsz 时运行）：
   - 通过 pty 对接真实的 `rz`、`rb`（YMODEM）、`rx`（XMODEM），各上传一个随机 1 MB 文件，比对 SHA-256；
-  - 它同时是 `zmodem2` spike 的验收标准。
+  - ZMODEM 的这一项在 spike 中已手动验证通过，这里把它固化为测试。
 - **会话接入测试**：
   - 串口：沿用假端口，验证传输期间数据不进 `on_output(Data)`、leftover 能回到终端，以及取消和拔出路径；
   - SSH：测试抽出来的字节路由函数。
