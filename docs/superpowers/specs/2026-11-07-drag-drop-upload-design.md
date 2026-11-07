@@ -52,10 +52,15 @@
 ```rust
 pub enum Protocol { Zmodem, Ymodem, Xmodem }
 
+/// Read + Seek + Send：ZMODEM 会按接收端的 ZRPOS 回到某个偏移重发。
+pub trait Source: Read + Seek + Send {}
+
 pub struct UploadFile {
     pub name: String,
     pub size: u64,
-    pub reader: Box<dyn Read + Send>,
+    /// 秒（Unix 时间），ZMODEM 和 YMODEM 会发给接收端。
+    pub modified: Option<u64>,
+    pub reader: Box<dyn Source>,
 }
 
 pub enum UploadState {
@@ -67,7 +72,7 @@ pub enum UploadState {
 }
 
 pub trait Upload: Send {
-    /// 设备发回的字节。
+    /// 设备发回的字节。调用前先 tick(Instant::now())：由收到的字节启动的计时用的是最近一次 tick 的时间。
     fn receive(&mut self, data: &[u8]);
     /// 追加待发送的字节。调用方只在自己的发送缓冲排空后才调用，形成背压。
     fn transmit(&mut self, out: &mut Vec<u8>);
@@ -76,17 +81,17 @@ pub trait Upload: Send {
     /// 发出取消序列：三种协议都发 10 个 CAN 加 10 个退格（和 lrzsz 的 canit() 相同；U-Boot 要 3 个 CAN 才取消）。
     fn cancel(&mut self);
     fn state(&self) -> UploadState;
-    /// 结束后多收到的字节（比如 ZMODEM 的 "OO"、shell 提示符），交还给终端显示。
+    /// 结束后多收到的字节（`rz` 最后一帧尾部的 CR LF、shell 提示符；没装 `rz` 时还包括握手前 shell 的输出，最多 4 KiB），交还给终端显示。
     fn leftover(&mut self) -> Vec<u8>;
 }
 
 pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dyn Upload>;
 ```
 
-- 引擎不碰端口和系统时钟。文件在引擎内部按块同步读取（128 B 到 8 KB）。
+- 引擎不碰端口和系统时钟。文件在引擎内部按块同步读取，每次最多 1 KiB；每次 `transmit` 最多交出 8 KiB。读的是本地文件，在 tokio 任务里同步读也可以接受。完整接口以 `crates/omnyssh-core/src/transfer/mod.rs` 为准。
 
 ### 串口接入：`serial.rs` 的 `run()`
-- `Ctrl` 新增 `Upload(Box<dyn Upload>)` 和 `CancelUpload`。`SerialOutput` 新增 `Upload(UploadState)`。
+- `Ctrl` 新增 `Upload { preamble: Vec<u8>, upload: Box<dyn Upload> }` 和 `CancelUpload`。收到 `Upload` 时，先把 `preamble`（ZMODEM 时是 `rz -b\r`，X/YMODEM 时为空）放进 `pending`，同时进入传输模式，这样此后读到的每个字节都交给引擎。`SerialOutput` 新增 `Upload(UploadState)`。
 - 有传输进行时，每轮循环：
   1. 读到的字节交给 `upload.receive`，**不调用** `on_output(Data)`；
   2. `pending` 为空时才调用 `upload.transmit(&mut pending)`；
@@ -94,11 +99,11 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
   4. 状态和上一次不同时，调用 `on_output(SerialOutput::Upload(state))`。
 - 进入 `Done`、`Failed` 或 `Cancelled` 后，把 `leftover()` 作为普通的 `Data` 交还，然后回到正常模式。
 - 现有的"有界写、不 flush"策略不变。
-- 传输期间收到的 `Ctrl::Write` 照常进入 `pending`。GUI 已经禁用了输入，这条路径只用于 ZMODEM 启动前写入 `rz -b\r`。
+- 传输期间收到的 `Ctrl::Write` 照常进入 `pending`。GUI 已经禁用了输入，正常情况下不会有。
 
 ### SSH 接入：`ssh/pty.rs` 的 pump 循环
-- `Ctrl` 新增 `Upload(Box<dyn Upload>)` 和 `CancelUpload`。`CoreEvent` 新增 `UploadState(SessionId, UploadState)`。
-- `select!` 里加一个 100 ms 的 `interval` 分支，只在传输中启用，用来调用 `tick`。
+- `Ctrl` 新增 `Upload { preamble, upload }`（同串口）和 `CancelUpload`。收到 `Upload` 时，在同一个 `select!` 分支里先 `channel.data(preamble)`，再进入传输模式。`tokio::select!` 在多个分支同时就绪时随机选，所以如果把写入 `rz -b\r` 和 `Ctrl::Upload` 拆成两条消息，中间可能先处理一次 `channel.wait()`，把 ZRINIT 当成普通输出。`CoreEvent` 新增 `UploadState(SessionId, UploadState)`。
+- `select!` 里加一个 100 ms 的 `interval` 分支（创建一次，`MissedTickBehavior::Skip`，用 `if upload.is_some()` 守卫），只在传输中启用，用来调用 `tick`。每次 `receive` 之前也先 `tick(Instant::now())`。
 - 传输中，`ChannelMsg::Data` 和 `ExtendedData` 交给 `upload.receive`，不喂给 vt100 parser，也不发往 `raw_output`。
 - 每次 `receive` 和 `tick` 之后，把 `transmit` 的输出交给 `channel.data(..).await`，russh 的窗口提供背压。
 - 结束时，`leftover()` 按普通输出处理：喂给 parser，发往 `raw_output`。
@@ -113,7 +118,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 - 命令负责：
   - 检查路径（文件夹、XMODEM 多文件、会话已有传输进行中都直接返回错误）；
   - 打开文件，取文件名和大小；
-  - ZMODEM 时先写入 `rz -b\r`，再发 `Ctrl::Upload`。
+  - 发 `Ctrl::Upload { preamble, upload }`：ZMODEM 时 `preamble` 是 `rz -b\r`，X/YMODEM 时为空。
 - SFTP 协议走 `terminal_upload`，分支到现有的 `SftpManager`：
   - 第一次拖放时，在后台为这个主机开一个 SFTP 会话并缓存，SSH 标签关闭时一起关掉；
   - 每个文件依次调用现有的上传路径。
@@ -154,7 +159,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
     - 帧编解码和 ZDLE 转义；
     - 用最小接收端模拟器覆盖握手、多文件、`ZSKIP`、取消、`ZRINIT` 超时。
 - **互通测试**（`omnyssh-core/tests/transfer_lrzsz.rs`，用 `#[ignore]` 标记，本机有 lrzsz 时运行）：
-  - 通过 pty 对接真实的 `rz`、`rb`（YMODEM）、`rx`（XMODEM），各上传一个随机 1 MB 文件，比对 SHA-256；
+  - 通过管道（stdin/stdout）对接真实的 `rz`、`rb`（YMODEM）、`rx`（XMODEM），上传约 1 MB 的随机文件，逐字节比对；带 60 s 看门狗，卡住时会失败而不是挂住；
   - ZMODEM 的这一项在 spike 中已手动验证通过，这里把它固化为测试。
 - **会话接入测试**：
   - 串口：沿用假端口，验证传输期间数据不进 `on_output(Data)`、leftover 能回到终端，以及取消和拔出路径；
@@ -164,12 +169,16 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
   - Playwright e2e：用 stub 的 `__TAURI_INTERNALS__` 模拟拖放事件和 `upload-progress`、`upload-finished`，验证遮罩、进度条、输入禁用和取消。
 
 ## 接入时的注意事项（引擎实现与审查中发现，供接入与界面计划使用）
-- 写入 `rz -b\r` 之后、读取下一批输出之前，必须先把 `Ctrl::Upload` 交给会话；否则 `rz` 的第一个 ZRINIT 会被当成普通输出显示到终端里。两者走同一个控制通道、按顺序处理即可满足。
-- GUI 在写入 `rz -b\r` **之前**就要检查文件：大于 4 GiB、文件名超过 256 字节、文件夹、XMODEM 多文件，都直接拒绝，不要先启动 `rz` 再失败。
+- 写入 `rz -b\r` 和进入传输模式必须是一步：用 `Ctrl::Upload { preamble, upload }` 一条消息完成（见上面串口和 SSH 接入）。否则 `rz` 的第一个 ZRINIT 可能被当成普通输出显示到终端里。
+- GUI 在发 `Ctrl::Upload` **之前**就要检查文件：文件夹（在调用 `UploadFile::open` 之前检查；Windows 上打开文件夹报的是"拒绝访问"）、空列表、XMODEM 多文件、大于 4 GiB（ZMODEM）、文件名超过 256 字节（ZMODEM），都直接拒绝。否则 `start()` 会返回一个已经失败的上传，并向 shell 发取消序列；空列表或 XMODEM 多文件会让 `start()` panic。
 - 多文件 YMODEM 发给 U-Boot `loady`：U-Boot 只收第一个文件。界面上拖入多个文件且协议是 YMODEM 时，给出提示。
 - ZMODEM 的"跳过"不一定是"文件已存在"，`rz` 无法创建文件时也会跳过。界面文字写"已跳过"，不要写"已存在"。
 - 进度可能倒退（ZRPOS 回退重发）；跳过或空文件之后，状态会继续显示上一个文件的 100%，直到下一个文件开始读数据。
-- 引擎在 60 s 内没有进度就判定卡住，最低支持 2400 波特率。
+- ZMODEM 在 60 s 内没有进度就判定卡住，最低支持 2400 波特率；X/YMODEM 是同一块 11 次、每次 10 s 没有应答才放弃（约 110 s）。
+- 取消或对端取消之后，leftover 开头可能有 CAN 和退格字节；在终端里打印结果行之前先输出 `\r\n`。
+- 退出传输模式：一直把收到的字节交给 `receive`，直到 `state().is_final()` 并且 `transmit` 不再交出字节（ZMODEM 在 `Done` 之后还有 `OO` 要发），然后取 `leftover()`。取消时最多等 2 s 排空，这一步由会话负责。
+- 传输中连接断开（串口拔出、SSH 断开），引擎没有对应的接口，由会话自己生成失败结果，消息用英文（如 `the connection was lost`），和引擎的消息风格一致。
+- 主机配置的协议枚举是 `{Zmodem, Sftp}`，和 `transfer::Protocol`（串口用）分开定义；两者的默认值都不序列化。`UploadState` 没有实现 `Serialize`，要映射成 `upload-progress` / `upload-finished` 的 DTO。
 
 ## 不在本次范围内
 - 下载：`sz`，以及设备主动发起 ZMODEM 时的自动检测。

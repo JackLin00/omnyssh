@@ -62,6 +62,10 @@ cargo 命令都在仓库根目录执行。这台机器磁盘很紧张（`target/
    - `too many retries at block N` / `at end of file` / `at the file header`
    - `could not read NAME: ERROR` / `the file got shorter while it was being sent`
    - `NAME is larger than ZMODEM's 4 GiB limit`
+   - （执行中新增）`the transfer stalled (no progress for 60 s)`
+   - （执行中新增）`NAME has a name longer than ZMODEM's 256 bytes`、`NAME has a name too long for YMODEM`
+   - （执行中新增）`too many retries at the end of the batch`
+   - `ZMODEM: ERROR`（`zmodem2` 内部错误，正常情况下不会出现）
 9. **`transmit` 每次最多 8 KiB**（`TRANSMIT_CHUNK`）。调用方只在自己的缓冲排空后才再要，这样串口线程的 `pending` 有上限，SSH 的 `channel.data` 也不会一次压太多。
 10. **接口与 spec 的出入**：`UploadFile.reader` 是 `Box<dyn Source>`（`Read + Seek + Send`），不是 `Read + Send`，因为 ZMODEM 会按接收端的 ZRPOS 回到某个偏移重发。另外加了 `modified` 字段，以及 `UploadFile::open`、`Protocol::batch`、`UploadState::is_final` 三个小工具。
 
