@@ -10,8 +10,13 @@ use zmodem2::{Action, Error, Event, FileInfo, Position, Sender};
 
 use super::{Upload, UploadFile, UploadState, TRANSMIT_CHUNK};
 
-/// How long `rz` gets to answer with ZRINIT after it was started.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `rz` gets to answer with ZRINIT after it was started. `rz`
+/// announces itself with ZRINIT once at start and then, since we no longer
+/// prompt it (see `ZRQINIT_PREFIX`), only every ~10 s (lrzsz's own
+/// `Rxtimeout`); a single lost ZRINIT (e.g. a dropped serial byte) must not
+/// race the next one against this deadline, so it covers two of rz's
+/// retries, not one.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(25);
 /// Frame type 0 (ZRQINIT), in `zmodem2`'s hex header encoding. No ZRQINIT is
 /// ever sent (see `pump`): lrzsz's `rz` announces itself with ZRINIT
 /// unprompted on start, and keeps repeating it, so asking is unnecessary;
@@ -20,12 +25,18 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// between that echo and `zmodem2`'s "answer any header while waiting"
 /// fallback, which itself replies with another ZRQINIT.
 const ZRQINIT_PREFIX: &[u8] = b"**\x18B00";
+/// Frame type 6 (ZNAK), in the same hex encoding: queued when a corrupt
+/// header is seen. Before rz has answered, whatever we are reading is the
+/// shell, not rz, so a NAK is equally pointless there; suppressed alongside
+/// ZRQINIT for the same reason (see `pump`).
+const ZNAK_PREFIX: &[u8] = b"**\x18B06";
 /// Once rz has answered, the upload fails when nothing was handed to the
 /// caller to send and no file data was read or completed for this long.
 /// `zmodem2`'s `Sender` never resends on its own, and it ignores a repeated
 /// ZRINIT/ZRPOS/ZFERR once past the handshake, so rz's own header retries
 /// (every ~10 s) are not evidence of progress and must not reset this. At
-/// 2400 baud an 8 KiB chunk drains in ~34 s, inside the limit.
+/// 2400 baud an 8 KiB chunk drains in ~34 s, inside the limit; links below
+/// 2400 baud are not supported (the same chunk takes ~68 s at 1200 baud).
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// A regular file readable by all, writable by its owner: without a mode `rz`
 /// creates the file `0600`.
@@ -53,10 +64,12 @@ pub(crate) struct ZmodemUpload {
     skipped: usize,
     /// The receiver has answered (ZRINIT seen, as far as we can tell).
     answered: bool,
-    /// `submit_wire` consumed input since the last `WriteWire`: while
-    /// `!answered`, the next `WriteWire` that is not a (suppressed) ZRQINIT
-    /// is therefore the ZFILE queued in response to ZRINIT, the only other
-    /// bytes the sender produces from input before it has answered.
+    /// `submit_wire` consumed input since the last `WriteWire`, without a
+    /// corrupt header in between (see `pump`'s `submit_wire` error arm):
+    /// while `!answered`, the next `WriteWire` that is not a (suppressed)
+    /// ZRQINIT or ZNAK is therefore the ZFILE queued in response to ZRINIT,
+    /// the only other bytes the sender produces from input before it has
+    /// answered.
     after_input: bool,
     started: Instant,
     /// Set at each progress event; `tick` bumps `last_progress` to its own
@@ -123,14 +136,17 @@ impl ZmodemUpload {
             match self.sender.poll() {
                 Action::WriteWire(bytes) => {
                     let n = bytes.len();
-                    // No ZRQINIT ever reaches the wire (see `ZRQINIT_PREFIX`);
-                    // this also drops the one `Sender::new()` queues itself.
-                    let is_zrqinit = !self.answered && bytes.starts_with(ZRQINIT_PREFIX);
-                    if !is_zrqinit {
+                    // Neither ZRQINIT nor ZNAK ever reaches the wire before
+                    // rz has answered (see `ZRQINIT_PREFIX`/`ZNAK_PREFIX`);
+                    // this also drops the one ZRQINIT `Sender::new()` queues
+                    // itself.
+                    let is_noise = !self.answered
+                        && (bytes.starts_with(ZRQINIT_PREFIX) || bytes.starts_with(ZNAK_PREFIX));
+                    if !is_noise {
                         self.out.extend_from_slice(bytes);
                     }
                     self.sender.wire_written(n);
-                    if !self.answered && self.after_input && !is_zrqinit {
+                    if !self.answered && self.after_input && !is_noise {
                         self.answered = true;
                         self.progressed = true;
                     }
@@ -175,8 +191,14 @@ impl ZmodemUpload {
                         self.after_input = true;
                     }
                     // A corrupt header: the sender has queued a ZNAK and
-                    // the receiver sends it again.
-                    Err(_) => self.inbuf.clear(),
+                    // the receiver sends it again. Not a `WriteWire` in
+                    // response to this input, so this must not leave a
+                    // stale `after_input` for that ZNAK (or a later one) to
+                    // wrongly count as the answer.
+                    Err(_) => {
+                        self.inbuf.clear();
+                        self.after_input = false;
+                    }
                 },
             }
         }
@@ -306,9 +328,10 @@ impl Upload for ZmodemUpload {
                 ));
             }
         } else if now.duration_since(self.last_progress) >= STALL_TIMEOUT {
-            self.fail(UploadState::Failed(
-                "the transfer stalled (no progress for 60 s)".into(),
-            ));
+            self.fail(UploadState::Failed(format!(
+                "the transfer stalled (no progress for {} s)",
+                STALL_TIMEOUT.as_secs()
+            )));
         }
         self.pump();
     }
@@ -574,7 +597,8 @@ mod tests {
         up.receive(b"rz: command not found\r\n$ ");
         let mut sent = Vec::new();
         let mut elapsed = Duration::ZERO;
-        while elapsed < Duration::from_secs(12) && !up.state().is_final() {
+        let bound = HANDSHAKE_TIMEOUT + Duration::from_secs(2);
+        while elapsed < bound && !up.state().is_final() {
             let out = drain(&mut up);
             sent.extend_from_slice(&out);
             // A cooked-mode shell echoes back whatever we just sent it.
@@ -589,6 +613,48 @@ mod tests {
             "no ZRQINIT ever went out"
         );
         assert_eq!(elapsed, HANDSHAKE_TIMEOUT, "failed right at the timeout");
+        match up.state() {
+            UploadState::Failed(m) => assert!(m.contains("lrzsz"), "{m}"),
+            s => panic!("{s:?}"),
+        }
+    }
+
+    #[test]
+    fn a_zrinit_after_ten_seconds_is_still_in_time() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", bytes(50_000, 18))], t);
+        // rz's first announcement is lost (e.g. a dropped serial byte); its
+        // own retry comes roughly 10 s later, which must not have raced a
+        // 10 s deadline (see `HANDSHAKE_TIMEOUT`).
+        up.tick(t + Duration::from_millis(10_500));
+        assert!(!up.state().is_final(), "{:?}", up.state());
+        let mut rx = Receiver::new().unwrap();
+        let zrinit = match rx.poll() {
+            Action::WriteWire(b) => b.to_vec(),
+            a => panic!("{a:?}"),
+        };
+        up.receive(&zrinit);
+        assert!(!drain(&mut up).is_empty(), "ZFILE should go out");
+        up.tick(t + Duration::from_secs(24));
+        assert!(!up.state().is_final(), "{:?}", up.state());
+    }
+
+    #[test]
+    fn a_corrupt_header_before_the_handshake_is_not_an_answer() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", vec![1])], t);
+        // Scanned byte by byte looking for a header and none found, but
+        // still consumed: sets `after_input` without ever reaching a
+        // `WriteWire`.
+        up.receive(b"garbage");
+        // A bad-CRC ZRINIT: queues a ZNAK, which is not an answer either.
+        up.receive(b"**\x18B01ffffffffffff\r\n");
+        assert!(
+            drain(&mut up).is_empty(),
+            "no ZNAK into the shell before rz answered"
+        );
+        assert!(!up.state().is_final());
+        up.tick(t + HANDSHAKE_TIMEOUT);
         match up.state() {
             UploadState::Failed(m) => assert!(m.contains("lrzsz"), "{m}"),
             s => panic!("{s:?}"),
@@ -771,7 +837,30 @@ mod tests {
         // handshake and ZFILE; the exact spot does not matter, flipping any
         // one byte breaks that subpacket's CRC and forces a ZRPOS rewind.
         peer.corrupt_at = Some(2000);
-        peer.run(&mut up);
+        // Confirm the rewind actually happened, rather than the corrupted
+        // byte having had no effect. The receiver's default window is one
+        // subpacket (no CANOVIO), so a rewind here always asks the sender to
+        // resend the very offset that just failed rather than one further
+        // back: `sent` is otherwise strictly increasing round over round, so
+        // a repeat (not a strict decrease) is the observable sign of it.
+        let mut last_sent: Option<u64> = None;
+        let mut resent = false;
+        let mut finished = false;
+        for _ in 0..100_000 {
+            let moved = peer.round(&mut up);
+            if let UploadState::Sending { sent, .. } = up.state() {
+                if last_sent.is_some_and(|prev| sent <= prev) {
+                    resent = true;
+                }
+                last_sent = Some(sent);
+            }
+            if !moved {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "the upload did not finish");
+        assert!(resent, "the sender never resent after the corruption");
         assert!(peer.done);
         assert_eq!(peer.files[0].data, data);
         assert_eq!(
