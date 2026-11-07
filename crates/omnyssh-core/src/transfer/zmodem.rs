@@ -48,6 +48,14 @@ const MAX_NAME: usize = 256;
 /// never occur otherwise (lrzsz's own threshold).
 const CAN: u8 = 0x18;
 const CANCEL_RUN: u32 = 5;
+/// How much of what arrives before rz has answered we keep, to hand back as
+/// `leftover` if the transfer ends before an answer ever came (a missing
+/// `rz`, or `cancel()`): otherwise it is all fed to `submit_wire` and lost,
+/// and the terminal looks frozen instead of showing e.g. `bash: rz: command
+/// not found`. Capped so a chatty shell before rz starts can't grow this
+/// without bound; the first 4 KiB is what matters, since that is where the
+/// shell's own error (if any) appears.
+const PRE_ANSWER_KEEP: usize = 4 * 1024;
 
 pub(crate) struct ZmodemUpload {
     sender: Sender,
@@ -71,6 +79,11 @@ pub(crate) struct ZmodemUpload {
     /// the only other bytes the sender produces from input before it has
     /// answered.
     after_input: bool,
+    /// Copy of what was received while `!answered`, capped at
+    /// `PRE_ANSWER_KEEP`; moved into `leftover` if the transfer ends before
+    /// the answer comes (see `fail`), dropped once it does (see
+    /// `mark_answered`).
+    pre_answer: Vec<u8>,
     started: Instant,
     /// Set at each progress event; `tick` bumps `last_progress` to its own
     /// `now` and clears this the next time it runs, rather than stamping
@@ -105,6 +118,7 @@ impl ZmodemUpload {
             skipped: 0,
             answered: false,
             after_input: false,
+            pre_answer: Vec::new(),
             started: now,
             progressed: false,
             last_progress: now,
@@ -147,14 +161,14 @@ impl ZmodemUpload {
                     }
                     self.sender.wire_written(n);
                     if !self.answered && self.after_input && !is_noise {
-                        self.answered = true;
+                        self.mark_answered();
                         self.progressed = true;
                     }
                     self.after_input = false;
                 }
                 Action::ReadFile { offset, max_len } => self.read_file(offset, max_len),
                 Action::Event(Event::FileCompleted) => {
-                    self.answered = true;
+                    self.mark_answered();
                     self.progressed = true;
                     if !self.read_any && self.files[self.index].size > 0 {
                         self.skipped += 1;
@@ -230,7 +244,7 @@ impl ZmodemUpload {
     }
 
     fn read_file(&mut self, offset: Position, max_len: usize) {
-        self.answered = true;
+        self.mark_answered();
         self.progressed = true;
         self.read_any = true;
         let file_count = self.files.len();
@@ -269,6 +283,13 @@ impl ZmodemUpload {
     /// reported once it is out.
     fn fail(&mut self, state: UploadState) {
         self.out.clear();
+        // The upload is ending before rz ever answered: give back what it
+        // sent instead (e.g. `bash: rz: command not found`), which would
+        // otherwise be lost to `submit_wire`. Must happen before any bytes
+        // received after this point are added to `leftover`.
+        if !self.answered {
+            self.leftover.append(&mut self.pre_answer);
+        }
         self.abort_state = Some(state);
         self.need_start = false;
         self.need_finish = false;
@@ -278,6 +299,14 @@ impl ZmodemUpload {
     fn finishing(&self) -> bool {
         self.state.is_final() || self.abort_state.is_some()
     }
+
+    /// The receiver has answered: `pre_answer` is no longer needed, since a
+    /// later failure's leftover bytes are tracked through `inbuf`/`leftover`
+    /// instead (see `fail`).
+    fn mark_answered(&mut self) {
+        self.answered = true;
+        self.pre_answer.clear();
+    }
 }
 
 impl Upload for ZmodemUpload {
@@ -286,15 +315,22 @@ impl Upload for ZmodemUpload {
             self.leftover.extend_from_slice(data);
             return;
         }
+        if !self.answered {
+            let room = PRE_ANSWER_KEEP.saturating_sub(self.pre_answer.len());
+            let take = room.min(data.len());
+            self.pre_answer.extend_from_slice(&data[..take]);
+        }
         for (i, &b) in data.iter().enumerate() {
             self.cans = if b == CAN { self.cans + 1 } else { 0 };
             if self.cans >= CANCEL_RUN && !self.finishing() {
                 // `zmodem2` only knows the ZABORT/ZCAN headers.
                 self.inbuf.clear();
-                self.leftover.extend_from_slice(&data[i + 1..]);
+                // `fail` moves `pre_answer` into `leftover` first, so it
+                // stays ahead of what follows the cancel run.
                 self.fail(UploadState::Failed(
                     "the device cancelled the transfer".into(),
                 ));
+                self.leftover.extend_from_slice(&data[i + 1..]);
                 self.pump();
                 return;
             }
@@ -888,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_over_4_gib_fails_before_anything_is_sent() {
+    fn a_file_over_4_gib_fails_with_only_the_cancel_sequence() {
         let mut f = file("huge.img", vec![]);
         f.size = u64::from(u32::MAX) + 1;
         let mut up = ZmodemUpload::new(vec![f], Instant::now());
@@ -897,5 +933,61 @@ mod tests {
             up.state(),
             UploadState::Failed("huge.img is larger than ZMODEM's 4 GiB limit".into())
         );
+    }
+
+    #[test]
+    fn a_missing_rz_gives_the_shell_output_back() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", vec![1])], t);
+        let banner: &[u8] = b"rz -b\r\nbash: rz: command not found\r\n$ ";
+        up.receive(banner);
+        up.tick(t + HANDSHAKE_TIMEOUT);
+        match up.state() {
+            UploadState::Failed(m) => assert!(m.contains("lrzsz"), "{m}"),
+            s => panic!("{s:?}"),
+        }
+        assert_eq!(up.leftover(), banner);
+    }
+
+    #[test]
+    fn cancelling_before_rz_answers_gives_the_output_back() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", vec![1])], t);
+        let banner: &[u8] = b"rz -b\r\nbash: rz: command not found\r\n$ ";
+        up.receive(banner);
+        up.cancel();
+        assert_eq!(up.state(), UploadState::Cancelled);
+        assert_eq!(up.leftover(), banner);
+    }
+
+    #[test]
+    fn output_before_the_answer_is_not_replayed_after_a_transfer() {
+        let mut up = ZmodemUpload::new(vec![file("a", vec![1, 2, 3])], Instant::now());
+        // The shell's echo of `rz -b` and rz's banner come first.
+        up.receive(b"rz -b\r\nrz waiting to receive.");
+        Peer::new(&[]).run(&mut up);
+        assert_eq!(
+            up.state(),
+            UploadState::Done {
+                sent_files: 1,
+                skipped: 0
+            }
+        );
+        let leftover = up.leftover();
+        assert!(
+            !leftover.windows(5).any(|w| w == b"rz -b"),
+            "the pre-answer banner leaked into leftover: {:?}",
+            String::from_utf8_lossy(&leftover)
+        );
+    }
+
+    #[test]
+    fn pre_answer_output_is_capped_at_4_kib() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", vec![1])], t);
+        up.receive(&vec![b'x'; 5000]);
+        up.tick(t + HANDSHAKE_TIMEOUT);
+        assert!(up.state().is_final());
+        assert_eq!(up.leftover().len(), 4096);
     }
 }
