@@ -27,10 +27,12 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Sends of one block after the first, before the transfer gives up.
 const MAX_RETRIES: u32 = 10;
-/// How long the line must stay quiet, after a NAK or a CRC `C` asks us to
-/// resend, before we actually do: a burst of several then causes one resend,
-/// not one per byte, and an ACK that was already on its way for an earlier
-/// duplicate can't be mistaken for the next block's.
+/// How long the line must stay quiet, after a NAK asks us to resend, before
+/// we actually do: a burst of several then causes one resend, not one per
+/// byte, and an ACK that was already on its way for an earlier duplicate
+/// can't be mistaken for the next block's. A CRC `C` while we are waiting
+/// does not start this (see the match arm below): only a NAK is the
+/// receiver's own answer.
 const SETTLE: Duration = Duration::from_millis(200);
 
 /// What we send to cancel: 10 CANs, enough to get past the receiver's typical
@@ -100,7 +102,7 @@ pub(crate) struct XmodemUpload {
 
 impl XmodemUpload {
     pub(crate) fn new(variant: Variant, files: Vec<UploadFile>, now: Instant) -> Self {
-        Self {
+        let mut up = Self {
             variant,
             files,
             index: 0,
@@ -119,7 +121,21 @@ impl XmodemUpload {
             saw_can: false,
             state: UploadState::Waiting,
             leftover: Vec::new(),
+        };
+        if variant == Variant::Ymodem {
+            // Caught now, not when `block0_info` would otherwise be
+            // silently truncated to fit the 1024-byte block (see `block`'s
+            // `resize`).
+            let too_long = up
+                .files
+                .iter()
+                .find(|f| block0_info(f).len() > 1024)
+                .map(|f| f.name.clone());
+            if let Some(name) = too_long {
+                up.fail(format!("{name} has a name too long for YMODEM"));
+            }
         }
+        up
     }
 
     fn on_byte(&mut self, b: u8) {
@@ -203,14 +219,7 @@ impl XmodemUpload {
 
     /// YMODEM block 0: `name NUL size [mtime]` (size decimal, mtime octal).
     fn send_header(&mut self) {
-        let file = &self.files[self.index];
-        let mut info = file.name.as_bytes().to_vec();
-        info.push(0);
-        info.extend_from_slice(file.size.to_string().as_bytes());
-        if let Some(t) = file.modified {
-            info.extend_from_slice(format!(" {t:o}").as_bytes());
-        }
-        info.push(0);
+        let info = block0_info(&self.files[self.index]);
         let len = if info.len() > 128 { 1024 } else { 128 };
         let packet = self.block(0, &info, len, 0);
         self.start_file();
@@ -387,6 +396,19 @@ impl Upload for XmodemUpload {
     fn leftover(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.leftover)
     }
+}
+
+/// YMODEM block 0's info: `name NUL size [SP mtime(octal)] NUL`. Must fit in
+/// the 1024-byte block (see the caller in `new` that checks this).
+fn block0_info(file: &UploadFile) -> Vec<u8> {
+    let mut info = file.name.as_bytes().to_vec();
+    info.push(0);
+    info.extend_from_slice(file.size.to_string().as_bytes());
+    if let Some(t) = file.modified {
+        info.extend_from_slice(format!(" {t:o}").as_bytes());
+    }
+    info.push(0);
+    info
 }
 
 /// Reads exactly `buf.len()` bytes; a file that ends early is an error.
@@ -745,7 +767,18 @@ mod tests {
     }
 
     #[test]
-    fn cancel_sends_can_can_and_later_bytes_are_leftover() {
+    fn a_name_too_long_for_block_0_fails_clearly() {
+        let name = "n".repeat(1100);
+        let mut up = XmodemUpload::new(Variant::Ymodem, vec![file(&name, vec![1])], t0());
+        assert_eq!(drain(&mut up), CANCEL_SEQUENCE.to_vec());
+        assert_eq!(
+            up.state(),
+            UploadState::Failed(format!("{name} has a name too long for YMODEM"))
+        );
+    }
+
+    #[test]
+    fn cancel_sends_the_cancel_sequence_and_later_bytes_are_leftover() {
         let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(4096, 9))], t0());
         up.receive(b"C");
         drain(&mut up);

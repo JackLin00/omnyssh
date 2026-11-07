@@ -59,7 +59,10 @@ serialport = { version = "4.10", default-features = false }
 # ZMODEM for drag-and-drop uploads to `rz`: a sans-IO sender, so it runs
 # inside the serial thread and the SSH pump alike. Its dependencies (bitflags,
 # hex, thiserror 1) are already built.
-zmodem2 = "0.7.3"
+# Pinned: the wrapper relies on details of this exact version (one header per
+# WriteWire, hex ZRQINIT/ZNAK, ZSKIP reported as FileCompleted), so an upgrade
+# must be re-checked against the lrzsz interop test.
+zmodem2 = "=0.7.3"
 
 # Terminal emulator — vt100 screen model (PTY is provided by russh channels)
 vt100 = { package = "vt100-omnyssh", version = "0.15" }

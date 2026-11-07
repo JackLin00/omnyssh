@@ -86,6 +86,10 @@ pub enum UploadState {
         file_index: usize,
         file_count: usize,
         file_name: String,
+        /// XMODEM/YMODEM: bytes the receiver has acknowledged. ZMODEM: bytes
+        /// handed to the protocol, which runs ahead of the receiver by up to
+        /// its window, so this value can repeat or go back when the
+        /// receiver asks for a resend.
         sent: u64,
         total: u64,
     },
@@ -110,7 +114,9 @@ impl UploadState {
 
 /// One upload in progress. Contract for the caller:
 /// - pass every byte the device sends to `receive`;
-/// - call `tick` regularly (every 100 ms or so) and after `receive`;
+/// - call `tick(Instant::now())` regularly (every 100 ms or so) and right
+///   before each `receive`, because timers started by received bytes use the
+///   time of the last tick;
 /// - call `transmit` whenever its own send buffer is empty, and send what it
 ///   adds;
 /// - once `state()` is final and `transmit` adds nothing, hand `leftover()` to
