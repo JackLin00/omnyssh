@@ -14,12 +14,19 @@ use super::{Upload, UploadFile, UploadState, TRANSMIT_CHUNK};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often ZRQINIT goes out again while waiting for ZRINIT.
 const ZRQINIT_INTERVAL: Duration = Duration::from_secs(2);
-/// Silence from the receiver, once it has answered, before giving up. It
-/// acknowledges every few subpackets, so this only passes on a dead link.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Once rz has answered, the upload fails when nothing was handed to the
+/// caller to send and no file data was read or completed for this long.
+/// `zmodem2`'s `Sender` never resends on its own, and it ignores a repeated
+/// ZRINIT/ZRPOS/ZFERR once past the handshake, so rz's own header retries
+/// (every ~10 s) are not evidence of progress and must not reset this. At
+/// 2400 baud an 8 KiB chunk drains in ~34 s, inside the limit.
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// A regular file readable by all, writable by its owner: without a mode `rz`
 /// creates the file `0600`.
 const FILE_MODE: u32 = 0o100_644;
+/// zmodem2's file name buffer; a longer one makes `start_file` fail with an
+/// opaque "out of memory" instead of a clear message.
+const MAX_NAME: usize = 256;
 /// ZDLE doubles as CAN. `rz` cancels by sending a run of them; five in a row
 /// never occur otherwise (lrzsz's own threshold).
 const CAN: u8 = 0x18;
@@ -40,9 +47,21 @@ pub(crate) struct ZmodemUpload {
     skipped: usize,
     /// The receiver has answered (ZRINIT seen, as far as we can tell).
     answered: bool,
+    /// `submit_wire` consumed input since the last `WriteWire`: while
+    /// `!answered`, the next `WriteWire` is therefore the ZFILE queued in
+    /// response to ZRINIT, the only bytes the sender produces from input
+    /// before it has answered (its own ZRQINIT retries come from `timeout`,
+    /// not from input).
+    after_input: bool,
     started: Instant,
     last_zrqinit: Instant,
-    last_rx: Instant,
+    /// Set at each progress event; `tick` bumps `last_progress` to its own
+    /// `now` and clears this the next time it runs, rather than stamping
+    /// `now` at the event itself, which would be the *previous* tick's time:
+    /// a long gap between ticks (the host was asleep) must not read as a
+    /// stall the moment ticking resumes.
+    progressed: bool,
+    last_progress: Instant,
     now: Instant,
     inbuf: Vec<u8>,
     /// CANs at the end of what the receiver sent so far.
@@ -68,9 +87,11 @@ impl ZmodemUpload {
             sent: 0,
             skipped: 0,
             answered: false,
+            after_input: false,
             started: now,
             last_zrqinit: now,
-            last_rx: now,
+            progressed: false,
+            last_progress: now,
             now,
             inbuf: Vec::new(),
             cans: 0,
@@ -81,6 +102,9 @@ impl ZmodemUpload {
         };
         if let Some(f) = up.files.iter().find(|f| f.size > u64::from(u32::MAX)) {
             let msg = format!("{} is larger than ZMODEM's 4 GiB limit", f.name);
+            up.fail(UploadState::Failed(msg));
+        } else if let Some(f) = up.files.iter().find(|f| f.name.len() > MAX_NAME) {
+            let msg = format!("{} has a name longer than ZMODEM's 256 bytes", f.name);
             up.fail(UploadState::Failed(msg));
         }
         up.pump();
@@ -98,10 +122,16 @@ impl ZmodemUpload {
                     let n = bytes.len();
                     self.out.extend_from_slice(bytes);
                     self.sender.wire_written(n);
+                    if !self.answered && self.after_input {
+                        self.answered = true;
+                        self.progressed = true;
+                    }
+                    self.after_input = false;
                 }
                 Action::ReadFile { offset, max_len } => self.read_file(offset, max_len),
                 Action::Event(Event::FileCompleted) => {
                     self.answered = true;
+                    self.progressed = true;
                     if !self.read_any && self.files[self.index].size > 0 {
                         self.skipped += 1;
                     }
@@ -114,6 +144,7 @@ impl ZmodemUpload {
                     }
                 }
                 Action::Event(Event::SessionCompleted) => {
+                    self.progressed = true;
                     self.state = UploadState::Done {
                         sent_files: self.files.len() - self.skipped,
                         skipped: self.skipped,
@@ -133,6 +164,7 @@ impl ZmodemUpload {
                     Ok(0) => return,
                     Ok(n) => {
                         self.inbuf.drain(..n);
+                        self.after_input = true;
                     }
                     // A corrupt header: the sender has queued a ZNAK and
                     // the receiver sends it again.
@@ -169,6 +201,7 @@ impl ZmodemUpload {
 
     fn read_file(&mut self, offset: Position, max_len: usize) {
         self.answered = true;
+        self.progressed = true;
         self.read_any = true;
         let file_count = self.files.len();
         let file = &mut self.files[self.index];
@@ -223,7 +256,6 @@ impl Upload for ZmodemUpload {
             self.leftover.extend_from_slice(data);
             return;
         }
-        self.last_rx = self.now;
         for (i, &b) in data.iter().enumerate() {
             self.cans = if b == CAN { self.cans + 1 } else { 0 };
             if self.cans >= CANCEL_RUN && !self.finishing() {
@@ -244,11 +276,18 @@ impl Upload for ZmodemUpload {
     fn transmit(&mut self, out: &mut Vec<u8>) {
         self.pump();
         let n = self.out.len().min(TRANSMIT_CHUNK);
+        if n > 0 {
+            self.progressed = true;
+        }
         out.extend(self.out.drain(..n));
     }
 
     fn tick(&mut self, now: Instant) {
         self.now = now;
+        if self.progressed {
+            self.last_progress = now;
+            self.progressed = false;
+        }
         if self.finishing() {
             return;
         }
@@ -261,8 +300,10 @@ impl Upload for ZmodemUpload {
                 self.last_zrqinit = now;
                 let _ = self.sender.timeout();
             }
-        } else if now.duration_since(self.last_rx) >= IDLE_TIMEOUT {
-            self.fail(UploadState::Failed("the device stopped responding".into()));
+        } else if now.duration_since(self.last_progress) >= STALL_TIMEOUT {
+            self.fail(UploadState::Failed(
+                "the transfer stalled (no progress for 60 s)".into(),
+            ));
         }
         self.pump();
     }
@@ -297,6 +338,11 @@ mod tests {
         pending: Vec<u8>,
         files: Vec<Received>,
         done: bool,
+        /// Byte offset, over everything handed to the receiver so far, of a
+        /// single byte to corrupt once: simulates line noise flipping a data
+        /// subpacket. `fed` is where that running count is kept.
+        corrupt_at: Option<usize>,
+        fed: usize,
     }
 
     /// A file as the receiver got it: (name, size, modified, mode) and data.
@@ -325,12 +371,21 @@ mod tests {
                 pending: Vec::new(),
                 files: Vec::new(),
                 done: false,
+                corrupt_at: None,
+                fed: 0,
             }
         }
 
         /// One exchange each way; false when nothing moved.
         fn round(&mut self, up: &mut dyn Upload) -> bool {
-            let out = drain(up);
+            let mut out = drain(up);
+            if let Some(pos) = self.corrupt_at {
+                if pos >= self.fed && pos < self.fed + out.len() {
+                    out[pos - self.fed] ^= 0xff;
+                    self.corrupt_at = None;
+                }
+            }
+            self.fed += out.len();
             let mut moved = !out.is_empty();
             self.pending.extend(out);
             while !self.pending.is_empty() {
@@ -543,16 +598,167 @@ mod tests {
     }
 
     #[test]
-    fn silence_after_the_handshake_fails() {
+    fn no_progress_after_the_handshake_fails() {
         let t = Instant::now();
         let mut up = ZmodemUpload::new(vec![file("a", bytes(50_000, 8))], t);
         Peer::new(&[]).run_until_sending(&mut up);
-        up.tick(t + IDLE_TIMEOUT - Duration::from_millis(1));
+        // Settle whatever progress getting to `Sending` itself made, so
+        // `last_progress` starts exactly at `t`.
+        up.tick(t);
+        up.tick(t + STALL_TIMEOUT - Duration::from_millis(1));
         assert!(!up.state().is_final());
-        up.tick(t + IDLE_TIMEOUT);
+        up.tick(t + STALL_TIMEOUT);
         assert_eq!(
             up.state(),
-            UploadState::Failed("the device stopped responding".into())
+            UploadState::Failed("the transfer stalled (no progress for 60 s)".into())
+        );
+    }
+
+    #[test]
+    fn rz_retries_are_not_progress() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", bytes(50_000, 12))], t);
+        Peer::new(&[]).run_until_sending(&mut up);
+        up.tick(t);
+        // The handshake header `rz` keeps re-sending for minutes; `zmodem2`
+        // ignores it once past the handshake (see `STALL_TIMEOUT`), so this
+        // must not look like progress.
+        let mut rx = Receiver::new().unwrap();
+        let retry = match rx.poll() {
+            Action::WriteWire(b) => b.to_vec(),
+            a => panic!("{a:?}"),
+        };
+        for i in 1..=5u32 {
+            up.receive(&retry);
+            up.tick(t + Duration::from_secs(10) * i);
+            assert!(!up.state().is_final(), "{i}: {:?}", up.state());
+        }
+        up.receive(&retry);
+        up.tick(t + STALL_TIMEOUT);
+        assert_eq!(
+            up.state(),
+            UploadState::Failed("the transfer stalled (no progress for 60 s)".into())
+        );
+    }
+
+    #[test]
+    fn a_slow_link_that_keeps_draining_is_not_a_stall() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", bytes(500_000, 11))], t);
+        let mut peer = Peer::new(&[]);
+        peer.run_until_sending(&mut up);
+        up.tick(t);
+        // Each round trip takes 50 s, under the 60 s stall timeout, so the
+        // slow link never looks stalled even after minutes.
+        for i in 1..=4u32 {
+            assert!(peer.round(&mut up), "round {i}: nothing moved");
+            up.tick(t + Duration::from_secs(50) * i);
+            assert!(!up.state().is_final(), "round {i}: {:?}", up.state());
+        }
+    }
+
+    #[test]
+    fn a_late_tick_after_data_does_not_fail() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", bytes(50_000, 10))], t);
+        let mut peer = Peer::new(&[]);
+        peer.run_until_sending(&mut up);
+        up.tick(t);
+        assert!(!up.state().is_final());
+        // Real progress, soon after the first tick.
+        peer.round(&mut up);
+        // No tick comes in for 10 minutes (e.g. the host slept); the first
+        // tick back must stamp `last_progress` at its own `now`, not fail
+        // because the real progress was long ago.
+        up.tick(t + Duration::from_secs(600));
+        assert!(!up.state().is_final(), "{:?}", up.state());
+        up.tick(t + Duration::from_secs(600) + STALL_TIMEOUT);
+        assert_eq!(
+            up.state(),
+            UploadState::Failed("the transfer stalled (no progress for 60 s)".into())
+        );
+    }
+
+    #[test]
+    fn the_handshake_counts_once_zfile_goes_out() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", bytes(50_000, 9))], t);
+        let mut rx = Receiver::new().unwrap();
+        let zrinit = match rx.poll() {
+            Action::WriteWire(b) => b.to_vec(),
+            a => panic!("{a:?}"),
+        };
+        up.tick(t + Duration::from_millis(9_500));
+        up.receive(&zrinit);
+        assert!(!drain(&mut up).is_empty(), "ZFILE should go out");
+        // Before the fix this would fail with "did not answer rz": ZRINIT
+        // was seen, but neither ReadFile nor FileCompleted had happened yet.
+        up.tick(t + Duration::from_millis(10_500));
+        assert!(!up.state().is_final(), "{:?}", up.state());
+    }
+
+    #[test]
+    fn a_cancel_split_across_reads_is_seen() {
+        let mut up = ZmodemUpload::new(vec![file("a", bytes(50_000, 16))], Instant::now());
+        up.receive(&[CAN; 3]);
+        up.receive(&[CAN; 7]);
+        assert_eq!(
+            up.state(),
+            UploadState::Failed("the device cancelled the transfer".into())
+        );
+    }
+
+    #[test]
+    fn skipping_the_last_file_still_finishes() {
+        let files = vec![
+            file("keep.bin", bytes(2000, 13)),
+            file("skip.bin", bytes(2000, 14)),
+        ];
+        let mut up = ZmodemUpload::new(files, Instant::now());
+        let mut peer = Peer::new(&["skip.bin"]);
+        peer.run(&mut up);
+        assert!(peer.done);
+        assert_eq!(peer.files[0].data.len(), 2000);
+        assert!(peer.files[1].data.is_empty());
+        assert_eq!(
+            up.state(),
+            UploadState::Done {
+                sent_files: 1,
+                skipped: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_corrupted_subpacket_is_resent_from_the_receivers_offset() {
+        let data = bytes(200_000, 15);
+        let mut up = ZmodemUpload::new(vec![file("a.bin", data.clone())], Instant::now());
+        let mut peer = Peer::new(&[]);
+        // Somewhere in the middle of a data subpacket, well past the
+        // handshake and ZFILE; the exact spot does not matter, flipping any
+        // one byte breaks that subpacket's CRC and forces a ZRPOS rewind.
+        peer.corrupt_at = Some(2000);
+        peer.run(&mut up);
+        assert!(peer.done);
+        assert_eq!(peer.files[0].data, data);
+        assert_eq!(
+            up.state(),
+            UploadState::Done {
+                sent_files: 1,
+                skipped: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_name_over_256_bytes_fails_clearly() {
+        let name = "a".repeat(300);
+        let f = file(&name, vec![1, 2, 3]);
+        let mut up = ZmodemUpload::new(vec![f], Instant::now());
+        assert!(drain(&mut up).starts_with(&[CAN; 10]));
+        assert_eq!(
+            up.state(),
+            UploadState::Failed(format!("{name} has a name longer than ZMODEM's 256 bytes"))
         );
     }
 
