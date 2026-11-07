@@ -14,6 +14,8 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+mod xmodem;
+
 /// How much one [`Upload::transmit`] call adds at most. The caller only asks
 /// again once it has sent it all, so this bounds what sits in its buffer.
 pub(crate) const TRANSMIT_CHUNK: usize = 8 * 1024;
