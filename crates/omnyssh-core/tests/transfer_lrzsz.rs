@@ -7,8 +7,9 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use omnyssh_core::transfer::{start, Protocol, UploadFile, UploadState};
@@ -17,6 +18,16 @@ fn bin(name: &str) -> PathBuf {
     match std::env::var_os("LRZSZ_DIR") {
         Some(dir) => Path::new(&dir).join(name),
         None => PathBuf::from(name),
+    }
+}
+
+/// Kills and reaps the child on every exit path, including a panic.
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -40,16 +51,19 @@ fn upload(
     protocol: Protocol,
     paths: &[PathBuf],
 ) -> UploadState {
-    let mut child = Command::new(bin(receiver))
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|e| panic!("could not start {receiver} (is lrzsz installed?): {e}"));
-    let mut to_rx = child.stdin.take().unwrap();
-    let mut from_rx = child.stdout.take().unwrap();
+    let mut child = ChildGuard(
+        Command::new(bin(receiver))
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("could not start {receiver} (is lrzsz installed?): {e}")),
+    );
+    let pid = child.0.id();
+    let mut to_rx = child.0.stdin.take().unwrap();
+    let mut from_rx = child.0.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -60,16 +74,41 @@ fn upload(
         }
     });
 
+    // `write_all` and `child.wait()` below block, so a stalled receiver would
+    // hang forever instead of hitting the loop's own deadline assert. This
+    // watchdog enforces the deadline in wall-clock time regardless of what
+    // the main thread is blocked on, by killing the receiver (Unix only:
+    // these tests only run where lrzsz exists, i.e. Unix).
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    {
+        let timed_out = Arc::clone(&timed_out);
+        std::thread::spawn(move || {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            if matches!(
+                done_rx.recv_timeout(wait),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                timed_out.store(true, Ordering::SeqCst);
+                let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+            }
+        });
+    }
+
     let files = paths.iter().map(|p| UploadFile::open(p).unwrap()).collect();
     let mut up = start(protocol, files, Instant::now());
-    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         assert!(Instant::now() < deadline, "timed out in {:?}", up.state());
         let mut out = Vec::new();
         up.transmit(&mut out);
         if !out.is_empty() {
-            to_rx.write_all(&out).unwrap();
-            to_rx.flush().unwrap();
+            to_rx
+                .write_all(&out)
+                .expect("write to the receiver failed (killed by the 60 s watchdog?)");
+            to_rx
+                .flush()
+                .expect("flush to the receiver failed (killed by the 60 s watchdog?)");
             continue;
         }
         if up.state().is_final() {
@@ -81,7 +120,15 @@ fn upload(
         up.tick(Instant::now());
     }
     drop(to_rx);
-    let status = child.wait().unwrap();
+    let status = child
+        .0
+        .wait()
+        .expect("waiting on the receiver failed (killed by the 60 s watchdog?)");
+    drop(done_tx); // the upload finished; cancel the watchdog
+    assert!(
+        !timed_out.load(Ordering::SeqCst),
+        "{receiver} was killed by the 60 s watchdog"
+    );
     let state = up.state();
     if matches!(state, UploadState::Done { .. }) {
         assert!(status.success(), "{receiver} exited with {status}");
