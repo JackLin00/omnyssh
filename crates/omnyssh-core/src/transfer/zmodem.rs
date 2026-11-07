@@ -12,8 +12,14 @@ use super::{Upload, UploadFile, UploadState, TRANSMIT_CHUNK};
 
 /// How long `rz` gets to answer with ZRINIT after it was started.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// How often ZRQINIT goes out again while waiting for ZRINIT.
-const ZRQINIT_INTERVAL: Duration = Duration::from_secs(2);
+/// Frame type 0 (ZRQINIT), in `zmodem2`'s hex header encoding. No ZRQINIT is
+/// ever sent (see `pump`): lrzsz's `rz` announces itself with ZRINIT
+/// unprompted on start, and keeps repeating it, so asking is unnecessary;
+/// anything sent before `rz` is actually running instead reaches the shell,
+/// whose cooked-mode echo of our own ZRQINIT would otherwise bounce forever
+/// between that echo and `zmodem2`'s "answer any header while waiting"
+/// fallback, which itself replies with another ZRQINIT.
+const ZRQINIT_PREFIX: &[u8] = b"**\x18B00";
 /// Once rz has answered, the upload fails when nothing was handed to the
 /// caller to send and no file data was read or completed for this long.
 /// `zmodem2`'s `Sender` never resends on its own, and it ignores a repeated
@@ -48,13 +54,11 @@ pub(crate) struct ZmodemUpload {
     /// The receiver has answered (ZRINIT seen, as far as we can tell).
     answered: bool,
     /// `submit_wire` consumed input since the last `WriteWire`: while
-    /// `!answered`, the next `WriteWire` is therefore the ZFILE queued in
-    /// response to ZRINIT, the only bytes the sender produces from input
-    /// before it has answered (its own ZRQINIT retries come from `timeout`,
-    /// not from input).
+    /// `!answered`, the next `WriteWire` that is not a (suppressed) ZRQINIT
+    /// is therefore the ZFILE queued in response to ZRINIT, the only other
+    /// bytes the sender produces from input before it has answered.
     after_input: bool,
     started: Instant,
-    last_zrqinit: Instant,
     /// Set at each progress event; `tick` bumps `last_progress` to its own
     /// `now` and clears this the next time it runs, rather than stamping
     /// `now` at the event itself, which would be the *previous* tick's time:
@@ -89,7 +93,6 @@ impl ZmodemUpload {
             answered: false,
             after_input: false,
             started: now,
-            last_zrqinit: now,
             progressed: false,
             last_progress: now,
             now,
@@ -120,9 +123,14 @@ impl ZmodemUpload {
             match self.sender.poll() {
                 Action::WriteWire(bytes) => {
                     let n = bytes.len();
-                    self.out.extend_from_slice(bytes);
+                    // No ZRQINIT ever reaches the wire (see `ZRQINIT_PREFIX`);
+                    // this also drops the one `Sender::new()` queues itself.
+                    let is_zrqinit = !self.answered && bytes.starts_with(ZRQINIT_PREFIX);
+                    if !is_zrqinit {
+                        self.out.extend_from_slice(bytes);
+                    }
                     self.sender.wire_written(n);
-                    if !self.answered && self.after_input {
+                    if !self.answered && self.after_input && !is_zrqinit {
                         self.answered = true;
                         self.progressed = true;
                     }
@@ -296,9 +304,6 @@ impl Upload for ZmodemUpload {
                 self.fail(UploadState::Failed(
                     "the device did not answer rz (is lrzsz installed?)".into(),
                 ));
-            } else if now.duration_since(self.last_zrqinit) >= ZRQINIT_INTERVAL {
-                self.last_zrqinit = now;
-                let _ = self.sender.timeout();
             }
         } else if now.duration_since(self.last_progress) >= STALL_TIMEOUT {
             self.fail(UploadState::Failed(
@@ -550,12 +555,40 @@ mod tests {
     fn no_answer_from_rz_fails_and_cancels() {
         let t = Instant::now();
         let mut up = ZmodemUpload::new(vec![file("a", vec![1])], t);
-        let first = drain(&mut up);
-        assert!(first.starts_with(b"**\x18B00"), "ZRQINIT first");
-        up.tick(t + ZRQINIT_INTERVAL);
-        assert_eq!(drain(&mut up), first, "ZRQINIT again");
+        assert!(drain(&mut up).is_empty(), "no ZRQINIT until rz answers");
+        up.tick(t + Duration::from_secs(2));
+        assert!(drain(&mut up).is_empty(), "still nothing to send");
         up.tick(t + HANDSHAKE_TIMEOUT);
         assert!(drain(&mut up).starts_with(&[CAN; 10]));
+        match up.state() {
+            UploadState::Failed(m) => assert!(m.contains("lrzsz"), "{m}"),
+            s => panic!("{s:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shell_echoing_everything_back_does_not_loop() {
+        let t = Instant::now();
+        let mut up = ZmodemUpload::new(vec![file("a", bytes(1000, 17))], t);
+        // As if `rz` were missing and the shell just rejected the command.
+        up.receive(b"rz: command not found\r\n$ ");
+        let mut sent = Vec::new();
+        let mut elapsed = Duration::ZERO;
+        while elapsed < Duration::from_secs(12) && !up.state().is_final() {
+            let out = drain(&mut up);
+            sent.extend_from_slice(&out);
+            // A cooked-mode shell echoes back whatever we just sent it.
+            up.receive(&out);
+            elapsed += Duration::from_millis(100);
+            up.tick(t + elapsed);
+        }
+        assert!(
+            !sent
+                .windows(ZRQINIT_PREFIX.len())
+                .any(|w| w == ZRQINIT_PREFIX),
+            "no ZRQINIT ever went out"
+        );
+        assert_eq!(elapsed, HANDSHAKE_TIMEOUT, "failed right at the timeout");
         match up.state() {
             UploadState::Failed(m) => assert!(m.contains("lrzsz"), "{m}"),
             s => panic!("{s:?}"),
