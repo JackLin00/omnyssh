@@ -134,6 +134,16 @@ impl XmodemUpload {
             return;
         }
         self.saw_can = false;
+        // The end block's ACK means the batch is done; accept it even while
+        // a resend is pending, or we would resend into the shell and report
+        // a finished upload as failed.
+        if self.phase == Phase::EndAck && b == ACK {
+            self.finish(UploadState::Done {
+                sent_files: self.files.len(),
+                skipped: 0,
+            });
+            return;
+        }
         if self.resend_at.is_some() {
             self.resend_at = Some(self.now + SETTLE);
             return;
@@ -177,16 +187,13 @@ impl XmodemUpload {
                     self.deadline = self.now + ACK_TIMEOUT;
                 }
             }
-            Phase::EndAck if b == ACK => self.finish(UploadState::Done {
-                sent_files: self.files.len(),
-                skipped: 0,
-            }),
-            // A NAK, or (in CRC mode) a `C`: the receiver wants a resend.
-            // Wait for the line to settle, so a burst causes one resend, not
-            // one per byte.
-            Phase::HeaderAck | Phase::BlockAck | Phase::EotAck | Phase::EndAck
-                if b == NAK || b == CRC_START =>
-            {
+            // Only a NAK starts a settle: it is itself the receiver's
+            // answer. A stray `C` (U-Boot repeats it while waiting) is not
+            // treated as a resend request: it could arrive before the
+            // receiver's real answer to the packet, and on a slow link or a
+            // long round trip the settle could expire first, sending a
+            // duplicate whose ACK would be mistaken for the next block's.
+            Phase::HeaderAck | Phase::BlockAck | Phase::EotAck | Phase::EndAck if b == NAK => {
                 self.resend_at = Some(self.now + SETTLE);
             }
             // Anything else (a banner, line noise, an echo) is not an answer.
@@ -812,15 +819,17 @@ mod tests {
     }
 
     #[test]
-    fn a_c_while_waiting_asks_for_a_resend() {
+    fn a_stray_c_while_waiting_is_ignored() {
         let t = t0();
-        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(100, 11))], t);
+        let mut up = XmodemUpload::new(Variant::Xmodem, vec![file("a", bytes(2048, 11))], t);
         up.receive(b"C");
-        let block = drain(&mut up);
+        drain(&mut up);
         up.receive(b"C");
-        assert!(drain(&mut up).is_empty());
         up.tick(t + SETTLE);
-        assert_eq!(drain(&mut up), block);
+        assert!(drain(&mut up).is_empty());
+        up.receive(&[ACK]);
+        let second = drain(&mut up);
+        assert_eq!(second[1], 2);
     }
 
     #[test]
@@ -947,5 +956,32 @@ mod tests {
             UploadState::Failed("too many retries at block 1".into())
         );
         assert!(tail.ends_with(&CANCEL_SEQUENCE));
+    }
+
+    #[test]
+    fn the_end_ack_counts_during_a_settle() {
+        let t = t0();
+        let mut up = XmodemUpload::new(Variant::Ymodem, vec![file("a", vec![1, 2, 3])], t);
+        up.receive(b"C");
+        drain(&mut up); // block 0 (header)
+        up.receive(&[ACK]);
+        up.receive(b"C");
+        drain(&mut up); // block 1
+        up.receive(&[ACK]);
+        drain(&mut up); // EOT
+        up.receive(&[ACK]);
+        up.receive(b"C");
+        drain(&mut up); // the end block
+        up.receive(&[NAK]);
+        up.receive(&[ACK]);
+        assert_eq!(
+            up.state(),
+            UploadState::Done {
+                sent_files: 1,
+                skipped: 0
+            }
+        );
+        up.tick(t + SETTLE);
+        assert!(drain(&mut up).is_empty());
     }
 }
