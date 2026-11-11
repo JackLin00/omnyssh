@@ -1091,8 +1091,9 @@ export type UpdateConfigDto = { checkOnStartup: boolean; skipVersion: string }
 export type UpdateInfoDto = { version: string; url: string; tag: string; canSelfUpdate: boolean }
 /**
  * A drag-and-drop upload ended. `message` is what the terminal's result line
- * says: `uploaded foo.bin (1.2 MB)`, `cancelled`, or why it failed. Ends every
- * upload a command started, including one whose session went away.
+ * says: `uploaded foo.bin (1.2 MB)`, `cancelled`, or why it failed. One
+ * `upload-finished` follows every upload a command started, as long as its
+ * session is still open; a closed tab gets none.
  */
 export type UploadFinished = { sessionId: number; ok: boolean; message: string }
 /**

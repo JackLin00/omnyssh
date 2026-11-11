@@ -255,8 +255,9 @@ pub struct UploadProgress {
 }
 
 /// A drag-and-drop upload ended. `message` is what the terminal's result line
-/// says: `uploaded foo.bin (1.2 MB)`, `cancelled`, or why it failed. Ends every
-/// upload a command started, including one whose session went away.
+/// says: `uploaded foo.bin (1.2 MB)`, `cancelled`, or why it failed. One
+/// `upload-finished` follows every upload a command started, as long as its
+/// session is still open; a closed tab gets none.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadFinished {

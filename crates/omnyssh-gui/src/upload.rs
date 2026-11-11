@@ -52,6 +52,9 @@ pub fn inspect(paths: &[String]) -> Result<Vec<Dropped>, String> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
+            if !meta.is_file() && !meta.is_dir() {
+                return Err(format!("{name} is not a regular file"));
+            }
             Ok(Dropped {
                 path: path.clone(),
                 name,
@@ -193,7 +196,7 @@ impl SftpUpload {
                 message: format!("{}: {e}", self.files[self.current].name),
             });
         }
-        if self.cancelled {
+        if self.cancelled && self.current + 1 < self.files.len() {
             return Err(UploadResult {
                 ok: false,
                 message: "cancelled".to_string(),
@@ -293,10 +296,14 @@ impl Uploads {
     /// Keeps `manager` for terminal `id`. Hands it back when the terminal
     /// closed while it was connecting.
     pub fn add_sftp(&self, id: SessionId, manager: SftpManager) -> Result<(), SftpManager> {
+        // Lock order: `sftp`, then `hosts`. Holding `sftp` across the check
+        // means a close cannot slip in between and leak the connection:
+        // `session_closed` removes the host first, then takes `sftp`.
+        let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
         if self.terminal_host(id).is_none() {
             return Err(manager);
         }
-        self.sftp.lock().expect("uploads lock poisoned").insert(
+        sftp.insert(
             id,
             SftpConnection {
                 manager,
@@ -333,7 +340,8 @@ impl Uploads {
     /// A file on terminal `id`'s SFTP connection is done: sends the next one,
     /// or returns how the upload ended (and marks `id` no longer uploading).
     pub fn sftp_done(&self, id: SessionId, result: Result<(), String>) -> Option<UploadResult> {
-        let end = {
+        let failed = result.is_err();
+        let (end, dead) = {
             let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
             let conn = sftp.get_mut(&id)?;
             let upload = conn.upload.as_mut()?;
@@ -344,10 +352,17 @@ impl Uploads {
                 }
                 Err(end) => {
                     conn.upload = None;
-                    end
+                    // A failed file may mean the link behind the connection
+                    // died, and the core keeps the task until disconnect:
+                    // drop it so the next drop reconnects.
+                    let dead = if failed { sftp.remove(&id) } else { None };
+                    (end, dead)
                 }
             }
         };
+        if let Some(conn) = dead {
+            conn.manager.disconnect();
+        }
         self.end(id);
         Some(end)
     }
@@ -520,6 +535,43 @@ mod tests {
         let mut up = SftpUpload::new(sftp_files());
         up.cancelled = true;
         assert_eq!(ended(up.done(Ok(()))).message, "cancelled");
+    }
+
+    #[test]
+    fn a_cancel_after_the_last_file_still_reports_success() {
+        let mut up = SftpUpload::new(sftp_files());
+        up.cancelled = true;
+        assert!(up.done(Ok(())).is_err() && up.current == 0);
+        let mut up = SftpUpload::new(sftp_files());
+        let last = up.files.len() - 1;
+        up.current = last;
+        up.cancelled = true;
+        let end = ended(up.done(Ok(())));
+        assert!(end.ok, "{}", end.message);
+        assert_ne!(end.message, "cancelled");
+    }
+
+    #[test]
+    fn check_limits_are_inclusive() {
+        let max = u64::from(u32::MAX);
+        assert_eq!(check(Method::Zmodem, &[file("a", max)]), Ok(()));
+        assert!(check(Method::Zmodem, &[file("a", max + 1)]).is_err());
+        assert_eq!(check(Method::Zmodem, &[file(&"n".repeat(256), 1)]), Ok(()));
+        assert!(check(Method::Zmodem, &[file(&"n".repeat(257), 1)]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_refuses_special_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let err = inspect(&[fifo.to_string_lossy().into_owned()]).unwrap_err();
+        assert_eq!(err, "pipe is not a regular file");
     }
 
     #[test]
