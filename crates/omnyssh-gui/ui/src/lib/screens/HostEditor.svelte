@@ -196,13 +196,13 @@
         {#if fields.uploadProtocol === 'sftp'}
           <label class={label}>
             <span>Upload folder</span>
-            <input bind:value={fields.uploadDir} class={field} placeholder="~" />
+            <input bind:value={fields.uploadDir} class={field} placeholder="~" autocomplete="off" />
           </label>
         {/if}
       </div>
       <p class="text-xs text-faint">
         {#if fields.uploadProtocol === 'sftp'}
-          Files dropped on a terminal go to this folder over SFTP; the shell is left alone.
+          Files dropped on a terminal go to this folder over SFTP (blank or ~ is your home folder); the shell is left alone.
         {:else}
           Files dropped on a terminal are sent to <span class="font-mono">rz</span> in its shell — the host needs lrzsz.
         {/if}

@@ -344,4 +344,17 @@ describe('formToInput — drag-and-drop upload', () => {
     expect(formFromHost(host({})).uploadProtocol).toBe('zmodem');
     expect(emptyForm().uploadProtocol).toBe('zmodem');
   });
+
+  it('keeps the upload settings on a duplicate', () => {
+    const form = formForDuplicate(host({ uploadProtocol: 'sftp', uploadDir: '/srv' }), []);
+    expect([form.uploadProtocol, form.uploadDir]).toEqual(['sftp', '/srv']);
+    const out = formToInput(form);
+    expect(out.ok && [out.input.uploadProtocol, out.input.uploadDir]).toEqual(['sftp', '/srv']);
+  });
+
+  it('drops the folder when an SFTP host is switched back to ZMODEM', () => {
+    const form = { ...formFromHost(host({ uploadProtocol: 'sftp', uploadDir: '/srv' })), uploadProtocol: 'zmodem' as const };
+    const out = formToInput(form);
+    expect(out.ok && [out.input.uploadProtocol, out.input.uploadDir]).toEqual(['zmodem', undefined]);
+  });
 });
