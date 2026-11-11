@@ -3,7 +3,13 @@
 // validation mirrors the TUI's `HostForm::to_host` (crates/omnyssh/src/app/host.rs)
 // so both frontends produce the same `hosts.toml` shape and error messages.
 
-import type { HostDto, HostInputDto, LocalForwardDto, MonitorModeDto } from '$lib/bindings';
+import type {
+  HostDto,
+  HostInputDto,
+  HostUploadProtocolDto,
+  LocalForwardDto,
+  MonitorModeDto
+} from '$lib/bindings';
 
 /** One port-forward row as typed: listen on `[address:]port` here, reach
  *  `remoteHost:remotePort` from the host. */
@@ -29,6 +35,10 @@ export interface HostFormFields {
   forwards: ForwardRow[];
   tunnelAutostart: boolean;
   forwardAgent: boolean;
+  /** How files dropped on this host's terminals upload. */
+  uploadProtocol: HostUploadProtocolDto;
+  /** Where SFTP uploads go: blank means the home folder. Only read for `sftp`. */
+  uploadDir: string;
 }
 
 export function emptyForm(): HostFormFields {
@@ -47,7 +57,9 @@ export function emptyForm(): HostFormFields {
     monitorPort: '',
     forwards: [],
     tunnelAutostart: false,
-    forwardAgent: false
+    forwardAgent: false,
+    uploadProtocol: 'zmodem',
+    uploadDir: ''
   };
 }
 
@@ -83,7 +95,9 @@ export function formFromHost(h: HostDto): HostFormFields {
     monitorPort: h.monitorPort == null ? '' : String(h.monitorPort),
     forwards: h.localForwards.map(rowFromForward),
     tunnelAutostart: h.tunnelAutostart,
-    forwardAgent: h.forwardAgent
+    forwardAgent: h.forwardAgent,
+    uploadProtocol: h.uploadProtocol ?? 'zmodem',
+    uploadDir: h.uploadDir ?? ''
   };
 }
 
@@ -221,7 +235,11 @@ export function formToInput(f: HostFormFields): HostFormResult {
       localForwards,
       // The switch hides with the last row; a flag nobody can see must not linger.
       tunnelAutostart: f.tunnelAutostart && localForwards.length > 0,
-      forwardAgent: f.forwardAgent
+      forwardAgent: f.forwardAgent,
+      // Always sent: an omitted protocol means "keep" to the backend, and takes the
+      // folder with it. A folder nobody can see (ZMODEM) is cleared.
+      uploadProtocol: f.uploadProtocol,
+      uploadDir: f.uploadProtocol === 'sftp' ? f.uploadDir.trim() || undefined : undefined
     }
   };
 }

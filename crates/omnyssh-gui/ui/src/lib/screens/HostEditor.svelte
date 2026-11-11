@@ -185,6 +185,29 @@
         <p class="text-xs text-faint">Checks the port only — no login, and no metrics on the card.</p>
       {/if}
 
+      <div class="grid grid-cols-2 gap-3">
+        <label class={label}>
+          <span>Drag-and-drop upload</span>
+          <Select bind:value={fields.uploadProtocol} class={field}>
+            <option value="zmodem">ZMODEM (rz)</option>
+            <option value="sftp">SFTP</option>
+          </Select>
+        </label>
+        {#if fields.uploadProtocol === 'sftp'}
+          <label class={label}>
+            <span>Upload folder</span>
+            <input bind:value={fields.uploadDir} class={field} placeholder="~" />
+          </label>
+        {/if}
+      </div>
+      <p class="text-xs text-faint">
+        {#if fields.uploadProtocol === 'sftp'}
+          Files dropped on a terminal go to this folder over SFTP; the shell is left alone.
+        {:else}
+          Files dropped on a terminal are sent to <span class="font-mono">rz</span> in its shell — the host needs lrzsz.
+        {/if}
+      </p>
+
       <div class="flex items-center justify-between gap-4 border-t border-default pt-3.5">
         <div class="min-w-0">
           <p class="text-sm text-fg">Forward SSH agent</p>

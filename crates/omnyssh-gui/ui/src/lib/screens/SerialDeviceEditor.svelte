@@ -5,6 +5,7 @@
   import type { SerialDeviceDto } from '$lib/bindings';
   import Modal from '$lib/components/Modal.svelte';
   import { Button } from '$lib/theme';
+  import Select from '$lib/components/Select.svelte';
   import SerialLineFields from './SerialLineFields.svelte';
   import { deviceFromFields, type SerialDeviceFields } from './serialForm';
 
@@ -87,6 +88,14 @@
       <div bind:this={lineFieldsEl} class="space-y-3.5">
         <SerialLineFields bind:fields />
       </div>
+      <label class={label}>
+        <span>Drag-and-drop upload</span>
+        <Select bind:value={fields.uploadProtocol} class={field}>
+          <option value="zmodem">ZMODEM (rz)</option>
+          <option value="ymodem">YMODEM (loady, rb)</option>
+          <option value="xmodem">XMODEM (loadx, rx)</option>
+        </Select>
+      </label>
       <label class={label}>
         <span>Notes</span>
         <input bind:value={fields.notes} class={field} placeholder="Optional" />

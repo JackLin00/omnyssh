@@ -290,3 +290,27 @@ test('a receive-only serial tab takes no drops', async ({ page }) => {
   expect(await calls(page, 'serial_upload')).toEqual([]);
 });
 
+test('the host editor sets SFTP and its folder', async ({ page }) => {
+  await boot(page);
+  await page.getByRole('button', { name: 'Edit web-1' }).click();
+  const editor = page.getByRole('dialog', { name: 'Edit host' });
+  await expect(editor.getByLabel('Upload folder')).toHaveCount(0);
+  await editor.getByLabel('Drag-and-drop upload').selectOption('sftp');
+  await editor.getByLabel('Upload folder').fill('/srv/in');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(async () => (await calls(page, 'save_host'))[0]).toMatchObject({
+    input: { name: 'web-1', uploadProtocol: 'sftp', uploadDir: '/srv/in' }
+  });
+});
+
+test('the serial device editor keeps the upload protocol', async ({ page }) => {
+  await boot(page);
+  await page.getByRole('button', { name: 'Edit board' }).click();
+  const editor = page.getByRole('dialog', { name: 'Edit serial device' });
+  await expect(editor.getByLabel('Drag-and-drop upload')).toHaveValue('ymodem');
+  await editor.getByLabel('Drag-and-drop upload').selectOption('xmodem');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(async () => (await calls(page, 'save_serial_device'))[0]).toMatchObject({
+    device: { name: 'board', uploadProtocol: 'xmodem' }
+  });
+});

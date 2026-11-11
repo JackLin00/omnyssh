@@ -7,6 +7,7 @@ import type {
   ParityDto,
   SerialConfigDto,
   SerialDeviceDto,
+  SerialUploadProtocolDto,
   StopBitsDto
 } from '$lib/bindings';
 
@@ -23,6 +24,8 @@ export interface SerialLineFields {
 export interface SerialDeviceFields extends SerialLineFields {
   name: string;
   notes: string;
+  /** How files dropped on the device's tab upload. */
+  uploadProtocol: SerialUploadProtocolDto;
 }
 
 /** 115200 8N1, no flow control, Enter sends CR: what almost every MCU boots with. */
@@ -39,7 +42,7 @@ export function emptyLineFields(): SerialLineFields {
 }
 
 export function emptyDeviceFields(): SerialDeviceFields {
-  return { ...emptyLineFields(), name: '', notes: '' };
+  return { ...emptyLineFields(), name: '', notes: '', uploadProtocol: 'zmodem' };
 }
 
 /** Digits only, 1..u32::MAX (the backend takes a u32). */
@@ -74,7 +77,8 @@ export function fieldsFromDevice(d: SerialDeviceDto): SerialDeviceFields {
     stopBits: d.config.stopBits,
     flow: d.config.flowControl,
     enter: d.enter,
-    notes: d.notes ?? ''
+    notes: d.notes ?? '',
+    uploadProtocol: d.uploadProtocol ?? 'zmodem'
   };
 }
 
@@ -92,7 +96,13 @@ export function deviceFromFields(f: SerialDeviceFields, taken: readonly string[]
   const notes = f.notes.trim();
   return {
     ok: true,
-    device: { name, config, enter: f.enter as LineEndingDto, notes: notes || null }
+    device: {
+      name,
+      config,
+      enter: f.enter as LineEndingDto,
+      notes: notes || null,
+      uploadProtocol: f.uploadProtocol
+    }
   };
 }
 

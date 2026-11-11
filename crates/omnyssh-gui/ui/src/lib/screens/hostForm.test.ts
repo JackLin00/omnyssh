@@ -141,7 +141,9 @@ describe('formFromHost', () => {
       localForwards: [],
       tunnelAutostart: false,
       forwardAgent: false,
-      monitorPort: undefined
+      monitorPort: undefined,
+      uploadProtocol: 'zmodem',
+      uploadDir: undefined
     });
   });
 });
@@ -323,5 +325,23 @@ describe('duplicating a host', () => {
     expect(form).toEqual({ ...formFromHost(host), name: 'web-1-copy' });
     expect(form.identityFile).toBe('');
     expect(form.password).toBe('');
+  });
+});
+
+describe('formToInput — drag-and-drop upload', () => {
+  it('always sends the protocol, and the folder only for SFTP', () => {
+    const sftp = formToInput(fields({ name: 'nas', hostname: 'h', uploadProtocol: 'sftp', uploadDir: ' ~/drop ' }));
+    expect(sftp.ok && [sftp.input.uploadProtocol, sftp.input.uploadDir]).toEqual(['sftp', '~/drop']);
+    const blank = formToInput(fields({ name: 'nas', hostname: 'h', uploadProtocol: 'sftp', uploadDir: '  ' }));
+    expect(blank.ok && blank.input.uploadDir).toBeUndefined();
+    const zmodem = formToInput(fields({ name: 'nas', hostname: 'h', uploadDir: '/srv' }));
+    expect(zmodem.ok && [zmodem.input.uploadProtocol, zmodem.input.uploadDir]).toEqual(['zmodem', undefined]);
+  });
+
+  it('seeds the edit form from the host, ZMODEM when it says nothing', () => {
+    const f = formFromHost(host({ uploadProtocol: 'sftp', uploadDir: '/srv/in' }));
+    expect([f.uploadProtocol, f.uploadDir]).toEqual(['sftp', '/srv/in']);
+    expect(formFromHost(host({})).uploadProtocol).toBe('zmodem');
+    expect(emptyForm().uploadProtocol).toBe('zmodem');
   });
 });

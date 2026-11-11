@@ -21,7 +21,8 @@ const device: SerialDeviceDto = {
     flowControl: 'none'
   },
   enter: 'crlf',
-  notes: 'bench board'
+  notes: 'bench board',
+  uploadProtocol: 'ymodem'
 };
 
 describe('lineConfig', () => {
@@ -63,6 +64,12 @@ describe('device fields', () => {
       ok: false,
       error: 'Pick a port and a baud rate'
     });
+  });
+
+  it('read a device saved before uploads as ZMODEM', () => {
+    const { uploadProtocol: _, ...old } = device;
+    expect(fieldsFromDevice(old).uploadProtocol).toBe('zmodem');
+    expect(emptyDeviceFields().uploadProtocol).toBe('zmodem');
   });
 
   it('drop blank notes', () => {
