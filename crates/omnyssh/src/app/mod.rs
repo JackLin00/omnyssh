@@ -965,6 +965,8 @@ impl App {
                 }
             }
 
+            // The TUI starts no uploads.
+            CoreEvent::Upload(..) => {}
             CoreEvent::Error(msg) => {
                 self.view.status_message = Some(msg);
             }

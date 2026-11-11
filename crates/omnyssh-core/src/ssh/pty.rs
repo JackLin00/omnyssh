@@ -12,11 +12,13 @@
 //! application layer.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use russh::ChannelMsg;
 use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 
 use crate::event::CoreEvent;
 use crate::ssh::client::Host;
@@ -26,6 +28,7 @@ use crate::ssh::password::{AskPassword, NoAnswer, Prompt};
 use crate::ssh::session::{
     connect_for_shell, forwards_agent, passphrase_required, Passwords, SshConnection,
 };
+use crate::transfer::{ActiveUpload, UploadEvent, UploadResult};
 
 /// Stable numeric identifier for a PTY session (mirrors [`crate::event::SessionId`]).
 pub type SessionId = u64;
@@ -39,7 +42,17 @@ enum Ctrl {
     /// Keystrokes or pasted bytes for the remote shell.
     Input(Vec<u8>),
     /// Window resize; forwarded to the server as `window_change`.
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    /// Sends `preamble` and enters upload mode in the same step, so no output
+    /// read in between can miss the upload (`rz`'s first ZRINIT, say).
+    Upload {
+        preamble: Vec<u8>,
+        upload: ActiveUpload,
+    },
+    CancelUpload,
     /// Request the task to end and close the connection.
     Close,
 }
@@ -209,6 +222,7 @@ async fn session_task(
         size: (cols, rows),
         asked: false,
         closed: false,
+        refused_uploads: 0,
     };
     // Asked once: the connection that takes agent channels and the request that
     // invites them must agree, even if the agent comes or goes during the login.
@@ -227,7 +241,7 @@ async fn session_task(
     if prompt.asked {
         prompt.flush();
     }
-    let ((cols, rows), closed) = (prompt.size, prompt.closed);
+    let ((cols, rows), closed, refused) = (prompt.size, prompt.closed, prompt.refused_uploads);
     if closed && connected.is_ok() {
         // Closed at the prompt: no shell for a tab that is gone.
         let _ = tx.send(CoreEvent::PtyExited(id)).await;
@@ -256,23 +270,39 @@ async fn session_task(
         }
     };
 
+    // Uploads sent while the password prompt had the keyboard cannot run.
+    for _ in 0..refused {
+        let result = UploadResult {
+            ok: false,
+            message: "the terminal was still logging in".to_string(),
+        };
+        let _ = tx
+            .send(CoreEvent::Upload(id, UploadEvent::Finished(result)))
+            .await;
+    }
+
     // Phase C: pump loop (official russh interactive idiom). `wait` is the only
     // &mut method, so a single owning task can select over it and the control
     // receiver without aliasing.
+    let out = Output {
+        id,
+        parser: &parser,
+        tx: &tx,
+        raw_output: raw_output.as_ref(),
+    };
+    let mut upload: Option<ActiveUpload> = None;
+    let mut ticker = tokio::time::interval(UPLOAD_TICK);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             msg = channel.wait() => match msg {
                 // stdout and remote stderr both render in a real terminal.
                 Some(ChannelMsg::Data { data })
-                | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    feed_parser(&parser, &data);
-                    let _ = tx.send(CoreEvent::PtyOutput(id)).await;
-                    // Additive GUI tap (tech-gui.md §3.6): mirror the raw bytes to
-                    // the frontend channel. Absent for the TUI → no behaviour change.
-                    if let Some(raw) = &raw_output {
-                        let _ = raw.send((id, data.to_vec())).await;
-                    }
-                }
+                | Some(ChannelMsg::ExtendedData { data, .. }) => match upload.as_mut() {
+                    // An upload owns the stream: nothing of it reaches the screen.
+                    Some(up) => up.receive(&data, Instant::now()),
+                    None => out.show(&data).await,
+                },
                 Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
                 _ => {} // ExitStatus etc.: ignore, wait for Close.
             },
@@ -283,14 +313,97 @@ async fn session_task(
                 Some(Ctrl::Resize { cols, rows }) => {
                     let _ = channel.window_change(cols as u32, rows as u32, 0, 0).await;
                 }
+                Some(Ctrl::Upload { preamble, upload: started }) => {
+                    let _ = channel.data(&preamble[..]).await;
+                    upload = Some(started);
+                }
+                Some(Ctrl::CancelUpload) => {
+                    if let Some(up) = upload.as_mut() {
+                        up.cancel();
+                    }
+                }
                 Some(Ctrl::Close) | None => break,
             },
+            _ = ticker.tick(), if upload.is_some() => {
+                if let Some(up) = upload.as_mut() {
+                    up.tick(Instant::now());
+                }
+            }
         }
+        if let Some(up) = upload.as_mut() {
+            if let Some(end) = pump_upload(up, &channel, &out).await {
+                upload = None;
+                out.show(&end.output).await;
+                let _ = tx
+                    .send(CoreEvent::Upload(id, UploadEvent::Finished(end.result)))
+                    .await;
+            }
+        }
+    }
+    if let Some(up) = upload {
+        let end = up.lost();
+        out.show(&end.output).await;
+        let _ = tx
+            .send(CoreEvent::Upload(id, UploadEvent::Finished(end.result)))
+            .await;
     }
 
     let _ = channel.eof().await;
     let _ = tx.send(CoreEvent::PtyExited(id)).await;
     // _handle drops here → russh closes the TCP connection.
+}
+
+/// How often a running upload's timers are checked when nothing arrives.
+const UPLOAD_TICK: Duration = Duration::from_millis(100);
+
+/// Where a session's screen output goes: the parser, the render nudge, and the
+/// GUI's raw tap.
+struct Output<'a> {
+    id: SessionId,
+    parser: &'a Arc<Mutex<vt100::Parser>>,
+    tx: &'a mpsc::Sender<CoreEvent>,
+    raw_output: Option<&'a mpsc::Sender<(SessionId, Vec<u8>)>>,
+}
+
+impl Output<'_> {
+    async fn show(&self, data: &[u8]) {
+        feed_parser(self.parser, data);
+        let _ = self.tx.send(CoreEvent::PtyOutput(self.id)).await;
+        // Additive GUI tap (tech-gui.md §3.6): mirror the raw bytes to the
+        // frontend channel. Absent for the TUI → no behaviour change.
+        if let Some(raw) = self.raw_output {
+            let _ = raw.send((self.id, data.to_vec())).await;
+        }
+    }
+}
+
+/// Sends what the upload has to send, until it waits for the device or ends.
+/// Each chunk is awaited whole, so russh's window paces it; the protocols stop
+/// on their own once their window is out, so this does not run away. Reports
+/// progress on the way; returns the end, if it came.
+async fn pump_upload(
+    up: &mut ActiveUpload,
+    channel: &russh::Channel<russh::client::Msg>,
+    out: &Output<'_>,
+) -> Option<crate::transfer::Finished> {
+    let mut pending = Vec::new();
+    loop {
+        let now = Instant::now();
+        if let Some(end) = up.pump(now, &mut pending) {
+            return Some(end);
+        }
+        if let Some(state) = up.progress(now) {
+            let _ = out
+                .tx
+                .send(CoreEvent::Upload(out.id, UploadEvent::Progress(state)))
+                .await;
+        }
+        if pending.is_empty() {
+            return None;
+        }
+        let _ = channel.data(&pending[..]).await;
+        pending.clear();
+    }
 }
 
 /// Asks for the login password inside the tab, the way ssh(1) does: the prompt
@@ -308,6 +421,8 @@ struct InlinePrompt<'a> {
     asked: bool,
     /// The tab was closed at the prompt.
     closed: bool,
+    /// Uploads that arrived before the shell was there, to report as failed.
+    refused_uploads: usize,
 }
 
 impl InlinePrompt<'_> {
@@ -316,7 +431,8 @@ impl InlinePrompt<'_> {
     fn flush(&mut self) {
         while let Ok(ctrl) = self.ctrl_rx.try_recv() {
             match ctrl {
-                Ctrl::Input(_) => {}
+                Ctrl::Input(_) | Ctrl::CancelUpload => {}
+                Ctrl::Upload { .. } => self.refused_uploads += 1,
                 Ctrl::Resize { cols, rows } => self.size = (cols, rows),
                 Ctrl::Close => self.closed = true,
             }
@@ -358,6 +474,8 @@ impl<'a> AskPassword for InlinePrompt<'a> {
                     }
                 }
                 Some(Ctrl::Resize { cols, rows }) => self.size = (cols, rows),
+                Some(Ctrl::Upload { .. }) => self.refused_uploads += 1,
+                Some(Ctrl::CancelUpload) => {}
                 Some(Ctrl::Close) | None => {
                     self.closed = true;
                     return Err(NoAnswer::Cancelled);
@@ -535,6 +653,25 @@ impl PtyManager {
             let _ = s.ctrl_tx.send(Ctrl::Input(data.to_vec()));
         }
         Ok(())
+    }
+
+    /// Sends `preamble` (`rz -b\r` for ZMODEM) to session `id` and runs
+    /// `upload` over it until it ends, reported as [`CoreEvent::Upload`]. The
+    /// caller makes sure no other upload is running there. Unknown id: no-op.
+    pub fn upload(&mut self, id: SessionId, preamble: &[u8], upload: ActiveUpload) {
+        if let Some(s) = self.sessions.iter().find(|s| s.id == id) {
+            let _ = s.ctrl_tx.send(Ctrl::Upload {
+                preamble: preamble.to_vec(),
+                upload,
+            });
+        }
+    }
+
+    /// Cancels the upload running in session `id`, if any.
+    pub fn cancel_upload(&mut self, id: SessionId) {
+        if let Some(s) = self.sessions.iter().find(|s| s.id == id) {
+            let _ = s.ctrl_tx.send(Ctrl::CancelUpload);
+        }
     }
 
     /// Forwards a resize to the session identified by `id`. No-op if not found.

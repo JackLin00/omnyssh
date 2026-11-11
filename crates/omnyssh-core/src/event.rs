@@ -12,6 +12,7 @@ use crate::ssh::client::{ConnectionStatus, Host};
 use crate::ssh::key_setup::KeySetupStep;
 use crate::ssh::sftp::FileEntry;
 use crate::ssh::tunnel::TunnelStatus;
+use crate::transfer::UploadEvent;
 
 /// Placeholder type aliases for future stages.
 /// `HostId` is the host's `name` field — stable, human-readable key.
@@ -123,6 +124,8 @@ pub enum CoreEvent {
     PtyOutput(SessionId),
     /// The PTY child process exited (reader thread reached EOF or I/O error).
     PtyExited(SessionId),
+    /// How an upload started with `PtyManager::upload` is going (GUI only).
+    Upload(SessionId, UploadEvent),
 
     // -----------------------------------------------------------------------
     // Smart Server Context — Discovery events
