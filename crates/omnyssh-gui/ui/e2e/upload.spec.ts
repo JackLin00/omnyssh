@@ -21,9 +21,9 @@ const DEVICES = [
 
 type Call = { cmd: string; args: Record<string, unknown> };
 
-async function boot(page: Page): Promise<void> {
+async function boot(page: Page, holdConnect = false): Promise<void> {
   await page.addInitScript(
-    ({ hosts, devices }) => {
+    ({ hosts, devices, holdConnect }) => {
       let cbid = 0;
       const win = window as unknown as Record<string, unknown>;
       const listeners: Record<string, number[]> = {};
@@ -35,6 +35,14 @@ async function boot(page: Page): Promise<void> {
       const calls: Call[] = [];
       win.__calls = calls;
       win.__refuse = null;
+      // With `holdConnect` the terminal opens but prints nothing (the pane stays
+      // "connecting") until `__releaseConnect()`; an early release is remembered.
+      const held: number[] = [];
+      let released = false;
+      win.__releaseConnect = () => {
+        released = true;
+        for (const chId of held.splice(0)) send(chId, 'omnyssh-ready> ');
+      };
 
       function send(chId: number, text: string): void {
         const cb = win[`__cb${chId}`] as ((m: unknown) => void) | undefined;
@@ -74,7 +82,8 @@ async function boot(page: Page): Promise<void> {
             case 'terminal_open': {
               const chId = (args.onOutput as { id: number }).id;
               const sid = ++nextSession;
-              setTimeout(() => send(chId, 'omnyssh-ready> '), 0);
+              if (holdConnect && !released) held.push(chId);
+              else setTimeout(() => send(chId, 'omnyssh-ready> '), 0);
               return Promise.resolve(sid);
             }
             case 'serial_list_ports':
@@ -115,7 +124,7 @@ async function boot(page: Page): Promise<void> {
         }
       };
     },
-    { hosts: HOSTS, devices: DEVICES }
+    { hosts: HOSTS, devices: DEVICES, holdConnect }
   );
   await page.goto('/');
   await expect(page.getByText('2 hosts')).toBeVisible();
@@ -210,7 +219,7 @@ test('a file dropped on a terminal goes up by ZMODEM, keys stay out of the trans
   await fire(page, 'upload-finished', { sessionId: 1, ok: false, message: 'cancelled' });
   await expect(bar).toHaveCount(0);
 
-  await term.click();
+  // Cancel must not leave the keyboard stranded: no click on the terminal first.
   await page.keyboard.type('x');
   await expect.poll(async () => (await calls(page, 'terminal_write')).length).toBeGreaterThan(0);
 });
@@ -352,4 +361,39 @@ test('keystrokes are dropped during a serial upload', async ({ page }) => {
   await page.keyboard.type('b');
   await page.waitForTimeout(300);
   expect(await calls(page, 'serial_write')).toHaveLength(1);
+});
+
+test('cancelling a serial upload gives the keyboard back', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('term on board').click();
+  const view = page.locator('.xterm').first();
+  await expect(view).toBeVisible();
+  await view.click();
+  await dragOnto(page, view, ['/u-boot.bin']);
+  const bar = page.getByRole('status', { name: 'Upload' });
+  await bar.getByRole('button', { name: 'Cancel' }).click();
+  await expect.poll(() => calls(page, 'upload_cancel')).toEqual([{ sessionId: 1 }]);
+  await fire(page, 'upload-finished', { sessionId: 1, ok: false, message: 'cancelled' });
+  await expect(bar).toHaveCount(0);
+  await page.keyboard.type('x');
+  await expect.poll(async () => (await calls(page, 'serial_write')).length).toBeGreaterThan(0);
+});
+
+test('a terminal still connecting takes no drops until it is connected', async ({ page }) => {
+  await boot(page, true);
+  await page.getByTitle('sh on web-1').click();
+  const term = page.locator('.xterm').first();
+  await expect(term).toBeVisible();
+
+  await dragOnto(page, term, ['/a.bin'], false);
+  await expect(page.getByTestId('drop-overlay')).toHaveText('The terminal is still connecting');
+  await dragOnto(page, term, ['/a.bin']);
+  expect(await calls(page, 'terminal_upload')).toEqual([]);
+
+  await page.evaluate(() => (window as unknown as { __releaseConnect: () => void }).__releaseConnect());
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+  await dragOnto(page, term, ['/a.bin']);
+  await expect.poll(() => calls(page, 'terminal_upload')).toEqual([
+    { sessionId: 1, protocol: 'zmodem', paths: ['/a.bin'] }
+  ]);
 });

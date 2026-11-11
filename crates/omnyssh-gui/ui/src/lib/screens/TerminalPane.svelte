@@ -504,9 +504,15 @@
     });
   });
 
+  // A session id exists once terminal_open returns, but the pane is still connecting
+  // until its first output (a password prompt, say): only `connected` takes drops.
+  const notReady = $derived(
+    status === 'failed' ? 'The terminal is not connected' : 'The terminal is still connecting'
+  );
+
   function upload(paths: string[]): void {
-    if (termId == null) {
-      lastError.set('The terminal is still connecting');
+    if (termId == null || status !== 'connected') {
+      lastError.set(notReady);
       return;
     }
     void startUpload(termId, uploadProtocol, paths, (id, protocol, files) =>
@@ -516,6 +522,7 @@
 
   function cancelUpload(): void {
     if (termId != null) void uploadCancel(termId).catch((e) => lastError.set(`Cancel: ${message(e)}`));
+    term?.focus();
   }
 
   function exportContents(): void {
@@ -682,7 +689,7 @@
   <UploadStatus
     {root}
     sessionId={termId}
-    unavailable={termId == null ? 'The terminal is still connecting' : null}
+    unavailable={termId == null || status !== 'connected' ? notReady : null}
     onCancel={cancelUpload}
   />
   {#if sizeBadge !== null}

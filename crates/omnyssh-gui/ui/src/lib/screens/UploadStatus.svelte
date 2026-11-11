@@ -72,6 +72,7 @@
     <button
       type="button"
       class="shrink-0 rounded px-2 py-0.5 text-xs text-muted transition hover:bg-surface hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+      onmousedown={(e) => e.preventDefault()}
       onclick={onCancel}
     >
       Cancel

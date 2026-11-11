@@ -44,7 +44,7 @@ export function targetFor(el: Element | null): { el: Element; target: DropTarget
   return null;
 }
 
-/** What the OS reports, in the page's terms: Tauri gives physical pixels. */
+/** A drag event in page (CSS) pixels; see `toPagePoint`. */
 export type DragEvent =
   | { type: 'enter'; paths: string[]; x: number; y: number }
   | { type: 'over'; x: number; y: number }

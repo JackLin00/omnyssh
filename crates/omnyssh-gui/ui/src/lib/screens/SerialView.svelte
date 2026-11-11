@@ -452,6 +452,7 @@
     if (serialId != null) {
       void uploadCancel(serialId).catch((e) => lastError.set(`Cancel: ${message(e)}`));
     }
+    term?.focus();
   }
 
   $effect(() => {
