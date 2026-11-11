@@ -239,6 +239,32 @@ impl From<Stopped> for LogStopped {
     }
 }
 
+/// How a drag-and-drop upload in a terminal or serial tab is going. `waiting`
+/// while the receiver has not started yet (the other fields are then empty);
+/// `fileIndex` counts from 0. At most every 100 ms per session.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadProgress {
+    pub session_id: u64,
+    pub waiting: bool,
+    pub file_index: u32,
+    pub file_count: u32,
+    pub file_name: String,
+    pub sent: u64,
+    pub total: u64,
+}
+
+/// A drag-and-drop upload ended. `message` is what the terminal's result line
+/// says: `uploaded foo.bin (1.2 MB)`, `cancelled`, or why it failed. Ends every
+/// upload a command started, including one whose session went away.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadFinished {
+    pub session_id: u64,
+    pub ok: bool,
+    pub message: String,
+}
+
 /// A background error surfaced to the user.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 pub struct Error {

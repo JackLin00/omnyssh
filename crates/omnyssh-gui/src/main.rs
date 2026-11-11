@@ -14,6 +14,7 @@ mod events;
 mod session_log;
 mod state;
 mod tray;
+mod upload;
 
 use commands::auth::{answer_host_key, answer_password, unlock_identity};
 use commands::hosts::{
