@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { createDragTracker, dropHover, registerDropTarget, targetFor, type DropTarget } from './dropTargets';
+import { createDragTracker, dropHover, registerDropTarget, targetFor, toPagePoint, type DropTarget } from './dropTargets';
 import type { UploadProtocol } from '$lib/stores/uploads';
 
 function target(protocol: UploadProtocol, dropped: string[][]): DropTarget {
@@ -70,5 +70,45 @@ describe('drop targets', () => {
     registerDropTarget(root, target('xmodem', []));
     first();
     expect(targetFor(root)?.target.protocol()).toBe('xmodem');
+  });
+
+  it('a drag with no files shows nothing and drops nothing until a drag with files enters', () => {
+    const dropped: string[][] = [];
+    const off = registerDropTarget(root, target('zmodem', dropped));
+    const track = createDragTracker(() => inner);
+    track({ type: 'enter', paths: [], x: 1, y: 1 });
+    track({ type: 'over', x: 1, y: 1 });
+    expect(get(dropHover)).toBeNull();
+    track({ type: 'drop', paths: [], x: 1, y: 1 });
+    expect(dropped).toEqual([]);
+    track({ type: 'enter', paths: ['/a'], x: 1, y: 1 });
+    expect(get(dropHover)?.count).toBe(1);
+    track({ type: 'leave' });
+    track({ type: 'over', x: 1, y: 1 });
+    expect(get(dropHover)).toBeNull();
+    off();
+  });
+
+  it('does not rewrite the hover when nothing changed', () => {
+    const off = registerDropTarget(root, target('zmodem', []));
+    const track = createDragTracker(() => inner);
+    track({ type: 'enter', paths: ['/a'], x: 1, y: 1 });
+    let calls = 0;
+    const unsub = dropHover.subscribe(() => calls++);
+    calls = 0;
+    track({ type: 'over', x: 2, y: 2 });
+    track({ type: 'over', x: 3, y: 3 });
+    expect(calls).toBe(0);
+    unsub();
+    off();
+  });
+});
+
+describe('toPagePoint', () => {
+  it('divides physical pixels by the device pixel ratio', () => {
+    expect(toPagePoint({ x: 200, y: 100 }, true, 2)).toEqual({ x: 100, y: 50 });
+  });
+  it('leaves already-logical positions alone', () => {
+    expect(toPagePoint({ x: 200, y: 100 }, false, 2)).toEqual({ x: 200, y: 100 });
   });
 });

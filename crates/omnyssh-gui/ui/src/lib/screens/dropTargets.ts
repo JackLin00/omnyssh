@@ -3,7 +3,8 @@
 // events never fire; one listener, started at boot, finds the terminal or serial view
 // under the pointer. Views register their root element; a hidden tab is `display:
 // none`, so only what is on screen can be hit.
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
+import { isWindows } from '$lib/platform';
 import type { UploadProtocol } from '$lib/stores/uploads';
 
 export interface DropTarget {
@@ -55,35 +56,61 @@ export type DragEvent =
  *  the store, so it is testable without a window. */
 export function createDragTracker(hit: (x: number, y: number) => Element | null) {
   let count = 0;
-  function hover(x: number, y: number): { el: Element; target: DropTarget } | null {
+  // False for a drag that carries no files (macOS reports text and URL drags too).
+  let active = false;
+  function hover(x: number, y: number): void {
     const found = targetFor(hit(x, y));
-    dropHover.set(
-      found
-        ? { el: found.el, label: found.target.label(), protocol: found.target.protocol(), count }
-        : null
-    );
-    return found;
+    const next: DropHover | null = found
+      ? { el: found.el, label: found.target.label(), protocol: found.target.protocol(), count }
+      : null;
+    const cur = get(dropHover);
+    const same =
+      cur === next ||
+      (cur !== null &&
+        next !== null &&
+        cur.el === next.el &&
+        cur.label === next.label &&
+        cur.protocol === next.protocol &&
+        cur.count === next.count);
+    if (!same) dropHover.set(next);
   }
   return (e: DragEvent): void => {
     switch (e.type) {
       case 'enter':
         count = e.paths.length;
-        hover(e.x, e.y);
+        active = count > 0;
+        if (active) hover(e.x, e.y);
+        else dropHover.set(null);
         break;
       case 'over':
-        hover(e.x, e.y);
+        if (active) hover(e.x, e.y);
         break;
       case 'drop': {
         dropHover.set(null);
+        if (!active) break;
+        active = false;
         const found = targetFor(hit(e.x, e.y));
         if (found && e.paths.length > 0) found.target.drop(e.paths);
         break;
       }
       case 'leave':
+        active = false;
         dropHover.set(null);
         break;
     }
   };
+}
+
+/** A position Tauri reports, in page (CSS) pixels. Tauri wraps wry's raw position as
+ *  physical without converting it, but wry's platforms differ: WebView2 reports
+ *  `ScreenToClient` physical pixels, while WKWebView (`draggingLocation`) and WebKitGTK
+ *  (widget coordinates) already report logical ones. So only divide when `physical`. */
+export function toPagePoint(
+  position: { x: number; y: number },
+  physical: boolean,
+  dpr: number
+): { x: number; y: number } {
+  return physical ? { x: position.x / dpr, y: position.y / dpr } : { x: position.x, y: position.y };
 }
 
 /** Starts following OS file drags over the window. Outside Tauri (a plain browser,
@@ -92,14 +119,17 @@ export async function startDropListener(): Promise<() => void> {
   try {
     const { getCurrentWebview } = await import('@tauri-apps/api/webview');
     const track = createDragTracker((x, y) => document.elementFromPoint(x, y));
-    const scale = (v: number) => v / (window.devicePixelRatio || 1);
+    const at = (p: { x: number; y: number }) => toPagePoint(p, isWindows, window.devicePixelRatio || 1);
     return await getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
       if (p.type === 'leave') track({ type: 'leave' });
-      else if (p.type === 'over') track({ type: 'over', x: scale(p.position.x), y: scale(p.position.y) });
-      else track({ type: p.type, paths: p.paths, x: scale(p.position.x), y: scale(p.position.y) });
+      else if (p.type === 'over') track({ type: 'over', ...at(p.position) });
+      else track({ type: p.type, paths: p.paths, ...at(p.position) });
     });
-  } catch {
+  } catch (e) {
+    // Outside Tauri this is expected; inside it, setup really failed.
+    const w = window as unknown as { __TAURI_INTERNALS__?: { metadata?: unknown } };
+    if (w.__TAURI_INTERNALS__?.metadata) console.warn('drag-and-drop upload is unavailable', e);
     return () => {};
   }
 }
