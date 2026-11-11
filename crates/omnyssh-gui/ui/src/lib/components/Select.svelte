@@ -12,9 +12,10 @@
   let {
     value = $bindable(),
     class: className = '',
+    chevronStyle = '',
     children,
     ...rest
-  }: { value: string; class?: string; children: Snippet } & Omit<
+  }: { value: string; class?: string; chevronStyle?: string; children: Snippet } & Omit<
     HTMLSelectAttributes,
     'value' | 'class' | 'children'
   > = $props();
@@ -33,6 +34,7 @@
     stroke-width="1.5"
     stroke-linecap="round"
     stroke-linejoin="round"
+    style={chevronStyle}
     aria-hidden="true"
   >
     <path d="M3 4.5 6 7.5 9 4.5" />

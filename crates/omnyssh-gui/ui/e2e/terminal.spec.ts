@@ -382,6 +382,41 @@ test("clicking a pane's title bar keeps the keyboard in its own terminal", async
   await expect.poll(() => writes(page)).toEqual([[104], [105]]);
 });
 
+test("the title bar's upload protocol picker opens by mouse and gives the keyboard back", async ({
+  page
+}) => {
+  await boot(page);
+  await page.getByTitle('sh on web-1').click();
+  await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
+  await page.keyboard.press('Alt+Shift+=');
+  await expect(page.locator('[data-pane]')).toHaveCount(2);
+
+  const picker = page.locator('[data-pane="1"] [data-titlebar]').getByLabel('Upload protocol');
+  const before = (await page.locator('[data-pane="1"]').boundingBox())!;
+
+  // A click on the picker must not be cancelled by the title bar (that would stop the
+  // dropdown opening) nor start a pane move.
+  await page.evaluate(() => {
+    (window as unknown as { __prevented: boolean[] }).__prevented = [];
+    window.addEventListener('mousedown', (e) =>
+      (window as unknown as { __prevented: boolean[] }).__prevented.push(e.defaultPrevented)
+    );
+  });
+  await picker.click();
+  expect(await page.evaluate(() => (window as unknown as { __prevented: boolean[] }).__prevented)).toEqual([false]);
+  await page.keyboard.press('Escape');
+
+  await picker.selectOption('sftp');
+  await expect(picker).toHaveValue('sftp');
+  const after = (await page.locator('[data-pane="1"]').boundingBox())!;
+  expect(after).toEqual(before);
+
+  // Picking an option hands the keyboard back to the shell instead of the select.
+  await page.keyboard.type('q');
+  await expect.poll(() => writes(page)).toEqual([[113]]);
+  await expect(picker).toHaveValue('sftp');
+});
+
 test('Escape cancels a pane drag and leaves the layout as it was', async ({ page }) => {
   await boot(page);
   await page.getByTitle('sh on web-1').click();

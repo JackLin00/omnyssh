@@ -18,7 +18,14 @@
   } = $props();
 
   const hover = $derived($dropHover && root && $dropHover.el === root ? $dropHover : null);
-  const refusal = $derived(hover ? dropError(hover.protocol, hover.count) : null);
+  const busy = $derived(sessionId != null && $uploads.has(sessionId));
+  const refusal = $derived(
+    hover
+      ? busy
+        ? 'An upload is already running here'
+        : dropError(hover.protocol, hover.count)
+      : null
+  );
   const note = $derived(hover ? dropNote(hover.protocol, hover.count) : null);
   const view = $derived(sessionId == null ? undefined : $uploads.get(sessionId));
   const line = $derived(view ? progressLine(view) : null);

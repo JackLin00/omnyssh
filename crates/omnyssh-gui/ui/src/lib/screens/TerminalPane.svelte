@@ -426,14 +426,17 @@
     'term-btn grid h-6 w-6 place-items-center rounded transition ' +
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
   const toolBtnStyle = 'background: color-mix(in srgb, var(--term-fg) 8%, var(--term-bg));';
+  // The picker is a <Select> from another component, so the scoped `.term-btn` class can't
+  // reach it: its colour (and its chevron's) is passed as a style instead.
+  const pickerColor = 'color: color-mix(in srgb, var(--term-fg) 70%, var(--term-bg));';
   const titleBtn =
     'term-btn grid h-5 w-5 place-items-center rounded transition ' +
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
   // The upload protocol picker: as wide as its label, otherwise like the buttons.
   const toolPicker =
-    'term-btn h-6 rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+    'h-6 rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
   const titlePicker =
-    'term-btn h-5 rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+    'h-5 rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
 
   /** The action's current shortcut, formatted for a title, or empty when unbound. */
   function hint(action: TerminalAction): string {
@@ -564,7 +567,9 @@
 {#snippet protocolPicker(cls: string, style: string)}
   <Select
     class="{cls} cursor-pointer bg-transparent pl-1.5 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-40"
-    {style}
+    style="{style}{pickerColor}"
+    chevronStyle={pickerColor}
+    onchange={() => term?.focus()}
     aria-label="Upload protocol"
     title="Files dropped here upload with this"
     disabled={uploading}
@@ -608,10 +613,10 @@
         role="group"
         aria-label="Pane {hostName}"
         onpointerdown={(e) => {
-          if (e.button === 0 && !(e.target as Element).closest('button')) onMoveStart(e);
+          if (e.button === 0 && !(e.target as Element).closest('button, select')) onMoveStart(e);
         }}
         onmousedown={(e) => {
-          if (!(e.target as Element).closest('button')) e.preventDefault();
+          if (!(e.target as Element).closest('button, select')) e.preventDefault();
         }}
       >
         <StatusDot status={sessionStatusDot[status]} size={7} />
