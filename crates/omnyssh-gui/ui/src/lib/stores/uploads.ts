@@ -101,6 +101,9 @@ export async function startUpload(
   try {
     await send(id, protocol, paths);
   } catch (e) {
+    // The session ended first (a tab closed during an SFTP login): ids are never
+    // reused and a second start is refused, so a present entry is this upload's own.
+    if (!get(uploads).has(id)) return;
     endUpload(id);
     const message = e instanceof Error ? e.message : String(e);
     if (message !== 'cancelled') lastError.set(`Upload: ${message}`);
@@ -109,6 +112,9 @@ export async function startUpload(
 
 /** How much a new rate sample counts against the running rate. */
 const RATE_WEIGHT = 0.3;
+
+/** Events delivered bunched a few ms apart would otherwise read as huge rates. */
+const RATE_MIN_INTERVAL = 250;
 
 export function applyUploadProgress(p: UploadProgress, now: number = Date.now()): void {
   const view = get(uploads).get(p.sessionId);
@@ -120,9 +126,18 @@ export function applyUploadProgress(p: UploadProgress, now: number = Date.now())
   }
   const sameFile = view.phase === 'sending' && view.fileIndex === p.fileIndex;
   let rate = sameFile ? view.rate : 0;
-  if (sameFile && now > view.sampleAt && p.sent > view.sampleSent) {
-    const sample = ((p.sent - view.sampleSent) * 1000) / (now - view.sampleAt);
-    rate = rate === 0 ? sample : rate + RATE_WEIGHT * (sample - rate);
+  let sampleAt = now;
+  let sampleSent = p.sent;
+  if (sameFile) {
+    if (now - view.sampleAt < RATE_MIN_INTERVAL) {
+      sampleAt = view.sampleAt;
+      sampleSent = view.sampleSent;
+    } else if (p.sent > view.sampleSent) {
+      const sample = ((p.sent - view.sampleSent) * 1000) / (now - view.sampleAt);
+      rate = rate === 0 ? sample : rate + RATE_WEIGHT * (sample - rate);
+    }
+    // else a ZMODEM resend went back: the sample point drops to the lower value and
+    // the rate stays (it then counts resent bytes).
   }
   set(p.sessionId, {
     ...view,
@@ -133,8 +148,8 @@ export function applyUploadProgress(p: UploadProgress, now: number = Date.now())
     sent: p.sent,
     total: p.total,
     rate,
-    sampleAt: now,
-    sampleSent: p.sent
+    sampleAt,
+    sampleSent
   });
 }
 
@@ -148,10 +163,12 @@ export function endUpload(id: number | undefined): void {
   if (id != null && get(uploads).has(id)) set(id, null);
 }
 
-/** `512 B`, `1.2 KB`, `3.4 MB` (powers of 1024, like the backend's result line). */
+/** `512 B`, `1.2 KB`, `3.4 MB` (powers of 1024). Not the sftp.ts/sessionLog.ts
+ *  formatters: this mirrors the backend's result line. */
 export function formatSize(bytes: number): string {
   const units = ['KB', 'MB', 'GB', 'TB'];
-  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const whole = Math.round(bytes);
+  if (whole < 1024) return `${whole} B`;
   let value = bytes / 1024;
   let unit = 0;
   while (value >= 1023.95 && unit < units.length - 1) {

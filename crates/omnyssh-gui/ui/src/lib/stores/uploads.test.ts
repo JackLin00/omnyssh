@@ -82,6 +82,31 @@ describe('startUpload', () => {
   });
 });
 
+describe('a session that ends while send is pending', () => {
+  it('reports nothing when the tab ended first and the send then fails', async () => {
+    let reject!: (e: Error) => void;
+    const send = () => new Promise<void>((_, r) => (reject = r));
+    const started = startUpload(7, 'sftp', ['/a'], send);
+    endUpload(7);
+    reject(new Error('the terminal is closed'));
+    await started;
+    expect(get(lastError)).toBeNull();
+    expect(get(uploads).has(7)).toBe(false);
+  });
+
+  it('stays gone when progress and finished arrive before send resolves', async () => {
+    let resolve!: () => void;
+    const send = () => new Promise<void>((r) => (resolve = r));
+    const started = startUpload(7, 'zmodem', ['/a'], send);
+    applyUploadProgress(progress({ sent: 10 }), 1000);
+    applyUploadFinished({ sessionId: 7, ok: true, message: 'uploaded a (1 B)' });
+    expect(get(uploads).has(7)).toBe(false);
+    resolve();
+    await started;
+    expect(get(uploads).has(7)).toBe(false);
+  });
+});
+
 describe('progress', () => {
   it('moves from waiting to sending and computes a smoothed rate', async () => {
     await startUpload(7, 'zmodem', ['/a.bin'], recorder().send);
@@ -94,6 +119,18 @@ describe('progress', () => {
     applyUploadProgress(progress({ sent: 400 }), 3000);
     // 100 + 0.3 * (300 - 100)
     expect(get(uploads).get(7)!.rate).toBeCloseTo(160);
+  });
+
+  it('does not resample events delivered a few ms apart', async () => {
+    await startUpload(7, 'zmodem', ['/a.bin'], recorder().send);
+    applyUploadProgress(progress({ sent: 0 }), 1000);
+    applyUploadProgress(progress({ sent: 100 }), 2000);
+    applyUploadProgress(progress({ sent: 10_000 }), 2005);
+    expect(get(uploads).get(7)!.rate).toBe(100);
+    expect(get(uploads).get(7)!.sent).toBe(10_000);
+    // measured from the 2000 sample: (10100 - 100) per second over 1000 ms
+    applyUploadProgress(progress({ sent: 10_100 }), 3000);
+    expect(get(uploads).get(7)!.rate).toBeCloseTo(100 + 0.3 * (10_000 - 100));
   });
 
   it('starts the rate over on the next file, and ignores a resend going back', async () => {
@@ -154,6 +191,7 @@ describe('display', () => {
 
   it('formats sizes like the backend', () => {
     expect(formatSize(1023)).toBe('1023 B');
+    expect(formatSize(1023.6)).toBe('1.0 KB');
     expect(formatSize(1024)).toBe('1.0 KB');
     expect(formatSize(1_048_575)).toBe('1.0 MB');
   });
