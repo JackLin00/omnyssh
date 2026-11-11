@@ -1,8 +1,12 @@
 //! Drag-and-drop upload commands. Each checks the drop first (folders, XMODEM's
 //! one file, ZMODEM's limits, an upload already running), so a refused drop
 //! sends nothing. Progress and the end arrive as `upload-progress` and
-//! `upload-finished`; a command that returns `Ok` is always followed by one
-//! `upload-finished` while its session is open; a closed tab gets none.
+//! `upload-finished`. After a command returns `Ok`, the upload ends with one
+//! `upload-finished`, or, if its session ends first, with no upload event at
+//! all: the frontend also treats `terminal-exited`, the serial tab's exit
+//! channel and closing the tab as the end. (An SFTP upload whose terminal's
+//! shell exits remotely, and one queued while a terminal was still connecting
+//! whose connection then failed, get no `upload-finished`.)
 
 use std::time::Instant;
 

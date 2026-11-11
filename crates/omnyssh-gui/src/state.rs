@@ -588,14 +588,17 @@ impl GuiState {
         upload: ActiveUpload,
     ) -> Result<(), String> {
         let mut upload = Some(upload);
+        let mut sent = false;
         self.on_pty_inner(public, |pty, inner| {
             if let Some(upload) = upload.take() {
-                pty.upload(inner, preamble, upload);
+                sent = pty.upload(inner, preamble, upload);
             }
         });
-        match upload {
-            None => Ok(()),
-            Some(_) => Err("the terminal is closed".to_string()),
+        // Not sent: unknown, or its task ended and the exit is not bridged yet.
+        if sent {
+            Ok(())
+        } else {
+            Err("the terminal is closed".to_string())
         }
     }
 

@@ -682,14 +682,18 @@ impl PtyManager {
 
     /// Sends `preamble` (`rz -b\r` for ZMODEM) to session `id` and runs
     /// `upload` over it until it ends, reported as [`CoreEvent::Upload`]. The
-    /// caller makes sure no other upload is running there. Unknown id: no-op.
-    pub fn upload(&mut self, id: SessionId, preamble: &[u8], upload: ActiveUpload) {
-        if let Some(s) = self.sessions.iter().find(|s| s.id == id) {
-            let _ = s.ctrl_tx.send(Ctrl::Upload {
-                preamble: preamble.to_vec(),
-                upload,
-            });
-        }
+    /// caller makes sure no other upload is running there. Returns whether the
+    /// session task took it; `false` (unknown id, or the task already ended)
+    /// means nothing will run and no end will be reported.
+    pub fn upload(&mut self, id: SessionId, preamble: &[u8], upload: ActiveUpload) -> bool {
+        self.sessions.iter().find(|s| s.id == id).is_some_and(|s| {
+            s.ctrl_tx
+                .send(Ctrl::Upload {
+                    preamble: preamble.to_vec(),
+                    upload,
+                })
+                .is_ok()
+        })
     }
 
     /// Cancels the upload running in session `id`, if any.
@@ -752,6 +756,19 @@ mod tests {
     fn typed(chunks: &[&[u8]]) -> Option<Option<String>> {
         let mut line = PasswordLine::default();
         chunks.iter().find_map(|chunk| line.feed(chunk))
+    }
+
+    #[test]
+    fn an_upload_to_an_unknown_session_is_refused() {
+        use crate::transfer::{ActiveUpload, Protocol, UploadFile};
+        let file = UploadFile {
+            name: "a.bin".to_string(),
+            size: 1,
+            modified: None,
+            reader: Box::new(std::io::Cursor::new(vec![0u8])),
+        };
+        let upload = ActiveUpload::start(Protocol::Zmodem, vec![file], std::time::Instant::now());
+        assert!(!PtyManager::new().upload(99, b"rz -b\r", upload));
     }
 
     #[test]
