@@ -61,6 +61,9 @@ pub struct ActiveUpload {
     reported_at: Option<Instant>,
     /// Set when the upload is first seen ended.
     drain_until: Option<Instant>,
+    /// ZMODEM: an upload that ends in failure or cancellation drops what is
+    /// queued, so its cancel sequence is not stuck behind file data.
+    discard_on_end: bool,
 }
 
 impl ActiveUpload {
@@ -68,16 +71,21 @@ impl ActiveUpload {
     /// one file for XMODEM (see [`start`]).
     pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Self {
         let names = files.iter().map(|f| (f.name.clone(), f.size)).collect();
-        Self::new(start(protocol, files, now), names)
+        Self::new(
+            start(protocol, files, now),
+            names,
+            protocol == Protocol::Zmodem,
+        )
     }
 
-    fn new(upload: Box<dyn Upload>, files: Vec<(String, u64)>) -> Self {
+    fn new(upload: Box<dyn Upload>, files: Vec<(String, u64)>, discard_on_end: bool) -> Self {
         Self {
             upload,
             files,
             reported: None,
             reported_at: None,
             drain_until: None,
+            discard_on_end,
         }
     }
 
@@ -102,6 +110,16 @@ impl ActiveUpload {
     /// has ended and everything was sent, or `DRAIN_LIMIT` has passed since it
     /// ended; `pending` is then cleared, and the session leaves upload mode.
     pub fn pump(&mut self, now: Instant, pending: &mut Vec<u8>) -> Option<Finished> {
+        // On a slow line `pending` can hold seconds of file data. ZMODEM's
+        // cancel sequence works mid-frame, so when the upload first ends
+        // badly the stale data goes, and the sequence below is sent next.
+        // (XMODEM/YMODEM keep their block: a cancel must not land inside it.)
+        if self.drain_until.is_none() && self.discard_on_end {
+            let state = self.upload.state();
+            if state.is_final() && !matches!(state, UploadState::Done { .. }) {
+                pending.clear();
+            }
+        }
         if pending.is_empty() {
             self.upload.transmit(pending);
         }
@@ -140,9 +158,14 @@ impl ActiveUpload {
 
     /// The connection ended in the middle of the upload.
     pub fn lost(mut self) -> Finished {
-        let result = UploadResult {
-            ok: false,
-            message: "the connection was lost".to_string(),
+        let state = self.upload.state();
+        let result = if state.is_final() {
+            self.result(&state)
+        } else {
+            UploadResult {
+                ok: false,
+                message: "the connection was lost".to_string(),
+            }
         };
         let mut output = self.upload.leftover();
         output.extend_from_slice(result.line().as_bytes());
@@ -193,7 +216,8 @@ pub fn human_size(bytes: u64) -> String {
     }
     let mut value = bytes as f64 / 1024.0;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    // 1023.95 and up would print as "1024.0".
+    while value >= 1023.95 && unit < UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
@@ -252,10 +276,18 @@ mod tests {
     }
 
     fn fake(files: &[(&str, u64)]) -> (ActiveUpload, Arc<Mutex<Script>>) {
+        fake_with(files, false)
+    }
+
+    fn fake_zmodem(files: &[(&str, u64)]) -> (ActiveUpload, Arc<Mutex<Script>>) {
+        fake_with(files, true)
+    }
+
+    fn fake_with(files: &[(&str, u64)], discard: bool) -> (ActiveUpload, Arc<Mutex<Script>>) {
         let script = Arc::new(Mutex::new(Script::default()));
         let files = files.iter().map(|(n, s)| (n.to_string(), *s)).collect();
         (
-            ActiveUpload::new(Box::new(Fake(Arc::clone(&script))), files),
+            ActiveUpload::new(Box::new(Fake(Arc::clone(&script))), files, discard),
             script,
         )
     }
@@ -394,6 +426,70 @@ mod tests {
         assert_eq!(human_size(1024), "1.0 KB");
         assert_eq!(human_size(1_258_291), "1.2 MB");
         assert_eq!(human_size(5 << 30), "5.0 GB");
+        assert_eq!(human_size(1_048_575), "1.0 MB");
+        assert_eq!(human_size((1 << 30) - 1), "1.0 GB");
+        assert_eq!(human_size(3 << 40), "3.0 TB");
+    }
+
+    #[test]
+    fn a_zmodem_cancel_drops_queued_file_data() {
+        let (mut up, _script) = fake_zmodem(&[("a.bin", 100)]);
+        up.cancel();
+        let mut pending = b"stale file data".to_vec();
+        assert_eq!(up.pump(Instant::now(), &mut pending), None);
+        assert_eq!(pending, b"CANCEL");
+    }
+
+    #[test]
+    fn an_xmodem_cancel_keeps_the_block_in_flight() {
+        let (mut up, _script) = fake(&[("a.bin", 100)]);
+        up.cancel();
+        let mut pending = b"block".to_vec();
+        assert_eq!(up.pump(Instant::now(), &mut pending), None);
+        assert_eq!(pending, b"block");
+    }
+
+    #[test]
+    fn a_finished_zmodem_upload_keeps_what_is_queued() {
+        let (mut up, script) = fake_zmodem(&[("a.bin", 100)]);
+        script.lock().unwrap().state = Some(UploadState::Done {
+            sent_files: 1,
+            skipped: 0,
+        });
+        let mut pending = b"tail".to_vec();
+        assert_eq!(up.pump(Instant::now(), &mut pending), None);
+        assert_eq!(pending, b"tail");
+    }
+
+    #[test]
+    fn a_connection_lost_after_the_end_keeps_the_result() {
+        let (up, script) = fake(&[("a.bin", 2048)]);
+        script.lock().unwrap().state = Some(UploadState::Done {
+            sent_files: 1,
+            skipped: 0,
+        });
+        let end = up.lost();
+        assert!(end.result.ok, "{:?}", end.result);
+        assert_eq!(end.result.message, "uploaded a.bin (2.0 KB)");
+    }
+
+    #[test]
+    fn the_drain_limit_also_ends_a_finished_upload_on_a_stalled_line() {
+        let (mut up, script) = fake(&[("a.bin", 100)]);
+        script.lock().unwrap().state = Some(UploadState::Done {
+            sent_files: 1,
+            skipped: 0,
+        });
+        let t = Instant::now();
+        let mut pending = b"OO".to_vec();
+        assert_eq!(up.pump(t, &mut pending), None);
+        assert_eq!(
+            up.pump(t + DRAIN_LIMIT - Duration::from_millis(1), &mut pending),
+            None
+        );
+        let end = up.pump(t + DRAIN_LIMIT, &mut pending).expect("gave up");
+        assert!(end.result.ok);
+        assert!(pending.is_empty());
     }
 
     #[test]
