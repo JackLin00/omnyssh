@@ -8,6 +8,7 @@ use omnyssh_core::config::serial_devices::{
 };
 use omnyssh_core::event::SessionId;
 use omnyssh_core::serial::{self, SerialOutput, SerialSession};
+use omnyssh_core::transfer::UploadEvent;
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -59,6 +60,8 @@ pub async fn serial_open(
                 |error| {
                     let _ = on_exit.send(SerialExitDto { error });
                 },
+                // Nothing starts an upload yet.
+                |_| {},
             )
         })
     })
@@ -74,13 +77,16 @@ pub async fn serial_open(
 }
 
 /// Pass one event of serial session `id` on: received bytes to its log, if one is
-/// being written, and to the tab; a failure ends the log, then reaches the tab.
+/// being written, and to the tab; a failure ends the log, then reaches the tab;
+/// upload events go out as `upload-*` events. During an upload no protocol bytes
+/// come as `Data`, so none reach the log; its result line does.
 fn route_output(
     logs: &SessionLogs,
     id: SessionId,
     out: SerialOutput,
     data: impl FnOnce(Vec<u8>),
     exit: impl FnOnce(String),
+    upload: impl FnOnce(UploadEvent),
 ) {
     match out {
         SerialOutput::Data(bytes) => {
@@ -93,6 +99,7 @@ fn route_output(
         }
         // Closed by the user: the tab is already gone, and `serial_close` ends the log.
         SerialOutput::Closed(None) => {}
+        SerialOutput::Upload(event) => upload(event),
     }
 }
 
@@ -205,6 +212,7 @@ mod tests {
     use omnyssh_core::config::serial_devices::LineEnding;
     use omnyssh_core::serial::{FlowControl, Parity, StopBits};
     use omnyssh_core::session_log::{SessionLogger, TextLogger, NATIVE_NEWLINE};
+    use omnyssh_core::transfer::UploadState;
     use std::sync::{Arc, Mutex};
 
     fn device(name: &str, port: &str) -> SerialDevice {
@@ -267,6 +275,31 @@ mod tests {
     }
 
     #[test]
+    fn upload_events_go_to_their_own_route_not_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("COM3.log");
+        let logs = SessionLogs::default();
+        let logger = SessionLogger::Text(TextLogger::new(false, NATIVE_NEWLINE));
+        logs.start(4, &path, logger, "# COM3").unwrap();
+
+        let mut got = None;
+        route_output(
+            &logs,
+            4,
+            SerialOutput::Upload(UploadEvent::Progress(UploadState::Waiting)),
+            |_| panic!("not terminal output"),
+            |_| panic!("not an exit"),
+            |e| got = Some(e),
+        );
+        assert_eq!(got, Some(UploadEvent::Progress(UploadState::Waiting)));
+        logs.stop(4);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("# COM3{NATIVE_NEWLINE}")
+        );
+    }
+
+    #[test]
     fn serial_output_reaches_the_log_and_a_failure_ends_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("COM3.log");
@@ -284,6 +317,7 @@ mod tests {
             SerialOutput::Data(b"boot ok\n".to_vec()),
             |b| shown = b,
             |_| {},
+            |_| {},
         );
         assert_eq!(shown, b"boot ok\n");
         let mut why = None;
@@ -293,6 +327,7 @@ mod tests {
             SerialOutput::Closed(Some("unplugged".to_string())),
             |_| {},
             |e| why = Some(e),
+            |_| {},
         );
         assert_eq!(why.as_deref(), Some("unplugged"));
         assert!(!logs.is_logging(4));

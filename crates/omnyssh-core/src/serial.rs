@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::transfer::{ActiveUpload, UploadEvent};
+
 /// How long one read or one write attempt waits before the loop checks for
 /// new input again. Because it bounds writes too, a single stalled write
 /// (CTS low, XOFF, a device not reading) cannot block past this — the loop
@@ -84,10 +86,22 @@ pub enum SerialOutput {
     /// The session ended; sent exactly once. `None` when the caller closed it,
     /// the reason when the port failed (adapter unplugged, driver error).
     Closed(Option<String>),
+    /// How the upload started with [`SerialSession::upload`] is going. While
+    /// one runs, received bytes go to it instead of `Data`; at the end the
+    /// device's last output and the result line come as `Data`, then
+    /// `Finished`.
+    Upload(UploadEvent),
 }
 
 enum Ctrl {
     Write(Vec<u8>),
+    /// Sends `preamble` and enters upload mode in one step, so no byte read in
+    /// between can miss the upload (`rz`'s first ZRINIT, say).
+    Upload {
+        preamble: Vec<u8>,
+        upload: ActiveUpload,
+    },
+    CancelUpload,
     Close,
 }
 
@@ -153,6 +167,20 @@ impl SerialSession {
     /// Queues bytes for the device. A no-op once the session has ended.
     pub fn write(&self, data: &[u8]) {
         let _ = self.ctrl.send(Ctrl::Write(data.to_vec()));
+    }
+
+    /// Sends `preamble` (`rz -b\r` for ZMODEM, nothing for X/YMODEM) and runs
+    /// `upload` until it ends. The caller makes sure no other upload is running.
+    pub fn upload(&self, preamble: &[u8], upload: ActiveUpload) {
+        let _ = self.ctrl.send(Ctrl::Upload {
+            preamble: preamble.to_vec(),
+            upload,
+        });
+    }
+
+    /// Cancels the running upload, if any.
+    pub fn cancel_upload(&self) {
+        let _ = self.ctrl.send(Ctrl::CancelUpload);
     }
 
     /// Asks the session to close the port. Non-blocking: the thread finishes
@@ -223,6 +251,9 @@ fn data_bits(bits: u8) -> Result<serialport::DataBits> {
 /// one write of it, then — unless closing — wait up to `IO_TIMEOUT` for bytes.
 /// Runs until closed or the port fails; reports `Closed` exactly once.
 ///
+/// During an upload the received bytes go to it, and it adds to `pending`
+/// whenever `pending` is empty, so the same bounded writes carry it.
+///
 /// Writes never call `write_all`/`flush`: on a stalled line those can block for
 /// as long as the OS lets them (on Windows, `FlushFileBuffers` can wait
 /// forever), holding the port's exclusive lock. Instead each iteration makes
@@ -235,16 +266,41 @@ fn run<P: Read + Write>(
 ) {
     let mut buf = [0u8; 4096];
     let mut pending: Vec<u8> = Vec::new();
+    let mut upload: Option<ActiveUpload> = None;
     loop {
         let mut closing = false;
         loop {
             match ctrl.try_recv() {
                 Ok(Ctrl::Write(data)) => pending.extend_from_slice(&data),
+                Ok(Ctrl::Upload {
+                    preamble,
+                    upload: started,
+                }) => {
+                    pending.extend_from_slice(&preamble);
+                    upload = Some(started);
+                }
+                Ok(Ctrl::CancelUpload) => {
+                    if let Some(up) = upload.as_mut() {
+                        up.cancel();
+                    }
+                }
                 Ok(Ctrl::Close) | Err(TryRecvError::Disconnected) => {
                     closing = true;
                     break;
                 }
                 Err(TryRecvError::Empty) => break,
+            }
+        }
+
+        if let Some(up) = upload.as_mut() {
+            let now = Instant::now();
+            up.tick(now);
+            if let Some(end) = up.pump(now, &mut pending) {
+                upload = None;
+                on_output(SerialOutput::Data(end.output));
+                on_output(SerialOutput::Upload(UploadEvent::Finished(end.result)));
+            } else if let Some(state) = up.progress(now) {
+                on_output(SerialOutput::Upload(UploadEvent::Progress(state)));
             }
         }
 
@@ -259,6 +315,7 @@ fn run<P: Read + Write>(
                         ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
                     ) => {}
                 Err(e) => {
+                    end_upload(upload, &mut on_output);
                     on_output(SerialOutput::Closed(Some(e.to_string())));
                     return;
                 }
@@ -286,20 +343,34 @@ fn run<P: Read + Write>(
         match port.read(&mut buf) {
             // Windows never returns this; POSIX does on hang-up.
             Ok(0) => {
+                end_upload(upload, &mut on_output);
                 on_output(SerialOutput::Closed(Some("port closed".to_string())));
                 return;
             }
-            Ok(n) => on_output(SerialOutput::Data(buf[..n].to_vec())),
+            Ok(n) => match upload.as_mut() {
+                Some(up) => up.receive(&buf[..n], Instant::now()),
+                None => on_output(SerialOutput::Data(buf[..n].to_vec())),
+            },
             Err(e)
                 if matches!(
                     e.kind(),
                     ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
                 ) => {}
             Err(e) => {
+                end_upload(upload, &mut on_output);
                 on_output(SerialOutput::Closed(Some(e.to_string())));
                 return;
             }
         }
+    }
+}
+
+/// The port failed during an upload: report it lost before the session ends.
+fn end_upload(upload: Option<ActiveUpload>, on_output: &mut impl FnMut(SerialOutput)) {
+    if let Some(up) = upload {
+        let end = up.lost();
+        on_output(SerialOutput::Data(end.output));
+        on_output(SerialOutput::Upload(UploadEvent::Finished(end.result)));
     }
 }
 
@@ -322,6 +393,8 @@ mod tests {
         /// progress — enough to defeat an attempt-count bound, not a time one.
         max_write_chunk: Option<usize>,
         written: Arc<Mutex<Vec<u8>>>,
+        /// Reads after the scripted ones, sent by the test while the session runs.
+        feed: Option<mpsc::Receiver<io::Result<Vec<u8>>>>,
     }
 
     impl FakePort {
@@ -342,8 +415,17 @@ mod tests {
                 writes: writes.into(),
                 max_write_chunk: None,
                 written: Arc::clone(&written),
+                feed: None,
             };
             (port, written)
+        }
+
+        /// A port whose reads come from the returned sender, one chunk per read.
+        fn fed() -> (Self, Arc<Mutex<Vec<u8>>>, Feed) {
+            let (mut port, written) = Self::new(vec![]);
+            let (tx, rx) = mpsc::channel();
+            port.feed = Some(rx);
+            (port, written, tx)
         }
 
         /// A port that only ever accepts `chunk` bytes per `write` call, no
@@ -355,6 +437,9 @@ mod tests {
         }
     }
 
+    /// Sends a fed port its next read.
+    type Feed = mpsc::Sender<io::Result<Vec<u8>>>;
+
     impl Read for FakePort {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             match self.reads.pop_front() {
@@ -363,10 +448,17 @@ mod tests {
                     Ok(chunk.len())
                 }
                 Some(Err(e)) => Err(e),
-                None => {
-                    thread::sleep(Duration::from_millis(1));
-                    Err(io::Error::new(ErrorKind::TimedOut, "timed out"))
-                }
+                None => match self.feed.as_ref().and_then(|f| f.try_recv().ok()) {
+                    Some(Ok(chunk)) => {
+                        buf[..chunk.len()].copy_from_slice(&chunk);
+                        Ok(chunk.len())
+                    }
+                    Some(Err(e)) => Err(e),
+                    None => {
+                        thread::sleep(Duration::from_millis(1));
+                        Err(io::Error::new(ErrorKind::TimedOut, "timed out"))
+                    }
+                },
             }
         }
     }
@@ -528,6 +620,116 @@ mod tests {
         assert_eq!(
             next(&rx),
             SerialOutput::Closed(Some("port closed".to_string()))
+        );
+    }
+
+    use crate::transfer::{Protocol, UploadFile, UploadResult, UploadState};
+
+    const ACK: u8 = 0x06;
+
+    fn one_block_file() -> UploadFile {
+        UploadFile {
+            name: "a.bin".to_string(),
+            size: 128,
+            modified: None,
+            reader: Box::new(io::Cursor::new(vec![7u8; 128])),
+        }
+    }
+
+    /// Waits until the port has been written at least `len` bytes.
+    fn written_len(written: &Arc<Mutex<Vec<u8>>>, len: usize) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let w = written.lock().unwrap().clone();
+            if w.len() >= len {
+                return w;
+            }
+            assert!(Instant::now() < deadline, "only {} bytes written", w.len());
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Outputs up to and including the upload's `Finished`.
+    fn until_finished(rx: &mpsc::Receiver<SerialOutput>) -> (Vec<SerialOutput>, UploadResult) {
+        let mut seen = Vec::new();
+        loop {
+            match next(rx) {
+                SerialOutput::Upload(UploadEvent::Finished(result)) => return (seen, result),
+                other => seen.push(other),
+            }
+        }
+    }
+
+    #[test]
+    fn an_upload_takes_the_received_bytes_and_ends_with_a_line() {
+        let (port, written, feed) = FakePort::fed();
+        let (session, rx) = start(port);
+        let upload = ActiveUpload::start(Protocol::Xmodem, vec![one_block_file()], Instant::now());
+        session.upload(b"", upload);
+
+        feed.send(Ok(b"C".to_vec())).unwrap();
+        let block = written_len(&written, 133);
+        assert_eq!(block[0], 0x01, "a 128-byte block");
+        feed.send(Ok(vec![ACK])).unwrap();
+        assert_eq!(written_len(&written, 134)[133], 0x04, "EOT");
+        feed.send(Ok([&[ACK][..], b"=> "].concat())).unwrap();
+
+        let (seen, result) = until_finished(&rx);
+        assert!(result.ok, "{result:?}");
+        let data: Vec<&Vec<u8>> = seen
+            .iter()
+            .filter_map(|o| match o {
+                SerialOutput::Data(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            data,
+            [&b"=> \r\n[upload] uploaded a.bin (128 B)\r\n".to_vec()],
+            "protocol bytes never reach the terminal"
+        );
+        assert!(seen.contains(&SerialOutput::Upload(UploadEvent::Progress(
+            UploadState::Waiting
+        ))));
+
+        // Back to the terminal afterwards.
+        feed.send(Ok(b"ok".to_vec())).unwrap();
+        assert_eq!(next(&rx), SerialOutput::Data(b"ok".to_vec()));
+    }
+
+    #[test]
+    fn the_preamble_goes_out_and_a_cancel_ends_the_upload() {
+        let (port, written, _feed) = FakePort::fed();
+        let (session, rx) = start(port);
+        let upload = ActiveUpload::start(Protocol::Zmodem, vec![one_block_file()], Instant::now());
+        session.upload(b"rz -b\r", upload);
+        assert_eq!(written_len(&written, 6), b"rz -b\r");
+        session.cancel_upload();
+
+        let (seen, result) = until_finished(&rx);
+        assert_eq!(result.message, "cancelled");
+        assert!(seen.contains(&SerialOutput::Data(b"\r\n[upload] cancelled\r\n".to_vec())));
+        let w = written.lock().unwrap().clone();
+        assert!(
+            w[6..].starts_with(&[0x18; 10]),
+            "the cancel sequence: {w:?}"
+        );
+    }
+
+    #[test]
+    fn a_port_failing_mid_upload_reports_the_upload_lost() {
+        let (port, _written, feed) = FakePort::fed();
+        let (session, rx) = start(port);
+        let upload = ActiveUpload::start(Protocol::Xmodem, vec![one_block_file()], Instant::now());
+        session.upload(b"", upload);
+        feed.send(Err(io::Error::new(ErrorKind::BrokenPipe, "device removed")))
+            .unwrap();
+
+        let (_, result) = until_finished(&rx);
+        assert_eq!(result.message, "the connection was lost");
+        assert_eq!(
+            next(&rx),
+            SerialOutput::Closed(Some("device removed".to_string()))
         );
     }
 
