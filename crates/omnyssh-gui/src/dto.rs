@@ -12,11 +12,14 @@ use omnyssh_core::event::{
     DetectedService, KeyFingerprint, MetricValue, Metrics, ProcessInfo, ServiceKind, ServiceMetric,
 };
 use omnyssh_core::serial::{FlowControl, Parity, PortInfo, SerialConfig, StopBits};
-use omnyssh_core::ssh::client::{ConnectionStatus, Host, HostSource, MonitorMode};
+use omnyssh_core::ssh::client::{
+    ConnectionStatus, Host, HostSource, HostUploadProtocol, MonitorMode,
+};
 use omnyssh_core::ssh::host_key::Decision;
 use omnyssh_core::ssh::key_setup::KeySetupStep;
 use omnyssh_core::ssh::sftp::FileEntry;
 use omnyssh_core::ssh::tunnel::{LocalForward, TunnelStatus};
+use omnyssh_core::transfer::Protocol;
 use omnyssh_core::update::UpdateInfo;
 
 /// Host origin, mirrors `omnyssh_core::ssh::client::HostSource`.
@@ -54,6 +57,63 @@ impl From<MonitorModeDto> for MonitorMode {
     }
 }
 
+/// How a file dropped on a host's terminal is sent, mirrors `HostUploadProtocol`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum HostUploadProtocolDto {
+    #[default]
+    Zmodem,
+    Sftp,
+}
+
+impl From<HostUploadProtocol> for HostUploadProtocolDto {
+    fn from(protocol: HostUploadProtocol) -> Self {
+        match protocol {
+            HostUploadProtocol::Zmodem => Self::Zmodem,
+            HostUploadProtocol::Sftp => Self::Sftp,
+        }
+    }
+}
+
+impl From<HostUploadProtocolDto> for HostUploadProtocol {
+    fn from(protocol: HostUploadProtocolDto) -> Self {
+        match protocol {
+            HostUploadProtocolDto::Zmodem => Self::Zmodem,
+            HostUploadProtocolDto::Sftp => Self::Sftp,
+        }
+    }
+}
+
+/// How a file dropped on a serial tab is sent, mirrors `transfer::Protocol`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SerialUploadProtocolDto {
+    #[default]
+    Zmodem,
+    Ymodem,
+    Xmodem,
+}
+
+impl From<Protocol> for SerialUploadProtocolDto {
+    fn from(protocol: Protocol) -> Self {
+        match protocol {
+            Protocol::Zmodem => Self::Zmodem,
+            Protocol::Ymodem => Self::Ymodem,
+            Protocol::Xmodem => Self::Xmodem,
+        }
+    }
+}
+
+impl From<SerialUploadProtocolDto> for Protocol {
+    fn from(protocol: SerialUploadProtocolDto) -> Self {
+        match protocol {
+            SerialUploadProtocolDto::Zmodem => Self::Zmodem,
+            SerialUploadProtocolDto::Ymodem => Self::Ymodem,
+            SerialUploadProtocolDto::Xmodem => Self::Xmodem,
+        }
+    }
+}
+
 /// A host as the frontend sees it — password and private-key material omitted
 /// (tech-gui.md §3.4). `hasKey` reports whether an identity file is configured;
 /// the key path itself never crosses the boundary.
@@ -77,6 +137,12 @@ pub struct HostDto {
     pub local_forwards: Vec<LocalForwardDto>,
     pub tunnel_autostart: bool,
     pub forward_agent: bool,
+    // Optional on the wire (`serde(default)`) so frontends that predate drag-and-drop
+    // upload still type-check; always sent.
+    #[serde(default)]
+    pub upload_protocol: HostUploadProtocolDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_dir: Option<String>,
 }
 
 /// One `ssh -L` rule (tech-gui.md §4.1): listen on `bindAddress:bindPort` here and
@@ -135,6 +201,12 @@ pub struct HostInputDto {
     pub local_forwards: Vec<LocalForwardDto>,
     pub tunnel_autostart: bool,
     pub forward_agent: bool,
+    /// Left out means unchanged, like `monitoring`; `uploadDir` goes with it.
+    #[serde(default)]
+    pub upload_protocol: Option<HostUploadProtocolDto>,
+    /// Blank means the home directory.
+    #[serde(default)]
+    pub upload_dir: Option<String>,
 }
 
 /// What this desktop allows the tray (tech-gui.md §4.2 `set_tray_behavior`): an icon
@@ -421,6 +493,9 @@ pub struct SerialDeviceDto {
     pub config: SerialConfigDto,
     pub enter: LineEndingDto,
     pub notes: Option<String>,
+    // Optional on the wire, like `HostDto::upload_protocol`; left out means ZMODEM.
+    #[serde(default)]
+    pub upload_protocol: SerialUploadProtocolDto,
 }
 
 impl From<&SerialDevice> for SerialDeviceDto {
@@ -452,6 +527,7 @@ impl From<&SerialDevice> for SerialDeviceDto {
                 LineEnding::Crlf => LineEndingDto::Crlf,
             },
             notes: d.notes.clone(),
+            upload_protocol: d.upload_protocol.into(),
         }
     }
 }
@@ -477,6 +553,7 @@ impl From<SerialDeviceDto> for SerialDevice {
                 .notes
                 .map(|n| n.trim().to_string())
                 .filter(|n| !n.is_empty()),
+            upload_protocol: dto.upload_protocol.into(),
         }
     }
 }
@@ -507,6 +584,8 @@ impl From<&Host> for HostDto {
             local_forwards: host.local_forwards.iter().map(Into::into).collect(),
             tunnel_autostart: host.tunnel_autostart,
             forward_agent: host.forward_agent,
+            upload_protocol: host.upload_protocol.into(),
+            upload_dir: host.upload_dir.clone(),
         }
     }
 }
@@ -597,6 +676,8 @@ impl From<HostInputDto> for Host {
             local_forwards: dto.local_forwards.into_iter().map(Into::into).collect(),
             tunnel_autostart: dto.tunnel_autostart,
             forward_agent: dto.forward_agent,
+            upload_protocol: dto.upload_protocol.map(Into::into).unwrap_or_default(),
+            upload_dir: non_empty(dto.upload_dir.map(|d| d.trim().to_string())),
             key_setup_date: None,
             password_auth_disabled: None,
         }
@@ -1004,6 +1085,8 @@ mod tests {
             local_forwards: vec![],
             tunnel_autostart: false,
             forward_agent: false,
+            upload_protocol: None,
+            upload_dir: None,
         }
     }
 
@@ -1028,6 +1111,55 @@ mod tests {
         assert!(host.original_ssh_host.is_none());
         assert!(host.key_setup_date.is_none());
         assert!(host.password_auth_disabled.is_none());
+    }
+
+    #[test]
+    fn upload_settings_cross_both_ways() {
+        let mut input = full_input();
+        input.upload_protocol = Some(HostUploadProtocolDto::Sftp);
+        input.upload_dir = Some(" ~/drop ".to_string());
+        let host = Host::from(input);
+        assert_eq!(host.upload_protocol, HostUploadProtocol::Sftp);
+        assert_eq!(host.upload_dir.as_deref(), Some("~/drop"));
+        let json = serde_json::to_value(HostDto::from(&host)).unwrap();
+        assert_eq!(json["uploadProtocol"], "sftp");
+        assert_eq!(json["uploadDir"], "~/drop");
+
+        // A payload from a form that predates upload settings still reads.
+        let old: HostInputDto = serde_json::from_value(serde_json::json!({
+            "name": "a", "hostname": "h", "user": "u", "port": 22, "tags": [],
+            "localForwards": [], "tunnelAutostart": false, "forwardAgent": false
+        }))
+        .unwrap();
+        assert_eq!(old.upload_protocol, None);
+    }
+
+    #[test]
+    fn a_serial_device_keeps_its_upload_protocol() {
+        let device = SerialDevice {
+            name: "board".to_string(),
+            port: "COM3".to_string(),
+            baud_rate: 115_200,
+            data_bits: 8,
+            parity: Parity::None,
+            stop_bits: StopBits::One,
+            flow_control: FlowControl::None,
+            enter: LineEnding::Cr,
+            notes: None,
+            upload_protocol: Protocol::Ymodem,
+        };
+        let dto = SerialDeviceDto::from(&device);
+        assert_eq!(dto.upload_protocol, SerialUploadProtocolDto::Ymodem);
+        assert_eq!(SerialDevice::from(dto), device);
+        // Left out means ZMODEM.
+        let old: SerialDeviceDto = serde_json::from_value(serde_json::json!({
+            "name": "b",
+            "config": {"port": "COM1", "baudRate": 9600, "dataBits": 8, "parity": "none",
+                       "stopBits": "one", "flowControl": "none"},
+            "enter": "cr", "notes": null
+        }))
+        .unwrap();
+        assert_eq!(old.upload_protocol, SerialUploadProtocolDto::Zmodem);
     }
 
     #[test]
@@ -1060,8 +1192,11 @@ mod tests {
             local_forwards: vec![],
             tunnel_autostart: false,
             forward_agent: false,
+            upload_protocol: None,
+            upload_dir: Some("  ".to_string()),
         });
         assert!(host.identity_file.is_none());
+        assert!(host.upload_dir.is_none(), "a blank upload dir means home");
         assert!(host.password.is_none());
         assert!(host.proxy_jump.is_none());
         assert!(host.notes.is_none());

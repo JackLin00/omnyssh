@@ -293,6 +293,8 @@ impl HostForm {
             local_forwards,
             tunnel_autostart,
             forward_agent,
+            upload_protocol: Default::default(),
+            upload_dir: None,
             key_setup_date: None,
             password_auth_disabled: None,
         })
@@ -577,6 +579,11 @@ impl App {
                         // Nor has IdentitiesOnly, and losing it brings back a login
                         // that offers every agent key.
                         host.identities_only = old_host.is_some_and(|h| h.identities_only);
+                        // Nor have the desktop's upload settings.
+                        if let Some(old) = old_host {
+                            host.upload_protocol = old.upload_protocol;
+                            host.upload_dir = old.upload_dir.clone();
+                        }
 
                         // An import is adopted under the name it was imported by; a copy
                         // already adopted keeps the one it carries. Dropping it brings the

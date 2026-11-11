@@ -129,6 +129,9 @@ fn upsert(hosts: &mut Vec<Host>, input: HostInputDto, imported: Option<Host>) {
     // An omitted monitoring mode means "unchanged", not "back to SSH" — losing it
     // would silently start logging in to a device chosen for reachability only.
     let monitoring_given = input.monitoring.is_some();
+    // Likewise an omitted upload protocol: a form that predates it must not reset
+    // an SFTP host to ZMODEM.
+    let upload_given = input.upload_protocol.is_some();
     let mut host = Host::from(input);
     match hosts.iter().position(|h| h.name == host.name) {
         Some(i) => {
@@ -136,6 +139,10 @@ fn upsert(hosts: &mut Vec<Host>, input: HostInputDto, imported: Option<Host>) {
             if !monitoring_given {
                 host.monitoring = existing.monitoring;
                 host.monitor_port = existing.monitor_port;
+            }
+            if !upload_given {
+                host.upload_protocol = existing.upload_protocol;
+                host.upload_dir = existing.upload_dir.clone();
             }
             host.password = host.password.or_else(|| existing.password.clone());
             host.identity_file = host
@@ -176,7 +183,12 @@ fn upsert(hosts: &mut Vec<Host>, input: HostInputDto, imported: Option<Host>) {
 /// monitoring mode means "unchanged", like `upsert` — not silently back to SSH.
 fn duplicate(source: &Host, input: HostInputDto) -> Host {
     let monitoring_given = input.monitoring.is_some();
+    let upload_given = input.upload_protocol.is_some();
     let mut host = Host::from(input);
+    if !upload_given {
+        host.upload_protocol = source.upload_protocol;
+        host.upload_dir = source.upload_dir.clone();
+    }
     host.password = host.password.or_else(|| source.password.clone());
     host.identity_file = host.identity_file.or_else(|| source.identity_file.clone());
     host.proxy_jump = host.proxy_jump.or_else(|| source.proxy_jump.clone());
@@ -237,7 +249,8 @@ async fn persist(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::MonitorModeDto;
+    use crate::dto::{HostUploadProtocolDto, MonitorModeDto};
+    use omnyssh_core::ssh::client::HostUploadProtocol;
     use omnyssh_core::ssh::client::{HostSource, MonitorMode};
 
     fn input(name: &str) -> HostInputDto {
@@ -256,6 +269,8 @@ mod tests {
             local_forwards: vec![],
             tunnel_autostart: false,
             forward_agent: false,
+            upload_protocol: None,
+            upload_dir: None,
         }
     }
 
@@ -387,6 +402,26 @@ mod tests {
         // deliberately put on a reachability probe.
         assert_eq!(hosts[0].monitoring, MonitorMode::TcpPort);
         assert_eq!(hosts[0].monitor_port, Some(8443));
+    }
+
+    #[test]
+    fn upsert_keeps_upload_settings_the_payload_left_out() {
+        let mut hosts = vec![Host {
+            name: "nas".to_string(),
+            upload_protocol: HostUploadProtocol::Sftp,
+            upload_dir: Some("/srv/drop".to_string()),
+            source: HostSource::Manual,
+            ..Host::default()
+        }];
+        upsert(&mut hosts, input("nas"), None);
+        assert_eq!(hosts[0].upload_protocol, HostUploadProtocol::Sftp);
+        assert_eq!(hosts[0].upload_dir.as_deref(), Some("/srv/drop"));
+
+        let mut back = input("nas");
+        back.upload_protocol = Some(HostUploadProtocolDto::Zmodem);
+        upsert(&mut hosts, back, None);
+        assert_eq!(hosts[0].upload_protocol, HostUploadProtocol::Zmodem);
+        assert_eq!(hosts[0].upload_dir, None);
     }
 
     #[test]

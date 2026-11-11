@@ -40,6 +40,24 @@ impl MonitorMode {
     }
 }
 
+/// How a file dropped on a host's terminal is sent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostUploadProtocol {
+    /// To `rz` on the host, through the terminal itself.
+    #[default]
+    Zmodem,
+    /// Over a separate SFTP connection, into `upload_dir`.
+    Sftp,
+}
+
+impl HostUploadProtocol {
+    /// Lets the default stay out of `hosts.toml` entirely.
+    fn is_zmodem(&self) -> bool {
+        matches!(self, Self::Zmodem)
+    }
+}
+
 /// A single host entry used for SSH connections.
 ///
 /// Populated either from `~/.ssh/config` (via the parser) or from
@@ -103,6 +121,12 @@ pub struct Host {
     /// root on the host can use it while a terminal is open, so it is opt-in.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub forward_agent: bool,
+    /// How a file dropped on this host's terminal is sent.
+    #[serde(default, skip_serializing_if = "HostUploadProtocol::is_zmodem")]
+    pub upload_protocol: HostUploadProtocol,
+    /// Where SFTP uploads go: `~`, `~/dir` or an absolute path. Unset means `~`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upload_dir: Option<String>,
 
     // -----------------------------------------------------------------------
     // Auto SSH Key Setup metadata
@@ -158,6 +182,8 @@ impl Default for Host {
             local_forwards: Vec::new(),
             tunnel_autostart: false,
             forward_agent: false,
+            upload_protocol: HostUploadProtocol::default(),
+            upload_dir: None,
             key_setup_date: None,
             password_auth_disabled: None,
         }

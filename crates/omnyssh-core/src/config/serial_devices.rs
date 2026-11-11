@@ -8,6 +8,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::serial::{FlowControl, Parity, SerialConfig, StopBits};
+use crate::transfer::Protocol;
 use crate::utils::platform;
 
 /// What the Enter key sends in a serial terminal.
@@ -42,6 +43,14 @@ pub struct SerialDevice {
     pub enter: LineEnding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// How a file dropped on this device's tab is sent.
+    #[serde(default, skip_serializing_if = "is_zmodem")]
+    pub upload_protocol: Protocol,
+}
+
+/// Lets the default protocol stay out of `serial.toml`.
+fn is_zmodem(protocol: &Protocol) -> bool {
+    *protocol == Protocol::Zmodem
 }
 
 impl SerialDevice {
@@ -141,6 +150,7 @@ mod tests {
             flow_control: FlowControl::Hardware,
             enter: LineEnding::Crlf,
             notes: Some("bench".to_string()),
+            upload_protocol: Protocol::Ymodem,
         }
     }
 
@@ -183,8 +193,26 @@ mod tests {
                 flow_control: FlowControl::None,
                 enter: LineEnding::Cr,
                 notes: None,
+                upload_protocol: Protocol::Zmodem,
             }]
         );
+    }
+
+    #[test]
+    fn the_default_upload_protocol_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serial.toml");
+        let mut board = device("board");
+        board.upload_protocol = Protocol::Zmodem;
+        save_to(&path, &[board]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("upload_protocol"), "{text}");
+
+        let mut board = device("board");
+        board.upload_protocol = Protocol::Xmodem;
+        save_to(&path, &[board]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("upload_protocol = \"xmodem\""), "{text}");
     }
 
     #[test]

@@ -218,6 +218,7 @@ mod tests {
             flow_control: FlowControl::None,
             enter: LineEnding::Cr,
             notes: None,
+            upload_protocol: Default::default(),
         }
     }
 

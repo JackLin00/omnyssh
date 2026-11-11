@@ -757,7 +757,7 @@ export type FlowControlDto = "none" | "software" | "hardware"
  * (tech-gui.md §3.4). `hasKey` reports whether an identity file is configured;
  * the key path itself never crosses the boundary.
  */
-export type HostDto = { name: string; hostname: string; user: string; port: number; tags: string[]; notes?: string | null; source: HostSourceDto; hasKey: boolean; passwordAuthDisabled?: boolean | null; monitoring: MonitorModeDto; monitorPort?: number | null; localForwards: LocalForwardDto[]; tunnelAutostart: boolean; forwardAgent: boolean }
+export type HostDto = { name: string; hostname: string; user: string; port: number; tags: string[]; notes?: string | null; source: HostSourceDto; hasKey: boolean; passwordAuthDisabled?: boolean | null; monitoring: MonitorModeDto; monitorPort?: number | null; localForwards: LocalForwardDto[]; tunnelAutostart: boolean; forwardAgent: boolean; uploadProtocol?: HostUploadProtocolDto; uploadDir?: string | null }
 /**
  * Inbound host form payload for `save_host` (tech-gui.md §4.1, Stage 4.1). Always
  * builds a **manual** `Host`: editing an SSH-config import saves a copy that shadows
@@ -766,7 +766,15 @@ export type HostDto = { name: string; hostname: string; user: string; port: numb
  * travel back out: the outbound `HostDto` omits both (§3.4). Inbound only, so it
  * derives `Deserialize` (not `Serialize`).
  */
-export type HostInputDto = { name: string; hostname: string; user: string; port: number; identityFile?: string | null; password?: string | null; proxyJump?: string | null; tags: string[]; notes?: string | null; monitoring?: MonitorModeDto | null; monitorPort?: number | null; localForwards: LocalForwardDto[]; tunnelAutostart: boolean; forwardAgent: boolean }
+export type HostInputDto = { name: string; hostname: string; user: string; port: number; identityFile?: string | null; password?: string | null; proxyJump?: string | null; tags: string[]; notes?: string | null; monitoring?: MonitorModeDto | null; monitorPort?: number | null; localForwards: LocalForwardDto[]; tunnelAutostart: boolean; forwardAgent: boolean; 
+/**
+ * Left out means unchanged, like `monitoring`; `uploadDir` goes with it.
+ */
+uploadProtocol?: HostUploadProtocolDto | null; 
+/**
+ * Blank means the home directory.
+ */
+uploadDir?: string | null }
 /**
  * A host key no longer matches `known_hosts` on a connection the user started
  * (a terminal or files); `jumpFor` names the host a bastion was on the way to.
@@ -786,6 +794,10 @@ export type HostSourceDto = "sshConfig" | "manual"
  * A host's connection status changed (tech-gui.md §4.3).
  */
 export type HostStatusChanged = { hostName: string; status: ConnectionStatusDto }
+/**
+ * How a file dropped on a host's terminal is sent, mirrors `HostUploadProtocol`.
+ */
+export type HostUploadProtocolDto = "zmodem" | "sftp"
 /**
  * Full host list broadcast. Emitted by `reload_hosts` after refreshing the
  * cache; the bridge does not map `HostsLoaded` (tech-gui.md §3.4).
@@ -897,7 +909,7 @@ export type SerialConfigDto = { port: string; baudRate: number; dataBits: number
 /**
  * A saved serial device, shown as a dashboard card.
  */
-export type SerialDeviceDto = { name: string; config: SerialConfigDto; enter: LineEndingDto; notes: string | null }
+export type SerialDeviceDto = { name: string; config: SerialConfigDto; enter: LineEndingDto; notes: string | null; uploadProtocol?: SerialUploadProtocolDto }
 /**
  * Why a serial tab's port closed on its own (adapter unplugged, driver error).
  * Sent once on the tab's exit channel; a user-initiated close sends nothing.
@@ -907,6 +919,10 @@ export type SerialExitDto = { error: string }
  * A serial port present on this machine.
  */
 export type SerialPortDto = { name: string; description: string | null }
+/**
+ * How a file dropped on a serial tab is sent, mirrors `transfer::Protocol`.
+ */
+export type SerialUploadProtocolDto = "zmodem" | "ymodem" | "xmodem"
 /**
  * A service detected on a host with its quick-scan metrics (tech-gui.md §4.1).
  */
