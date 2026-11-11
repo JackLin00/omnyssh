@@ -25,6 +25,8 @@ const SFTP_EVENT_BUFFER: usize = 256;
 
 /// Upload `paths` into terminal `session_id`: ZMODEM to `rz` in its shell, or
 /// SFTP into the host's upload folder over a connection kept for the terminal.
+/// A cancel that arrives while the SFTP connection is still being made makes this
+/// return `Err("cancelled")`: treat that as a cancel, not a failure.
 #[tauri::command]
 #[specta::specta]
 pub async fn terminal_upload(
@@ -81,7 +83,9 @@ pub async fn serial_upload(
 }
 
 /// Cancel session `session_id`'s upload. ZMODEM, YMODEM and XMODEM stop at once;
-/// SFTP after the file being sent. A session without one is a no-op.
+/// SFTP after the file being sent. A session without one is a no-op. Cancelling
+/// while the SFTP connection is still being made makes `terminal_upload` return
+/// `Err("cancelled")`; treat that as a cancel, not a failure.
 #[tauri::command]
 #[specta::specta]
 pub fn upload_cancel(state: State<'_, GuiState>, session_id: u64) -> Result<(), CommandError> {
@@ -131,11 +135,19 @@ async fn start_sftp(
                     return Err(format!("{e:#}"));
                 }
             };
-        if let Err(manager) = state.uploads().add_sftp(id, manager) {
-            manager.disconnect();
-            return Err("the terminal is closed".to_string());
-        }
-        tauri::async_runtime::spawn(bridge::forward_upload_sftp_events(app.clone(), id, rx));
+        let generation = match state.uploads().add_sftp(id, manager) {
+            Ok(generation) => generation,
+            Err(manager) => {
+                manager.disconnect();
+                return Err("the terminal is closed".to_string());
+            }
+        };
+        tauri::async_runtime::spawn(bridge::forward_upload_sftp_events(
+            app.clone(),
+            id,
+            generation,
+            rx,
+        ));
     }
     let files = dropped
         .iter()

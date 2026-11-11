@@ -574,6 +574,22 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_takes_the_sources_upload_settings_unless_the_form_gives_its_own() {
+        let mut source = source_host();
+        source.upload_protocol = HostUploadProtocol::Sftp;
+        source.upload_dir = Some("/srv/drop".to_string());
+        let host = duplicate(&source, input("web-2"));
+        assert_eq!(host.upload_protocol, HostUploadProtocol::Sftp);
+        assert_eq!(host.upload_dir.as_deref(), Some("/srv/drop"));
+
+        let mut typed = input("web-3");
+        typed.upload_protocol = Some(HostUploadProtocolDto::Zmodem);
+        let host = duplicate(&source, typed);
+        assert_eq!(host.upload_protocol, HostUploadProtocol::Zmodem);
+        assert_eq!(host.upload_dir, None);
+    }
+
+    #[test]
     fn a_duplicate_keeps_the_sources_monitoring_when_the_form_leaves_it_out() {
         let mut source = source_host();
         source.monitoring = MonitorMode::TcpPort;

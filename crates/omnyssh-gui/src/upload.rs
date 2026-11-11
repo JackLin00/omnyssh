@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -245,6 +246,9 @@ impl SftpUpload {
 
 /// A terminal's SFTP connection for uploads, and the upload on it, if any.
 struct SftpConnection {
+    /// Which connection this is: a session's connections are numbered, so the
+    /// forwarder of an old one cannot touch its replacement.
+    generation: u64,
     manager: SftpManager,
     upload: Option<SftpUpload>,
 }
@@ -261,6 +265,17 @@ pub struct Uploads {
     hosts: Mutex<HashMap<SessionId, Host>>,
     /// SFTP connections, opened on a terminal's first SFTP drop and closed with it.
     sftp: Mutex<HashMap<SessionId, SftpConnection>>,
+    /// The generation of the next SFTP connection added.
+    next_generation: AtomicU64,
+}
+
+/// The connection of `id` if it is the one numbered `generation`.
+fn current(
+    sftp: &mut HashMap<SessionId, SftpConnection>,
+    id: SessionId,
+    generation: u64,
+) -> Option<&mut SftpConnection> {
+    sftp.get_mut(&id).filter(|c| c.generation == generation)
 }
 
 impl Uploads {
@@ -339,9 +354,10 @@ impl Uploads {
             .contains_key(&id)
     }
 
-    /// Keeps `manager` for terminal `id`. Hands it back when the terminal
+    /// Keeps `manager` for terminal `id` and returns its generation, which its
+    /// event forwarder passes back. Hands the manager back when the terminal
     /// closed while it was connecting.
-    pub fn add_sftp(&self, id: SessionId, manager: SftpManager) -> Result<(), SftpManager> {
+    pub fn add_sftp(&self, id: SessionId, manager: SftpManager) -> Result<u64, SftpManager> {
         // Lock order: `sftp`, then `hosts`. Holding `sftp` across the check
         // means a close cannot slip in between and leak the connection:
         // `session_closed` removes the host first, then takes `sftp`.
@@ -354,14 +370,16 @@ impl Uploads {
         if !open {
             return Err(manager);
         }
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         sftp.insert(
             id,
             SftpConnection {
+                generation,
                 manager,
                 upload: None,
             },
         );
-        Ok(())
+        Ok(generation)
     }
 
     /// Starts `upload` on terminal `id`'s SFTP connection.
@@ -400,22 +418,28 @@ impl Uploads {
     pub fn sftp_progress(
         &self,
         id: SessionId,
+        generation: u64,
         done: u64,
         total: u64,
         now: Instant,
     ) -> Option<UploadProgress> {
         let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
-        let upload = sftp.get_mut(&id)?.upload.as_mut()?;
+        let upload = current(&mut sftp, id, generation)?.upload.as_mut()?;
         upload.progress(id, done, total, now)
     }
 
     /// A file on terminal `id`'s SFTP connection is done: sends the next one,
     /// or returns how the upload ended (and marks `id` no longer uploading).
-    pub fn sftp_done(&self, id: SessionId, result: Result<(), String>) -> Option<UploadResult> {
+    pub fn sftp_done(
+        &self,
+        id: SessionId,
+        generation: u64,
+        result: Result<(), String>,
+    ) -> Option<UploadResult> {
         let failed = result.is_err();
         let (end, dead) = {
             let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
-            let conn = sftp.get_mut(&id)?;
+            let conn = current(&mut sftp, id, generation)?;
             let upload = conn.upload.as_mut()?;
             match upload.done(result) {
                 Ok(next) => {
@@ -441,12 +465,11 @@ impl Uploads {
 
     /// Terminal `id`'s SFTP connection is gone: forget it, and end the upload
     /// on it, if one was running.
-    pub fn sftp_lost(&self, id: SessionId) -> Option<UploadResult> {
-        let conn = self
-            .sftp
-            .lock()
-            .expect("uploads lock poisoned")
-            .remove(&id)?;
+    pub fn sftp_lost(&self, id: SessionId, generation: u64) -> Option<UploadResult> {
+        let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
+        current(&mut sftp, id, generation)?;
+        let conn = sftp.remove(&id)?;
+        drop(sftp);
         conn.upload?;
         self.end(id);
         Some(UploadResult {
@@ -713,6 +736,6 @@ mod tests {
         assert_eq!(uploads.terminal_host(3).map(|h| h.name), Some(web.name));
         uploads.session_closed(3);
         assert!(uploads.terminal_host(3).is_none());
-        assert!(uploads.sftp_lost(3).is_none());
+        assert!(uploads.sftp_lost(3, 0).is_none());
     }
 }

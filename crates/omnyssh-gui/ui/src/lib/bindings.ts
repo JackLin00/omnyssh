@@ -272,6 +272,8 @@ async deleteSerialDevice(name: string) : Promise<Result<null, CommandError>> {
 /**
  * Upload `paths` into terminal `session_id`: ZMODEM to `rz` in its shell, or
  * SFTP into the host's upload folder over a connection kept for the terminal.
+ * A cancel that arrives while the SFTP connection is still being made makes this
+ * return `Err("cancelled")`: treat that as a cancel, not a failure.
  */
 async terminalUpload(sessionId: number, protocol: HostUploadProtocolDto, paths: string[]) : Promise<Result<null, CommandError>> {
     try {
@@ -295,7 +297,9 @@ async serialUpload(sessionId: number, protocol: SerialUploadProtocolDto, paths: 
 },
 /**
  * Cancel session `session_id`'s upload. ZMODEM, YMODEM and XMODEM stop at once;
- * SFTP after the file being sent. A session without one is a no-op.
+ * SFTP after the file being sent. A session without one is a no-op. Cancelling
+ * while the SFTP connection is still being made makes `terminal_upload` return
+ * `Err("cancelled")`; treat that as a cancel, not a failure.
  */
 async uploadCancel(sessionId: number) : Promise<Result<null, CommandError>> {
     try {

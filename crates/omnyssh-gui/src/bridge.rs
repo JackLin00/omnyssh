@@ -195,33 +195,39 @@ fn finished_event(session_id: SessionId, result: UploadResult) -> events::Upload
 /// Drains the SFTP connection a terminal uploads through: progress becomes
 /// `upload-progress`, each finished file sends the next, and the end prints
 /// the result line in the terminal. A connection that goes away mid-upload
-/// ends it as lost.
+/// ends it as lost. `generation` is the connection's, from `add_sftp`: an
+/// old connection's forwarder cannot touch its replacement.
 pub async fn forward_upload_sftp_events(
     app: AppHandle,
     session_id: SessionId,
+    generation: u64,
     mut rx: mpsc::Receiver<CoreEvent>,
 ) {
     let state = app.state::<GuiState>();
     while let Some(event) = rx.recv().await {
         let end = match event {
             CoreEvent::FileTransferProgress(_, done, total) => {
-                if let Some(e) =
-                    state
-                        .uploads()
-                        .sftp_progress(session_id, done, total, Instant::now())
-                {
+                if let Some(e) = state.uploads().sftp_progress(
+                    session_id,
+                    generation,
+                    done,
+                    total,
+                    Instant::now(),
+                ) {
                     let _ = e.emit(&app);
                 }
                 None
             }
-            CoreEvent::SftpOpDone { result } => state.uploads().sftp_done(session_id, result),
+            CoreEvent::SftpOpDone { result } => {
+                state.uploads().sftp_done(session_id, generation, result)
+            }
             _ => None,
         };
         if let Some(result) = end {
             finish_sftp(&app, &state, session_id, result);
         }
     }
-    if let Some(result) = state.uploads().sftp_lost(session_id) {
+    if let Some(result) = state.uploads().sftp_lost(session_id, generation) {
         finish_sftp(&app, &state, session_id, result);
     }
 }
