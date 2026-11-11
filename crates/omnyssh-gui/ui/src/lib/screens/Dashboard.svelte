@@ -159,7 +159,12 @@
   const deviceNames = $derived(devices.map((d) => d.name));
 
   function openDevice(device: SerialDeviceDto, mode: SerialMode): void {
-    spawnSession('serial', device.name, { config: device.config, mode, enter: device.enter });
+    spawnSession('serial', device.name, {
+      config: device.config,
+      mode,
+      enter: device.enter,
+      upload: device.uploadProtocol
+    });
   }
 
   async function submitDevice(device: SerialDeviceDto): Promise<void> {

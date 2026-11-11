@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 import type { Status } from '$lib/theme';
-import type { SerialConfigDto } from '$lib/bindings';
+import type { SerialConfigDto, SerialUploadProtocolDto } from '$lib/bindings';
 import type { EnterKey } from '$lib/screens/serialFormat';
 
 // The open terminal/SFTP/serial tabs (tech-gui.md §2, §3.5). Spawners append a row
@@ -26,6 +26,8 @@ export interface SerialSessionOptions {
   config: SerialConfigDto;
   mode: SerialMode;
   enter: EnterKey;
+  /** How files dropped on the tab upload; a saved device's setting, else ZMODEM. */
+  upload?: SerialUploadProtocolDto;
 }
 
 export interface Session {

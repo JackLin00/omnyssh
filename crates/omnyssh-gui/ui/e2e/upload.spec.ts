@@ -252,3 +252,41 @@ test('a refused drop says why and leaves no progress bar; a drop elsewhere does 
   expect(await calls(page, 'terminal_upload')).toHaveLength(1);
 });
 
+test('a saved device uploads with its protocol; XMODEM takes one file', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('term on board').click();
+  const view = page.locator('.xterm').first();
+  await expect(view).toBeVisible();
+  await expect(page.getByLabel('Upload protocol')).toHaveValue('ymodem');
+
+  await dragOnto(page, view, ['/u-boot.bin', '/env.bin'], false);
+  await expect(page.getByTestId('drop-overlay')).toContainText('Drop to upload with YMODEM to board');
+  await expect(page.getByTestId('drop-overlay')).toContainText('U-Boot takes only the first file');
+  await dragOnto(page, view, ['/u-boot.bin']);
+  await expect.poll(() => calls(page, 'serial_upload')).toEqual([
+    { sessionId: 1, protocol: 'ymodem', paths: ['/u-boot.bin'] }
+  ]);
+  await expect(page.getByRole('status', { name: 'Upload' })).toContainText('Starting YMODEM…');
+  await fire(page, 'upload-progress', progress(1, { waiting: true, fileName: '', total: 0 }));
+  await expect(page.getByRole('status', { name: 'Upload' })).toContainText('Waiting for the receiver…');
+  await fire(page, 'upload-finished', { sessionId: 1, ok: true, message: 'uploaded u-boot.bin (1 B)' });
+
+  await page.getByLabel('Upload protocol').selectOption('xmodem');
+  await dragOnto(page, view, ['/a.bin', '/b.bin'], false);
+  await expect(page.getByTestId('drop-overlay')).toHaveText('XMODEM sends one file at a time');
+  await dragOnto(page, view, ['/a.bin', '/b.bin']);
+  await expect(page.getByText('XMODEM sends one file at a time')).toBeVisible();
+  expect(await calls(page, 'serial_upload')).toHaveLength(1);
+});
+
+test('a receive-only serial tab takes no drops', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('monitor on board').click();
+  const view = page.locator('.xterm').first();
+  await expect(view).toBeVisible();
+  await expect(page.getByLabel('Upload protocol')).toHaveCount(0);
+  await dragOnto(page, view, ['/a.bin']);
+  await expect(page.getByTestId('drop-overlay')).toHaveCount(0);
+  expect(await calls(page, 'serial_upload')).toEqual([]);
+});
+

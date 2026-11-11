@@ -16,7 +16,19 @@
   import { sessions, type Session } from '$lib/stores/sessions';
   import { lastError } from '$lib/stores/notifications';
   import { dialogs } from '$lib/stores/dialogs';
-  import { serialOpen, serialWrite, serialClose, logStop, logStatus } from '$lib/ipc/commands';
+  import {
+    serialOpen,
+    serialWrite,
+    serialClose,
+    logStop,
+    logStatus,
+    serialUpload,
+    uploadCancel
+  } from '$lib/ipc/commands';
+  import { blocksInput, endUpload, startUpload, uploads } from '$lib/stores/uploads';
+  import { registerDropTarget } from './dropTargets';
+  import UploadStatus from './UploadStatus.svelte';
+  import Select from '$lib/components/Select.svelte';
   import { sessionLogs, startSessionLog, exportText } from '$lib/stores/sessionLogs';
   import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
   import { chunkBytes } from './terminalInput';
@@ -25,7 +37,7 @@
   import { quickCommandBytes } from '$lib/stores/quickCommands';
   import { logTimestamps, serialTimestamps, terminalFontSize } from '$lib/stores/terminalPrefs';
   import { ByteHistory, SerialFormatter, mapEnter, type SerialDisplay } from './serialFormat';
-  import type { SerialExitDto, TerminalBytes } from '$lib/bindings';
+  import type { SerialExitDto, SerialUploadProtocolDto, TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
   import { HIGHLIGHT_LIMIT } from './terminalSearch';
   import QuickCommandBar from './QuickCommandBar.svelte';
@@ -96,7 +108,8 @@
   // Chunked and serialized like TerminalView's input, so a large paste stays in order.
   let writeChain: Promise<void> = Promise.resolve();
   function sendInput(bytes: Uint8Array): void {
-    if (serialId == null || bytes.length === 0) return;
+    // A ZMODEM/YMODEM/XMODEM upload owns the line: a keystroke would land inside it.
+    if (serialId == null || bytes.length === 0 || blocksInput(get(uploads).get(serialId))) return;
     writeChain = writeChain.then(async () => {
       for (const chunk of chunkBytes(bytes)) {
         if (destroyed || serialId == null) return;
@@ -230,6 +243,8 @@
       if (destroyed || mine !== attempt) return;
       // Keep the tab and its output: the log up to the failure is what matters.
       failed = true;
+      // An upload on a port that went away gets no upload-finished.
+      endUpload(serialId);
       canSend = false;
       sessions.setStatus(session.id, 'failed');
       lastError.set(`${opts.config.port}: ${msg.error}`);
@@ -262,6 +277,7 @@
     reconnecting = true;
     const old = serialId;
     serialId = undefined;
+    endUpload(old);
     sessions.setStatus(session.id, 'connecting');
     try {
       // Release the dead port first, so the reopen isn't refused as busy.
@@ -402,10 +418,41 @@
     zoomOff?.();
     clearTimeout(badgeTimer);
     resizeObserver?.disconnect();
+    endUpload(serialId);
     if (serialId != null) void serialClose(serialId).catch(() => {});
     term?.dispose();
     term = undefined;
   });
+
+  // Drag-and-drop upload (plan Q), in terminal mode only: a receive-only tab sends
+  // nothing. The protocol picked in the header lasts for this tab.
+  let dropRoot = $state<HTMLDivElement>();
+  let uploadProtocol = $state<SerialUploadProtocolDto>(opts.upload ?? 'zmodem');
+  const uploading = $derived(serialId != null && $uploads.has(serialId));
+  $effect(() => {
+    if (!dropRoot || opts.mode !== 'terminal') return;
+    return registerDropTarget(dropRoot, {
+      label: () => session.hostName,
+      protocol: () => uploadProtocol,
+      drop: upload
+    });
+  });
+
+  function upload(paths: string[]): void {
+    if (serialId == null || !canSend) {
+      lastError.set(`${opts.config.port} is not open`);
+      return;
+    }
+    void startUpload(serialId, uploadProtocol, paths, (id, protocol, files) =>
+      serialUpload(id, protocol as SerialUploadProtocolDto, files)
+    );
+  }
+
+  function cancelUpload(): void {
+    if (serialId != null) {
+      void uploadCancel(serialId).catch((e) => lastError.set(`Cancel: ${message(e)}`));
+    }
+  }
 
   $effect(() => {
     if (active && ready) {
@@ -476,6 +523,19 @@
         Time
       </button>
     {/if}
+    {#if opts.mode === 'terminal'}
+      <Select
+        class="cursor-pointer rounded-full border border-default bg-transparent py-0.5 pl-3 text-xs text-muted transition hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus disabled:cursor-not-allowed disabled:opacity-40"
+        aria-label="Upload protocol"
+        title="Files dropped here upload with this"
+        disabled={uploading}
+        bind:value={uploadProtocol}
+      >
+        <option value="zmodem">ZMODEM</option>
+        <option value="ymodem">YMODEM</option>
+        <option value="xmodem">XMODEM</option>
+      </Select>
+    {/if}
     <Button variant="ghost" title="Clear the output" onclick={clear}>Clear</Button>
     <button
       type="button"
@@ -496,7 +556,11 @@
       Export
     </Button>
   </div>
-  <div class="relative min-h-0 flex-1 px-2 pt-2" style="background: {$terminalColors.background}">
+  <div
+    bind:this={dropRoot}
+    class="relative min-h-0 flex-1 px-2 pt-2"
+    style="background: {$terminalColors.background}"
+  >
     <div bind:this={container} class="h-full w-full"></div>
     {#if searchOpen && searchAddon}
       <div class="absolute right-3 top-2 z-20 max-w-[calc(100%-1.5rem)]">
@@ -511,6 +575,7 @@
         {sizeBadge} px
       </div>
     {/if}
+    <UploadStatus root={dropRoot} sessionId={serialId} onCancel={cancelUpload} />
   </div>
   <QuickCommandBar
     enabled={canSend}
