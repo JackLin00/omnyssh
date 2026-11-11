@@ -24,6 +24,8 @@
 
 ## 实现中确定的设计决定
 
+> **执行记录**：执行中代码审查又发现并修复了若干问题（ZMODEM 取消会丢弃排队的文件数据；关闭会话时取消上传；登录中被拒的上传在各种结局下都报结束；失效的会话拒绝上传；SFTP 的特殊文件、断线重连、竞态、节流、主机快照、连接期间取消），上面的决定已按最终行为更新。各任务里的补丁是最初版本，最终代码以仓库为准。
+
 > 写这份计划时，整套改动已经在仓库的临时副本里完整实现并验证过：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --check`、`npm run check`、`npx vitest run`（449 个）和全部 97 个 Playwright 用例都通过；对 lrzsz 0.12.21 的互通测试（计划 O 的 3 个，加上这里新增的经 SSH 的 1 个）也都通过。之后又把改动按下面 6 个任务在另一个副本里逐个重放、逐个验证，下面的补丁就是从这串提交生成的，并在第三个副本上按顺序应用验证过：每个测试补丁之后编译失败（失败信息写在各任务里），每个实现补丁之后测试全部通过。
 
 1. **拆成两份计划**：P 只做后端（core 接入 + GUI 命令、事件、配置、SFTP），全部能用单元测试和集成测试覆盖；拖放交互、遮罩、进度条、表单字段放在计划 Q。P 做完后前端代码不需要任何改动就能继续编译和通过测试。
@@ -32,15 +34,21 @@
    - `[upload] failed: <原因>`、`[upload] cancelled`
    - 这一行作为普通终端输出走现有的输出路径，所以**自动进入会话日志**；协议字节从不作为输出，所以不会进日志。spec 里的中文终端提示和日志里的 `[upload] … ok|failed` 合并成了这一行（界面文字都是英文）。
    - `upload-finished` 的 `message` 就是这行 `[upload] ` 后面的内容（失败时不带 `failed: `）。
+   - SFTP 失败的 `message` 是 `<文件名>: <错误>`，SFTP 连接断开是 `the SFTP connection was lost`。登录中被拒的上传（决定 6）只发 `upload-finished`，终端里没有结果行。
 3. **`ActiveUpload` 放在 core**（`transfer/active.rs`），串口和 SSH 共用，进度节流（100 ms）也在这里做，而不是 spec 说的在 GUI 里按会话节流。
 4. **结束后的排空**：任何结束（完成、失败、取消）之后，会话继续发送引擎还没交出的字节（取消序列、ZMODEM 的 `OO`），发完就退出传输模式；最多等 2 s，线路卡住时丢掉剩下的。spec 只对取消规定了 2 s，这里对所有结束都适用，否则失败后卡住的线路会让会话永远停在传输模式。
-5. **连接断开**：串口读写出错、SSH 通道 EOF/关闭时，如果有上传在进行，先报 `the connection was lost`（结果行也照常显示），再报会话结束。
-6. **登录中的终端**：SSH 还在密码提示阶段时收到的 `Upload` 不执行，连接成功后报失败 `the terminal was still logging in`，保证每个启动成功的命令后面都有一个 `upload-finished`。
+5. **连接断开与关闭**（执行中修订）：
+   - 串口读写出错、SSH 通道 EOF/关闭时，如果有 ZMODEM/YMODEM/XMODEM 上传在进行，先报 `the connection was lost`（结果行照常显示），再报会话结束。
+   - SFTP 上传时终端远端退出：SFTP 连接随终端关掉，不发 `upload-finished`，只有 `terminal-exited`。
+   - 用户关闭标签：串口和 SSH 都先向设备发取消序列（SSH 最多等 500 ms）。之后串口线程不报结束；SSH pump 报 `cancelled`，但 GUI 已注销该会话，事件被丢弃。两者对前端都表现为"什么都没有"。
+   - 在已经结束的会话上发起上传，命令直接返回错误（`the port is closed` / `the terminal is closed`）。
+6. **登录中的终端**：SSH 还在密码提示阶段时收到的 `Upload` 不执行，在提示阶段结束时报失败 `the terminal was still logging in`（不论登录成功、失败还是标签被关），所以也有 `upload-finished`（不打印结果行）。没有密码提示时，连接期间收到的 `Upload` 会排队到 shell 打开后执行；如果连接失败，它不会有 `upload-finished`，只有 `terminal-exited`。
 7. **传输期间的键盘输入**：按 spec 照常转发（串口进 `pending`，SSH 发给通道）；由前端在传输期间禁用输入。
 8. **配置字段**（core）：`Host.upload_protocol: HostUploadProtocol { Zmodem, Sftp }`、`Host.upload_dir: Option<String>`、`SerialDevice.upload_protocol: transfer::Protocol`；默认值（ZMODEM、未设置）都不写进配置文件。TUI 没有这些表单项，编辑主机时原样保留。
 9. **配置字段**（GUI DTO）：TS 里全部是可选字段，现有前端代码和测试不受影响。
    - `HostDto.uploadProtocol?`（总是发送）、`HostDto.uploadDir?`。
    - `HostInputDto.uploadProtocol?`、`uploadDir?`：**省略协议表示保持原值**（和 `monitoring` 一样），协议和目录一起保留；空白目录表示 home。
+   - 复制主机时，省略协议则沿用源主机的协议和目录。
    - `SerialDeviceDto.uploadProtocol?`：省略表示 ZMODEM。现在的前端表单还不带这个字段，所以在计划 Q 之前用界面保存设备会把它重置为 ZMODEM；只有手改过 `serial.toml` 的设备会受影响。
 10. **预检查在 GUI 命令里**（发送任何东西之前）：空列表、文件夹、XMODEM 多文件、ZMODEM 大于 4 GiB、ZMODEM/YMODEM 文件名超过 256 字节、这个会话已经有上传在进行。对应英文消息见 `src/upload.rs`。XMODEM 不发文件名，所以不检查名字长度。
 11. **SFTP**：
@@ -48,7 +56,9 @@
     - 一次传一个文件，上一个完成才发下一个，所以失败或取消会停掉后面的文件；**取消在当前文件传完后生效**（core 的 SFTP 上传不能中途停）。
     - 目标路径：`upload_dir` 未设置或 `~` 时为文件名本身（SFTP 的相对路径以 home 为基准），`~/x` 变成 `x/文件名`，其他按原样拼接。
     - 结果行由 GUI 打进终端（xterm 和会话日志），不经过远端 shell。
-12. **事件 `upload-progress`** 比 spec 多一个 `waiting` 字段：接收端还没开始时为 `true`（其他字段为空），前端据此显示"等待接收端"。`fileIndex` 从 0 开始。
+    - （执行中补充）连接用的是终端打开时的主机快照，之后改名或编辑主机不影响。连接建立期间取消，`terminal_upload` 返回 `Err("cancelled")`。某个文件失败后丢弃这条连接，下次拖放重新连（可能再弹一次密码）。每条连接带代号，旧连接的事件不会影响新连接。进度按文件节流到 100 ms（每个文件的第一个进度总会发出）。
+    - （执行中补充）只接受普通文件：FIFO、设备文件等直接拒绝（`<名字> is not a regular file`），否则打开时会一直阻塞，或像 `/dev/zero` 那样永远读不完。
+12. **事件 `upload-progress`** 比 spec 多一个 `waiting` 字段：接收端还没开始时为 `true`（其他字段为空），前端据此显示"等待接收端"。`fileIndex` 从 0 开始。只有 ZMODEM/YMODEM/XMODEM 会报 `waiting`。
 13. **TUI** 不发起上传，只需要在 `CoreEvent` 的 match 里忽略 `Upload`。
 
 ---
@@ -59,13 +69,18 @@
   - `terminalUpload(sessionId, protocol: "zmodem" | "sftp", paths: string[])`
   - `serialUpload(sessionId, protocol: "zmodem" | "ymodem" | "xmodem", paths: string[])`
   - `uploadCancel(sessionId)`
-  - 返回 `error` 时什么都没有发送（预检查失败、已有上传、会话已关闭）；返回 `ok` 后一定会有一个 `upload-finished`。
+  - 返回 `error` 时没有向终端或设备发送任何东西（预检查失败、已有上传、会话已关闭）；SFTP 例外：连接可能已经打开并保留。
+  - `terminalUpload` 返回 `error` 且 `message === "cancelled"`：SFTP 连接建立期间用户取消了，按取消处理，不是失败（此时没有 `upload-finished`，终端里也没有结果行）。SFTP 首次上传要先建立连接（可能弹密码、主机密钥确认），命令可能挂起很久，前端这期间显示"连接中"。
+  - 返回 `ok` 后，上传以下面任一为结束：一个 `upload-finished`；该终端的 `terminal-exited`（远端退出时，SFTP 上传和极少数竞态不会再有 `upload-finished`）；串口标签的 `onExit`；标签被用户关闭（关闭后不会再有任何上传事件）。前端要把这几种都当作结束，并忽略未知会话的 `upload-finished`。
 - 事件：
   - `uploadProgress`：`{ sessionId, waiting, fileIndex, fileCount, fileName, sent, total }`，每个会话最多 100 ms 一次。
-  - `uploadFinished`：`{ sessionId, ok, message }`。
+  - `uploadFinished`：`{ sessionId, ok, message }`。`message` 原样显示，不要解析。
+  - SFTP 上传没有 `waiting: true` 的进度；第一个进度事件在第一个文件开始传数据时才到。取消 SFTP 时，如果当前已是最后一个文件，结果是 `ok: true`。
 - 进度注意：ZMODEM 的 `sent` 可能重复或倒退；跳过或空文件之后，进度会停在上一个文件的 100%，直到下一个文件开始。
 - 配置：`HostDto.uploadProtocol` / `uploadDir`、`HostInputDto.uploadProtocol` / `uploadDir`、`SerialDeviceDto.uploadProtocol`。
 - 终端里的结果行由后端输出，前端不需要自己打印。
+- 键盘输入只在 ZMODEM/YMODEM/XMODEM 上传期间禁用（从调用命令到结束），SFTP 不禁用。
+- `HostInputDto` 省略 `uploadProtocol` 时协议和目录一起保留，所以表单发 `uploadDir` 时必须同时发协议。串口设备表单要带上 `uploadProtocol`，否则保存会重置为 ZMODEM。
 
 ---
 

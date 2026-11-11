@@ -31,13 +31,13 @@
 - **传输期间**（ZMODEM、YMODEM、XMODEM）：
   - 窗格底部显示进度条：文件名、`第 i/n 个`、百分比、速率，以及"取消"按钮。
   - 终端的键盘输入被禁用，避免按键混进协议数据流。
-  - 结束后在终端里打印一行，比如 `[上传完成] foo.bin 1.2 MB`、`[上传失败] 原因`，有跳过的文件时还会有 `[上传完成] 3 个文件，已跳过 1 个`。
-- **SFTP**：终端不受影响，不禁用输入。进度用同一个进度条显示，数据来自现有的 `transfer-progress` 事件。
+  - 结束后在终端里打印一行（英文，界面文字都是英文），比如 `[upload] uploaded foo.bin (1.2 MB)`、`[upload] failed: <原因>`、`[upload] uploaded 2 of 3 files, 1 skipped by the receiver`。完整规则见计划 P 决定 2。
+- **SFTP**：终端不受影响，不禁用输入。进度用同一个进度条显示，同样来自 `upload-progress` 事件。
 
 ### 各协议怎么启动
 - **ZMODEM**：自动向会话写入 `rz -b\r`（`-b` 二进制），然后等 `rz` 主动发来的 `ZRINIT`；我们不发 ZRQINIT（没装 `rz` 时 shell 会把它回显回来，造成死循环）。不加 `-e`：`zmodem2` 不支持"转义全部控制字符"（spike 中 `rz -be` 握手失败）；ZMODEM 标准转义已覆盖 ZDLE、DLE、XON、XOFF，软件流控的串口也安全。
 - **YMODEM / XMODEM**：什么都不发，等接收端发起（`C` 或 NAK）。用户需要先在设备上执行 `loady`、`loadx`、`rb`、`rx` 这类命令。等待期间进度条显示"等待接收端…"。
-- **SFTP**：上传到 `upload_dir/<文件名>`。`~` 和 `~/x` 转换为 SFTP 的相对路径 `.` 和 `x`，SFTP 的相对路径以 home 为基准。
+- **SFTP**：上传到 `upload_dir/<文件名>`。`upload_dir` 未设置或为 `~` 时目标就是文件名本身，`~/x` 变成 `x/文件名`（SFTP 的相对路径以 home 为基准）。
 
 ## 架构
 
@@ -91,23 +91,23 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 - 引擎不碰端口和系统时钟。文件在引擎内部按块同步读取，每次最多 1 KiB；每次 `transmit` 最多交出 8 KiB。读的是本地文件，在 tokio 任务里同步读也可以接受。完整接口以 `crates/omnyssh-core/src/transfer/mod.rs` 为准。
 
 ### 串口接入：`serial.rs` 的 `run()`
-- `Ctrl` 新增 `Upload { preamble: Vec<u8>, upload: Box<dyn Upload> }` 和 `CancelUpload`。收到 `Upload` 时，先把 `preamble`（ZMODEM 时是 `rz -b\r`，X/YMODEM 时为空）放进 `pending`，同时进入传输模式，这样此后读到的每个字节都交给引擎。`SerialOutput` 新增 `Upload(UploadState)`。
+- `Ctrl` 新增 `Upload { preamble: Vec<u8>, upload: ActiveUpload }` 和 `CancelUpload`。收到 `Upload` 时，先把 `preamble`（ZMODEM 时是 `rz -b\r`，X/YMODEM 时为空）放进 `pending`，同时进入传输模式，这样此后读到的每个字节都交给引擎。`SerialOutput` 新增 `Upload(UploadEvent)`（`Progress(UploadState)` 或 `Finished(UploadResult)`）。传输的驱动逻辑（节流、排空、结果行）在串口和 SSH 共用的 `transfer::ActiveUpload` 里。
 - 有传输进行时，每轮循环：
   1. 读到的字节交给 `upload.receive`，**不调用** `on_output(Data)`；
-  2. `pending` 为空时才调用 `upload.transmit(&mut pending)`；
-  3. 调用 `upload.tick(Instant::now())`；
-  4. 状态和上一次不同时，调用 `on_output(SerialOutput::Upload(state))`。
-- 进入 `Done`、`Failed` 或 `Cancelled` 后，把 `leftover()` 作为普通的 `Data` 交还，然后回到正常模式。
+  2. 调用 `upload.tick(now)`，再调用 `upload.pump(now, &mut pending)`：`pending` 为空时由它补充待发字节；
+  3. 进度经 `ActiveUpload::progress` 节流到 100 ms，作为 `Upload(Progress)` 报告。
+- 结束且排空后（最多等 2 s），把 leftover 加结果行作为一个 `Data` 交还，再发 `Upload(Finished)`，然后回到正常模式。
+- 关闭端口时如果有上传在进行，先取消，取消序列随关闭前的排空发出。
 - 现有的"有界写、不 flush"策略不变。
 - 传输期间收到的 `Ctrl::Write` 照常进入 `pending`。GUI 已经禁用了输入，正常情况下不会有。
 
 ### SSH 接入：`ssh/pty.rs` 的 pump 循环
-- `Ctrl` 新增 `Upload { preamble, upload }`（同串口）和 `CancelUpload`。收到 `Upload` 时，在同一个 `select!` 分支里先 `channel.data(preamble)`，再进入传输模式。`tokio::select!` 在多个分支同时就绪时随机选，所以如果把写入 `rz -b\r` 和 `Ctrl::Upload` 拆成两条消息，中间可能先处理一次 `channel.wait()`，把 ZRINIT 当成普通输出。`CoreEvent` 新增 `UploadState(SessionId, UploadState)`。
+- `Ctrl` 新增 `Upload { preamble, upload }`（同串口）和 `CancelUpload`。收到 `Upload` 时，在同一个 `select!` 分支里先 `channel.data(preamble)`，再进入传输模式。`tokio::select!` 在多个分支同时就绪时随机选，所以如果把写入 `rz -b\r` 和 `Ctrl::Upload` 拆成两条消息，中间可能先处理一次 `channel.wait()`，把 ZRINIT 当成普通输出。`CoreEvent` 新增 `Upload(SessionId, UploadEvent)`。
 - `select!` 里加一个 100 ms 的 `interval` 分支（创建一次，`MissedTickBehavior::Skip`，用 `if upload.is_some()` 守卫），只在传输中启用，用来调用 `tick`。每次 `receive` 之前也先 `tick(Instant::now())`。
 - 传输中，`ChannelMsg::Data` 和 `ExtendedData` 交给 `upload.receive`，不喂给 vt100 parser，也不发往 `raw_output`。
 - 每次 `receive` 和 `tick` 之后，把 `transmit` 的输出交给 `channel.data(..).await`，russh 的窗口提供背压。
 - 结束时，`leftover()` 按普通输出处理：喂给 parser，发往 `raw_output`。
-- 传输模式下的字节路由抽成一个能单测的小函数。TUI 不会发 `Ctrl::Upload`，所以行为不变。
+- 由 `crates/omnyssh-core/tests/upload_pty.rs` 经进程内 SSH 服务端做端到端测试（含经真实 `rz` 的用例）。关闭标签时如果有上传在进行，先发取消序列（最多等 500 ms）。TUI 不会发 `Ctrl::Upload`，所以行为不变。
 
 ### GUI：`omnyssh-gui`
 - 新增命令，都放在新文件 `commands/upload.rs`：
@@ -120,13 +120,13 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
   - 打开文件，取文件名和大小；
   - 发 `Ctrl::Upload { preamble, upload }`：ZMODEM 时 `preamble` 是 `rz -b\r`，X/YMODEM 时为空。
 - SFTP 协议走 `terminal_upload`，分支到现有的 `SftpManager`：
-  - 第一次拖放时，在后台为这个主机开一个 SFTP 会话并缓存，SSH 标签关闭时一起关掉；
+  - 每个终端第一次 SFTP 拖放时，为该终端开一条专用 SFTP 连接（用终端打开时的主机快照），终端关闭或远端退出时关掉；
   - 每个文件依次调用现有的上传路径。
 - 新增事件：
-  - `upload-progress { sessionId, fileIndex, fileCount, fileName, sent, total }`，按会话节流到每 100 ms 最多一次；
+  - `upload-progress { sessionId, waiting, fileIndex, fileCount, fileName, sent, total }`，每个会话最多 100 ms 一次（协议上传在 core 的 `ActiveUpload` 里节流，SFTP 在 GUI 里按文件节流）；
   - `upload-finished { sessionId, ok, message }`。
-  - SFTP 的 `transfer-progress` 在 bridge 里按 transfer id 映射回会话，转成 `upload-progress`，前端只需要处理一种事件。
-- **会话日志**：协议字节不写入日志，结束时写一行 `[upload] <文件名> <大小> ok|failed: <原因>`。
+  - 专用 SFTP 连接的 `FileTransferProgress` 由 `forward_upload_sftp_events` 直接转成 `upload-progress`，不使用 `transfer-progress`，前端只需要处理一种事件。
+- **会话日志**：协议字节不写入日志，终端里的结果行（见计划 P 决定 2）作为普通输出进入日志。
 
 ### 前端：`omnyssh-gui/ui`
 - 拖放的命中判断和协议决策（预设、临时覆盖、多文件和文件夹拒绝）放进一个纯 TS 模块。
@@ -141,13 +141,13 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 | X/YMODEM 等接收端超过 60 秒 | 报失败："接收端未就绪（是否已执行 loady/loadx？）" |
 | 同一个块重传超过 10 次 | 发 CAN，报失败："重传过多（块 N）" |
 | 对端发来 CAN CAN 或 `ZABORT`/`ZCAN` | 报失败："设备取消了传输" |
-| 用户点取消 | 引擎发取消序列，最多等 2 秒排空发送缓冲，然后报"已取消" |
+| 用户点取消 | 引擎发取消序列，最多等 2 秒排空发送缓冲，然后报 `cancelled`。ZMODEM 先丢掉缓冲里还没发出的文件数据。SFTP 在当前文件传完后生效；连接建立期间取消则 `terminal_upload` 返回 `Err("cancelled")` |
 | 本地读文件出错 | 发 CAN，报失败，附上 I/O 错误 |
-| 传输中串口拔出或 SSH 断开 | 传输随会话结束，`upload-finished` 报"连接中断"。串口重连后不会续传 |
+| 传输中串口拔出或 SSH 断开 | 协议上传报 `the connection was lost`；SFTP 上传随终端结束，不报 `upload-finished`（前端以 `terminal-exited` 结束）。串口重连后不会续传 |
 | ZMODEM 收到 `ZSKIP` | 这个文件记为跳过（判断方法见上），继续下一个，最终结果里写跳过的数量 |
-| SFTP 失败 | 沿用现有的错误信息，通过 `upload-finished` 报告 |
+| SFTP 失败 | 报 `<文件名>: <错误>`，并丢弃这条连接（下次拖放重连）；连接断开报 `the SFTP connection was lost` |
 
-所有结束情况都会退出传输模式、恢复键盘输入，并在终端里打印一行结果。
+所有结束情况都会退出传输模式、恢复键盘输入，并在终端里打印一行结果。例外：标签被关闭、登录中被拒的上传、SFTP 连接建立期间取消、SFTP 上传时远端退出，这些情况没有结果行。
 
 ## 测试
 - **引擎单元测试**（`transfer/*`，纯内存，用 `Cursor` 当文件，时间手动推进）：
@@ -170,7 +170,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 
 ## 接入时的注意事项（引擎实现与审查中发现，供接入与界面计划使用）
 - 写入 `rz -b\r` 和进入传输模式必须是一步：用 `Ctrl::Upload { preamble, upload }` 一条消息完成（见上面串口和 SSH 接入）。否则 `rz` 的第一个 ZRINIT 可能被当成普通输出显示到终端里。
-- GUI 在发 `Ctrl::Upload` **之前**就要检查文件：文件夹（在调用 `UploadFile::open` 之前检查；Windows 上打开文件夹报的是"拒绝访问"）、空列表、XMODEM 多文件、大于 4 GiB（ZMODEM）、文件名超过 256 字节（ZMODEM），都直接拒绝。否则 `start()` 会返回一个已经失败的上传，并向 shell 发取消序列；空列表或 XMODEM 多文件会让 `start()` panic。
+- GUI 在发 `Ctrl::Upload` **之前**就要检查文件：文件夹（在调用 `UploadFile::open` 之前检查；Windows 上打开文件夹报的是"拒绝访问"）、空列表、XMODEM 多文件、大于 4 GiB（ZMODEM）、文件名超过 256 字节（ZMODEM、YMODEM）、不是普通文件（FIFO、设备文件），都直接拒绝。否则 `start()` 会返回一个已经失败的上传，并向 shell 发取消序列；空列表或 XMODEM 多文件会让 `start()` panic。
 - 多文件 YMODEM 发给 U-Boot `loady`：U-Boot 只收第一个文件。界面上拖入多个文件且协议是 YMODEM 时，给出提示。
 - ZMODEM 的"跳过"不一定是"文件已存在"，`rz` 无法创建文件时也会跳过。界面文字写"已跳过"，不要写"已存在"。
 - 进度可能倒退（ZRPOS 回退重发）；跳过或空文件之后，状态会继续显示上一个文件的 100%，直到下一个文件开始读数据。
