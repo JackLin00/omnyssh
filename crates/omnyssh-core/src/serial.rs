@@ -171,11 +171,15 @@ impl SerialSession {
 
     /// Sends `preamble` (`rz -b\r` for ZMODEM, nothing for X/YMODEM) and runs
     /// `upload` until it ends. The caller makes sure no other upload is running.
-    pub fn upload(&self, preamble: &[u8], upload: ActiveUpload) {
-        let _ = self.ctrl.send(Ctrl::Upload {
-            preamble: preamble.to_vec(),
-            upload,
-        });
+    /// Returns whether the session thread took it; `false` means the session has
+    /// ended (the port failed), so nothing will run and no end will be reported.
+    pub fn upload(&self, preamble: &[u8], upload: ActiveUpload) -> bool {
+        self.ctrl
+            .send(Ctrl::Upload {
+                preamble: preamble.to_vec(),
+                upload,
+            })
+            .is_ok()
     }
 
     /// Cancels the running upload, if any.
@@ -564,6 +568,28 @@ mod tests {
             next(&rx),
             SerialOutput::Closed(Some("device removed".to_string()))
         );
+    }
+
+    #[test]
+    fn an_ended_session_refuses_an_upload() {
+        let unplugged = io::Error::new(ErrorKind::BrokenPipe, "device removed");
+        let (port, _) = FakePort::new(vec![Err(unplugged)]);
+        let (session, rx) = start(port);
+        assert_eq!(
+            next(&rx),
+            SerialOutput::Closed(Some("device removed".to_string()))
+        );
+        // `Closed` goes out just before the thread drops its receiver.
+        let refused = (0..200).any(|_| {
+            let upload =
+                ActiveUpload::start(Protocol::Xmodem, vec![one_block_file()], Instant::now());
+            let sent = session.upload(b"", upload);
+            if sent {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            !sent
+        });
+        assert!(refused);
     }
 
     #[test]

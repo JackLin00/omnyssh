@@ -3,6 +3,8 @@
 //! discovered services and PTY-exit land here; the raw PTY byte stream rides its own
 //! forwarder (`forward_terminal_output`) into the per-session channels (§3.6).
 
+use std::time::Instant;
+
 use omnyssh_core::event::{CoreEvent, SessionId};
 use omnyssh_core::transfer::{UploadEvent, UploadResult};
 use tauri::{AppHandle, Manager};
@@ -203,7 +205,11 @@ pub async fn forward_upload_sftp_events(
     while let Some(event) = rx.recv().await {
         let end = match event {
             CoreEvent::FileTransferProgress(_, done, total) => {
-                if let Some(e) = state.uploads().sftp_progress(session_id, done, total) {
+                if let Some(e) =
+                    state
+                        .uploads()
+                        .sftp_progress(session_id, done, total, Instant::now())
+                {
                     let _ = e.emit(&app);
                 }
                 None

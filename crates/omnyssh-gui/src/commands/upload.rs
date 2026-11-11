@@ -2,7 +2,7 @@
 //! one file, ZMODEM's limits, an upload already running), so a refused drop
 //! sends nothing. Progress and the end arrive as `upload-progress` and
 //! `upload-finished`; a command that returns `Ok` is always followed by one
-//! `upload-finished`.
+//! `upload-finished` while its session is open; a closed tab gets none.
 
 use std::time::Instant;
 
@@ -112,13 +112,11 @@ async fn start_sftp(
     id: u64,
     dropped: &[Dropped],
 ) -> Result<(), String> {
-    let host_name = state
+    // The host the terminal connected to, not whatever its name means now.
+    let host = state
         .uploads()
         .terminal_host(id)
         .ok_or("the terminal is closed")?;
-    let host = state
-        .host_by_name(&host_name)
-        .ok_or_else(|| format!("unknown host '{host_name}'"))?;
     if !state.uploads().has_sftp(id) {
         let (tx, rx) = mpsc::channel(SFTP_EVENT_BUFFER);
         let prompter = Prompter::new(state.engine_sender(), &host.name);

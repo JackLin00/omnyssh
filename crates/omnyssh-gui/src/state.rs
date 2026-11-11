@@ -370,7 +370,7 @@ impl GuiState {
             .lock()
             .expect("sessions lock poisoned")
             .register_terminal(inner);
-        self.uploads.terminal_opened(public, host_name);
+        self.uploads.terminal_opened(public, &host);
         Ok(public)
     }
 
@@ -566,11 +566,13 @@ impl GuiState {
     /// session's callback might take. A port that already failed stays in the map
     /// until this, which is harmless — writes to it go nowhere.
     pub fn take_serial(&self, id: SessionId) -> Option<SerialSession> {
-        self.uploads.session_closed(id);
-        self.serial
+        let session = self
+            .serial
             .lock()
             .expect("serial lock poisoned")
-            .remove(&id)
+            .remove(&id);
+        self.uploads.session_closed(id);
+        session
     }
 
     /// Drag-and-drop upload bookkeeping.
@@ -605,10 +607,9 @@ impl GuiState {
         upload: ActiveUpload,
     ) -> Result<(), String> {
         match self.serial.lock().expect("serial lock poisoned").get(&id) {
-            Some(session) => {
-                session.upload(preamble, upload);
-                Ok(())
-            }
+            Some(session) if session.upload(preamble, upload) => Ok(()),
+            // Gone, or its thread ended (the port failed): nothing would ever end it.
+            Some(_) => Err("the port is closed".to_string()),
             None => Err("the port is closed".to_string()),
         }
     }

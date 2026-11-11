@@ -7,8 +7,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use omnyssh_core::event::SessionId;
+use omnyssh_core::ssh::client::Host;
 use omnyssh_core::ssh::sftp::{SftpCommand, SftpManager};
 use omnyssh_core::transfer::{human_size, UploadResult, UploadState};
 
@@ -23,6 +25,10 @@ const MAX_NAME: usize = 256;
 
 /// ZMODEM's file offsets are 32 bits.
 const ZMODEM_MAX_SIZE: u64 = u32::MAX as u64;
+
+/// The least time between two progress reports of a file, like the core's
+/// protocol uploads.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How a drop is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +162,9 @@ pub struct SftpUpload {
     /// The file being sent.
     current: usize,
     cancelled: bool,
+    /// When progress was last reported, and for which file.
+    last_progress: Option<Instant>,
+    progress_file: usize,
 }
 
 impl SftpUpload {
@@ -164,6 +173,8 @@ impl SftpUpload {
             files,
             current: 0,
             cancelled: false,
+            last_progress: None,
+            progress_file: 0,
         }
     }
 
@@ -176,8 +187,23 @@ impl SftpUpload {
         }
     }
 
-    fn progress(&self, session_id: SessionId, done: u64, total: u64) -> UploadProgress {
-        UploadProgress {
+    /// The progress to report at `now`: none if the file's last report was less
+    /// than `PROGRESS_INTERVAL` ago. The first report of each file always goes.
+    fn progress(
+        &mut self,
+        session_id: SessionId,
+        done: u64,
+        total: u64,
+        now: Instant,
+    ) -> Option<UploadProgress> {
+        if let Some(last) = self.last_progress {
+            if self.progress_file == self.current && now.duration_since(last) < PROGRESS_INTERVAL {
+                return None;
+            }
+        }
+        self.last_progress = Some(now);
+        self.progress_file = self.current;
+        Some(UploadProgress {
             session_id,
             waiting: false,
             file_index: self.current as u32,
@@ -185,7 +211,7 @@ impl SftpUpload {
             file_name: self.files[self.current].name.clone(),
             sent: done,
             total,
-        }
+        })
     }
 
     /// The current file is done: the next command to send, or the end.
@@ -229,8 +255,10 @@ struct SftpConnection {
 pub struct Uploads {
     /// Sessions with an upload running, of any kind: one at a time each.
     running: Mutex<HashSet<SessionId>>,
-    /// The host each open terminal is connected to, for SFTP uploads.
-    hosts: Mutex<HashMap<SessionId, String>>,
+    /// Sessions whose SFTP upload was cancelled before it could start.
+    cancel_requested: Mutex<HashSet<SessionId>>,
+    /// The host each open terminal connected to, for SFTP uploads.
+    hosts: Mutex<HashMap<SessionId, Host>>,
     /// SFTP connections, opened on a terminal's first SFTP drop and closed with it.
     sftp: Mutex<HashMap<SessionId, SftpConnection>>,
 }
@@ -244,6 +272,7 @@ impl Uploads {
             .expect("uploads lock poisoned")
             .insert(id)
         {
+            self.clear_cancel(id);
             Ok(())
         } else {
             Err("an upload is already running here".to_string())
@@ -255,17 +284,34 @@ impl Uploads {
             .lock()
             .expect("uploads lock poisoned")
             .remove(&id);
+        self.clear_cancel(id);
     }
 
-    /// Records the host terminal `id` is connected to.
-    pub fn terminal_opened(&self, id: SessionId, host_name: &str) {
+    fn clear_cancel(&self, id: SessionId) {
+        self.cancel_requested
+            .lock()
+            .expect("uploads lock poisoned")
+            .remove(&id);
+    }
+
+    /// Whether `id`'s upload was cancelled before it started sending.
+    fn cancel_pending(&self, id: SessionId) -> bool {
+        self.cancel_requested
+            .lock()
+            .expect("uploads lock poisoned")
+            .contains(&id)
+    }
+
+    /// Records the host terminal `id` connected to: SFTP uploads go there, even
+    /// if the host is edited or renamed meanwhile.
+    pub fn terminal_opened(&self, id: SessionId, host: &Host) {
         self.hosts
             .lock()
             .expect("uploads lock poisoned")
-            .insert(id, host_name.to_string());
+            .insert(id, host.clone());
     }
 
-    pub fn terminal_host(&self, id: SessionId) -> Option<String> {
+    pub fn terminal_host(&self, id: SessionId) -> Option<Host> {
         self.hosts
             .lock()
             .expect("uploads lock poisoned")
@@ -300,7 +346,12 @@ impl Uploads {
         // means a close cannot slip in between and leak the connection:
         // `session_closed` removes the host first, then takes `sftp`.
         let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
-        if self.terminal_host(id).is_none() {
+        let open = self
+            .hosts
+            .lock()
+            .expect("uploads lock poisoned")
+            .contains_key(&id);
+        if !open {
             return Err(manager);
         }
         sftp.insert(
@@ -316,25 +367,46 @@ impl Uploads {
     /// Starts `upload` on terminal `id`'s SFTP connection.
     pub fn start_sftp(&self, id: SessionId, upload: SftpUpload) -> Result<(), String> {
         let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
+        if self.cancel_pending(id) {
+            return Err("cancelled".to_string());
+        }
         let conn = sftp.get_mut(&id).ok_or("the terminal is closed")?;
         conn.manager.send(upload.command());
         conn.upload = Some(upload);
         Ok(())
     }
 
-    /// Stops terminal `id`'s SFTP upload after the file being sent.
+    /// Stops terminal `id`'s SFTP upload after the file being sent. One that has
+    /// not started yet (still connecting) is stopped before its first file.
     pub fn cancel_sftp(&self, id: SessionId) {
         let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
         if let Some(upload) = sftp.get_mut(&id).and_then(|c| c.upload.as_mut()) {
             upload.cancelled = true;
+        } else if self
+            .running
+            .lock()
+            .expect("uploads lock poisoned")
+            .contains(&id)
+        {
+            self.cancel_requested
+                .lock()
+                .expect("uploads lock poisoned")
+                .insert(id);
         }
     }
 
     /// A progress report from terminal `id`'s SFTP connection.
-    pub fn sftp_progress(&self, id: SessionId, done: u64, total: u64) -> Option<UploadProgress> {
-        let sftp = self.sftp.lock().expect("uploads lock poisoned");
-        let upload = sftp.get(&id)?.upload.as_ref()?;
-        Some(upload.progress(id, done, total))
+    /// At most one per `PROGRESS_INTERVAL` for each file.
+    pub fn sftp_progress(
+        &self,
+        id: SessionId,
+        done: u64,
+        total: u64,
+        now: Instant,
+    ) -> Option<UploadProgress> {
+        let mut sftp = self.sftp.lock().expect("uploads lock poisoned");
+        let upload = sftp.get_mut(&id)?.upload.as_mut()?;
+        upload.progress(id, done, total, now)
     }
 
     /// A file on terminal `id`'s SFTP connection is done: sends the next one,
@@ -513,9 +585,15 @@ mod tests {
     fn sftp_files_go_one_after_another() {
         let mut up = SftpUpload::new(sftp_files());
         assert_eq!(remote(Ok(up.command())), "a");
-        assert_eq!(up.progress(4, 5, 1024).file_name, "a");
+        assert_eq!(
+            up.progress(4, 5, 1024, Instant::now()).unwrap().file_name,
+            "a"
+        );
         assert_eq!(remote(up.done(Ok(()))), "b");
-        assert_eq!(up.progress(4, 5, 1024).file_index, 1);
+        assert_eq!(
+            up.progress(4, 5, 1024, Instant::now()).unwrap().file_index,
+            1
+        );
         assert_eq!(
             ended(up.done(Ok(()))),
             UploadResult {
@@ -590,12 +668,51 @@ mod tests {
     }
 
     #[test]
+    fn sftp_progress_is_throttled_per_file() {
+        let mut up = SftpUpload::new(sftp_files());
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        assert!(up.progress(1, 10, 100, ms(0)).is_some(), "first goes");
+        assert!(up.progress(1, 20, 100, ms(50)).is_none());
+        assert!(up.progress(1, 30, 100, ms(99)).is_none());
+        assert!(up.progress(1, 40, 100, ms(100)).is_some());
+        assert!(up.progress(1, 50, 100, ms(150)).is_none());
+        up.done(Ok(())).expect("next file");
+        let next = up.progress(1, 5, 100, ms(160)).expect("a new file's first");
+        assert_eq!(next.file_index, 1);
+    }
+
+    #[test]
+    fn a_cancel_before_the_upload_starts_sticks() {
+        let uploads = Uploads::default();
+        uploads.cancel_sftp(1);
+        assert!(
+            !uploads.cancel_pending(1),
+            "nothing running, nothing to cancel"
+        );
+        uploads.begin(1).expect("begin");
+        uploads.cancel_sftp(1);
+        assert!(uploads.cancel_pending(1));
+        uploads.end(1);
+        assert!(!uploads.cancel_pending(1));
+        uploads.begin(1).expect("begin");
+        uploads.cancel_sftp(1);
+        uploads.session_closed(1);
+        uploads.begin(1).expect("begin");
+        assert!(!uploads.cancel_pending(1), "a new upload starts clean");
+    }
+
+    #[test]
     fn a_terminal_forgets_its_host_when_it_closes() {
         let uploads = Uploads::default();
-        uploads.terminal_opened(3, "web");
-        assert_eq!(uploads.terminal_host(3).as_deref(), Some("web"));
+        let web = Host {
+            name: "web".to_string(),
+            ..Host::default()
+        };
+        uploads.terminal_opened(3, &web);
+        assert_eq!(uploads.terminal_host(3).map(|h| h.name), Some(web.name));
         uploads.session_closed(3);
-        assert_eq!(uploads.terminal_host(3), None);
+        assert!(uploads.terminal_host(3).is_none());
         assert!(uploads.sftp_lost(3).is_none());
     }
 }
