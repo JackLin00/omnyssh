@@ -14,8 +14,11 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+mod active;
 mod xmodem;
 mod zmodem;
+
+pub use active::{human_size, ActiveUpload, Finished, UploadEvent, UploadResult};
 
 /// How much one [`Upload::transmit`] call adds at most. The caller only asks
 /// again once it has sent it all, so this bounds what sits in its buffer.
