@@ -26,7 +26,7 @@
 
 > 写这份计划时，整套改动已经在仓库的临时副本里完整实现并验证过：`npm run check`（0 错误 0 警告）、`npx vitest run`（470 个）、全量 Playwright（104 个，原有 97 个加新增 7 个）都通过。之后按下面 5 个任务在另一个副本里逐个重放、逐个验证，补丁就是从这串提交生成的，又在第三个副本上按顺序应用验证过：每个测试补丁之后相关测试失败（失败情况写在各任务里），每个实现补丁之后通过；最后连跑 3 遍全量 Playwright 都通过。
 
-1. **拖放怎么接收**：Tauri 2 默认开启 `dragDropEnabled`，系统的文件拖放会被 Tauri 接走，页面自己的 HTML5 拖放事件不会触发。所以在 `+layout.svelte` 启动时挂一个 `getCurrentWebview().onDragDropEvent` 监听（全局只有一个）。事件里的坐标是物理像素，要除以 `devicePixelRatio` 才是页面坐标。不在 Tauri 里（普通浏览器、没有 webview 元数据的测试页）时，监听什么都不做。
+1. **拖放怎么接收**：Tauri 2 默认开启 `dragDropEnabled`，系统的文件拖放会被 Tauri 接走，页面自己的 HTML5 拖放事件不会触发。所以在 `+layout.svelte` 启动时挂一个 `getCurrentWebview().onDragDropEvent` 监听（全局只有一个）。事件里的坐标虽然标成 `PhysicalPosition`，Tauri 其实没有换算，是 wry 原样给的：Windows（WebView2，`ScreenToClient`）是物理像素，要除以 `devicePixelRatio`；macOS（`draggingLocation`，AppKit point）和 Linux（GTK 控件坐标）本身就是页面坐标，不能再除。（执行中修正：计划原本对所有平台都除以 `devicePixelRatio`，在 Retina 屏上文件会落到错误的窗格。执行时还加了：拖动的不是文件（macOS 会对文字、链接拖动发出不带路径的 enter）时不显示遮罩；悬停状态没变时不重写 store。）不在 Tauri 里（普通浏览器、没有 webview 元数据的测试页）时，监听什么都不做。
 2. **命中判断**：视图把自己的根元素登记为拖放目标（`registerDropTarget`），监听用 `document.elementFromPoint` 找坐标下的元素，再往上找到登记过的根元素。隐藏的标签页是 `display: none`，自然点不中。分屏时每个窗格各自登记，拖到哪个窗格就传给哪个窗格的会话。
 3. **上传状态**按后端会话 id 记在 `uploads` store 里：
    - 发出命令时进入 `starting`（SFTP 显示"Connecting for SFTP…"，可能停在密码提示上），收到 `waiting: true` 进入 `waiting`，收到进度进入 `sending`。
