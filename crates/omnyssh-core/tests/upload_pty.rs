@@ -55,6 +55,8 @@ struct Server {
     line: Arc<Mutex<Vec<u8>>>,
     /// Input for the running `rz`.
     to_rz: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// Every byte the channel received, in order.
+    received: Arc<Mutex<Vec<u8>>>,
 }
 
 #[async_trait::async_trait]
@@ -94,6 +96,7 @@ impl server::Handler for Server {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.received.lock().unwrap().extend_from_slice(data);
         if let Some(to_rz) = self.to_rz.lock().unwrap().as_ref() {
             let _ = to_rz.send(data.to_vec());
             return Ok(());
@@ -161,11 +164,18 @@ impl Server {
 }
 
 async fn serve(rz_dir: Option<PathBuf>) -> SocketAddr {
+    serve_recording(rz_dir).await.0
+}
+
+/// Like [`serve`], also returning everything the channel receives.
+async fn serve_recording(rz_dir: Option<PathBuf>) -> (SocketAddr, Arc<Mutex<Vec<u8>>>) {
     let server = Server {
         rz_dir,
         line: Arc::default(),
         to_rz: Arc::default(),
+        received: Arc::default(),
     };
+    let received = Arc::clone(&server.received);
     let config = Arc::new(server::Config {
         keys: vec![KeyPair::generate_ed25519()],
         auth_rejection_time: Duration::ZERO,
@@ -179,7 +189,7 @@ async fn serve(rz_dir: Option<PathBuf>) -> SocketAddr {
             let _ = server::run_stream(Arc::clone(&config), socket, server.clone()).await;
         }
     });
-    addr
+    (addr, received)
 }
 
 // ---------------------------------------------------------------------------
@@ -194,21 +204,26 @@ struct Terminal {
 
 impl Terminal {
     async fn open(addr: SocketAddr) -> Self {
+        let term = Self::connect(addr, Some(PASSWORD)).await;
+        assert!(term.screen_contains("$ ").await, "no shell");
+        term
+    }
+
+    /// Opens a terminal without waiting for the shell.
+    async fn connect(addr: SocketAddr, password: Option<&str>) -> Self {
         isolate_home();
         let host = Host {
             name: "box".to_string(),
             hostname: addr.ip().to_string(),
             port: addr.port(),
             user: "me".to_string(),
-            password: Some(PASSWORD.to_string()),
+            password: password.map(str::to_string),
             ..Host::default()
         };
         let (tx, events) = mpsc::channel::<CoreEvent>(1024);
         let mut pty = PtyManager::new();
         let id = pty.open(&host, 80, 24, tx).expect("open");
-        let term = Self { pty, id, events };
-        assert!(term.screen_contains("$ ").await, "no shell");
-        term
+        Self { pty, id, events }
     }
 
     fn screen(&self) -> String {
@@ -341,4 +356,88 @@ async fn cancelling_an_upload_the_shell_cannot_take_shows_its_reply() {
     assert_eq!(result.message, "cancelled");
     assert!(term.screen_contains("command not found").await);
     assert!(term.screen_contains("[upload] cancelled").await);
+}
+
+/// A terminal still at the inline password prompt, with an upload sent to it.
+async fn terminal_at_the_password_prompt() -> Terminal {
+    let addr = serve(None).await;
+    let term = Terminal::connect(addr, None).await;
+    assert!(term.screen_contains("password: ").await, "no prompt");
+    term
+}
+
+fn an_upload() -> ActiveUpload {
+    ActiveUpload::start(
+        Protocol::Zmodem,
+        vec![file("a.bin", vec![1, 2, 3])],
+        Instant::now(),
+    )
+}
+
+#[tokio::test]
+async fn an_upload_sent_while_logging_in_is_refused() {
+    let mut term = terminal_at_the_password_prompt().await;
+    term.pty.upload(term.id, b"rz -b\r", an_upload());
+    term.pty
+        .write(term.id, format!("{PASSWORD}\r").as_bytes())
+        .unwrap();
+
+    let (_, result) = term.until_finished().await;
+    assert!(!result.ok);
+    assert_eq!(result.message, "the terminal was still logging in");
+}
+
+#[tokio::test]
+async fn an_upload_sent_while_logging_in_is_refused_and_the_tab_closed() {
+    let mut term = terminal_at_the_password_prompt().await;
+    term.pty.upload(term.id, b"rz -b\r", an_upload());
+    term.pty.close(term.id);
+
+    // The end comes before the tab's exit.
+    let mut finished = None;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(30), term.events.recv())
+            .await
+            .expect("no PtyExited")
+            .expect("session gone");
+        match event {
+            CoreEvent::Upload(id, UploadEvent::Finished(r)) if id == term.id => finished = Some(r),
+            CoreEvent::PtyExited(id) if id == term.id => break,
+            _ => {}
+        }
+    }
+    let result = finished.expect("no Finished before PtyExited");
+    assert!(!result.ok);
+    assert_eq!(result.message, "the terminal was still logging in");
+}
+
+#[tokio::test]
+async fn closing_a_terminal_mid_upload_sends_the_cancel_sequence() {
+    let (addr, received) = serve_recording(None).await;
+    let mut term = Terminal::open(addr).await;
+
+    term.pty.upload(term.id, b"rz -b\r", an_upload());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    term.pty.close(term.id);
+
+    let (_, result) = term.until_finished().await;
+    assert_eq!(result.message, "cancelled");
+
+    let cancel = [0x18u8; 10];
+    let mut seen = false;
+    for _ in 0..40 {
+        let got = received.lock().unwrap().clone();
+        if let Some(at) = got.windows(6).position(|w| w == b"rz -b\r") {
+            if got[at + 6..].windows(10).any(|w| w == cancel) {
+                seen = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        seen,
+        "no cancel sequence after the preamble: {:?}",
+        received.lock().unwrap()
+    );
 }

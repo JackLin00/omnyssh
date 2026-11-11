@@ -242,6 +242,18 @@ async fn session_task(
         prompt.flush();
     }
     let ((cols, rows), closed, refused) = (prompt.size, prompt.closed, prompt.refused_uploads);
+    // Uploads sent while the password prompt had the keyboard cannot run. They
+    // are answered here, before any early exit below, so that every upload gets
+    // its end ahead of PtyExited.
+    for _ in 0..refused {
+        let result = UploadResult {
+            ok: false,
+            message: "the terminal was still logging in".to_string(),
+        };
+        let _ = tx
+            .send(CoreEvent::Upload(id, UploadEvent::Finished(result)))
+            .await;
+    }
     if closed && connected.is_ok() {
         // Closed at the prompt: no shell for a tab that is gone.
         let _ = tx.send(CoreEvent::PtyExited(id)).await;
@@ -269,17 +281,6 @@ async fn session_task(
             return;
         }
     };
-
-    // Uploads sent while the password prompt had the keyboard cannot run.
-    for _ in 0..refused {
-        let result = UploadResult {
-            ok: false,
-            message: "the terminal was still logging in".to_string(),
-        };
-        let _ = tx
-            .send(CoreEvent::Upload(id, UploadEvent::Finished(result)))
-            .await;
-    }
 
     // Phase C: pump loop (official russh interactive idiom). `wait` is the only
     // &mut method, so a single owning task can select over it and the control
@@ -322,7 +323,27 @@ async fn session_task(
                         up.cancel();
                     }
                 }
-                Some(Ctrl::Close) | None => break,
+                Some(Ctrl::Close) | None => {
+                    // A device behind a console server may not notice the SSH
+                    // session ending: give the upload its cancel sequence first.
+                    if let Some(mut up) = upload.take() {
+                        up.cancel();
+                        let ended = tokio::time::timeout(
+                            CLOSE_CANCEL_LIMIT,
+                            pump_upload(&mut up, &channel, &out),
+                        )
+                        .await;
+                        let end = match ended {
+                            Ok(Some(end)) => end,
+                            _ => up.lost(),
+                        };
+                        out.show(&end.output).await;
+                        let _ = tx
+                            .send(CoreEvent::Upload(id, UploadEvent::Finished(end.result)))
+                            .await;
+                    }
+                    break;
+                }
             },
             _ = ticker.tick(), if upload.is_some() => {
                 if let Some(up) = upload.as_mut() {
@@ -355,6 +376,10 @@ async fn session_task(
 
 /// How often a running upload's timers are checked when nothing arrives.
 const UPLOAD_TICK: Duration = Duration::from_millis(100);
+
+/// How long closing a terminal waits for a running upload to send its cancel
+/// sequence before giving up and reporting the upload lost.
+const CLOSE_CANCEL_LIMIT: Duration = Duration::from_millis(500);
 
 /// Where a session's screen output goes: the parser, the render nudge, and the
 /// GUI's raw tap.
