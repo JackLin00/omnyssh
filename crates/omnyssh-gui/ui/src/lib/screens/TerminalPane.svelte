@@ -28,8 +28,14 @@
     terminalClose,
     terminalPaste,
     logStop,
-    logStatus
+    logStatus,
+    terminalUpload,
+    uploadCancel
   } from '$lib/ipc/commands';
+  import { blocksInput, endUpload, startUpload, uploads } from '$lib/stores/uploads';
+  import { registerDropTarget } from './dropTargets';
+  import UploadStatus from './UploadStatus.svelte';
+  import Select from '$lib/components/Select.svelte';
   import { shouldFadeTop } from './terminalFade';
   import { chunkBytes, layoutFallback } from './terminalInput';
   import { attachMouseClipboard, copySelection, pasteClipboard } from './terminalClipboard';
@@ -40,7 +46,7 @@
   import { attachWheelZoom } from './terminalZoom';
   import { isMac } from '$lib/platform';
   import type { SplitDir } from './splitLayout';
-  import type { TerminalBytes } from '$lib/bindings';
+  import type { HostUploadProtocolDto, TerminalBytes } from '$lib/bindings';
   import TerminalSearch from './TerminalSearch.svelte';
   import { HIGHLIGHT_LIMIT } from './terminalSearch';
   import { bufferText, formatBytes, logButtonDisabled, sshLogDetail } from './sessionLog';
@@ -99,7 +105,8 @@
   // them; a serialization chain keeps all input strictly in order across events.
   let writeChain: Promise<void> = Promise.resolve();
   function sendInput(bytes: Uint8Array): void {
-    if (termId == null || bytes.length === 0) return;
+    // A ZMODEM upload owns the stream: a keystroke would land inside it.
+    if (termId == null || bytes.length === 0 || blocksInput(get(uploads).get(termId))) return;
     writeChain = writeChain.then(async () => {
       for (const chunk of chunkBytes(bytes)) {
         if (destroyed || termId == null) return;
@@ -360,6 +367,8 @@
     clearTimeout(badgeTimer);
     exitOff?.();
     resizeObserver?.disconnect();
+    // An upload whose session ends gets no upload-finished.
+    endUpload(termId);
     // Idempotent: a remote-exit teardown already dropped this id backend-side (§3.4).
     if (termId != null) void terminalClose(termId).catch(() => {});
     term?.dispose();
@@ -420,6 +429,11 @@
   const titleBtn =
     'term-btn grid h-5 w-5 place-items-center rounded transition ' +
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+  // The upload protocol picker: as wide as its label, otherwise like the buttons.
+  const toolPicker =
+    'term-btn h-6 rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
+  const titlePicker =
+    'term-btn h-5 rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
 
   /** The action's current shortcut, formatted for a title, or empty when unbound. */
   function hint(action: TerminalAction): string {
@@ -470,6 +484,37 @@
     logTitle = s ? `Stop logging (${s.path}, ${formatBytes(s.bytes)})` : '';
   }
 
+  // Drag-and-drop upload (plan Q): files dropped on the pane go to the host with its
+  // upload protocol, or the one picked here for this pane only.
+  let root = $state<HTMLDivElement>();
+  let protocolOverride = $state<HostUploadProtocolDto | null>(null);
+  const uploadProtocol = $derived<HostUploadProtocolDto>(
+    protocolOverride ?? $hosts.find((h) => h.name === hostName)?.uploadProtocol ?? 'zmodem'
+  );
+  const uploading = $derived(termId != null && $uploads.has(termId));
+  $effect(() => {
+    if (!root) return;
+    return registerDropTarget(root, {
+      label: () => hostName,
+      protocol: () => uploadProtocol,
+      drop: upload
+    });
+  });
+
+  function upload(paths: string[]): void {
+    if (termId == null) {
+      lastError.set('The terminal is still connecting');
+      return;
+    }
+    void startUpload(termId, uploadProtocol, paths, (id, protocol, files) =>
+      terminalUpload(id, protocol as HostUploadProtocolDto, files)
+    );
+  }
+
+  function cancelUpload(): void {
+    if (termId != null) void uploadCancel(termId).catch((e) => lastError.set(`Cancel: ${message(e)}`));
+  }
+
   function exportContents(): void {
     if (!term || picking) return;
     const text = bufferText(term.buffer.active);
@@ -514,9 +559,29 @@
   </button>
 {/snippet}
 
+<!-- The protocol files dropped on this pane upload with; changing it lasts for this
+     pane only. -->
+{#snippet protocolPicker(cls: string, style: string)}
+  <Select
+    class="{cls} cursor-pointer bg-transparent pl-1.5 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-40"
+    {style}
+    aria-label="Upload protocol"
+    title="Files dropped here upload with this"
+    disabled={uploading}
+    bind:value={
+      () => uploadProtocol,
+      (v) => (protocolOverride = v as HostUploadProtocolDto)
+    }
+  >
+    <option value="zmodem">ZMODEM</option>
+    <option value="sftp">SFTP</option>
+  </Select>
+{/snippet}
+
 <!-- Clicking anywhere in the pane, or xterm's textarea taking focus, makes it the
      tab's focused pane. -->
 <div
+  bind:this={root}
   class="group relative h-full w-full {framed ? 'p-0.5' : ''}"
   role="presentation"
   onpointerdown={onFocus}
@@ -557,6 +622,7 @@
         >
           {title || hostName}
         </span>
+        {@render protocolPicker(titlePicker, '')}
         {@render logButtons(titleBtn, '', 13)}
         <button type="button" class={titleBtn} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
           <Icon name="splitRight" size={13} />
@@ -576,6 +642,7 @@
       bind:this={toolbar}
       class="peer absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100"
     >
+      {@render protocolPicker(toolPicker, toolBtnStyle)}
       {@render logButtons(toolBtn, toolBtnStyle, 14)}
       <button type="button" class={toolBtn} style={toolBtnStyle} title="Split right{hint('splitRight')}" aria-label="Split right" onclick={() => onSplit('row')}>
         <Icon name="splitRight" size={14} />
@@ -607,6 +674,7 @@
       <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
     </div>
   {/if}
+  <UploadStatus {root} sessionId={termId} onCancel={cancelUpload} />
   {#if sizeBadge !== null}
     <div
       class="pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 rounded-md bg-surface-raised px-3 py-1.5 text-sm font-medium text-fg shadow-soft"

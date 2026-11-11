@@ -30,7 +30,11 @@ async function boot(
       // Held back with `holdConnect`, so a test can keep a pane "connecting" until it
       // calls `__releaseConnect`.
       const pendingPrompts: number[] = [];
+      // A release can come before the pane has even asked to open (it loads xterm
+      // first): remember it, so that pane connects as soon as it does.
+      let released = false;
       (win as { __releaseConnect?: () => void }).__releaseConnect = () => {
+        released = true;
         for (const chId of pendingPrompts.splice(0)) sendToChannel(chId, 'omnyssh-ready> ');
       };
 
@@ -76,7 +80,7 @@ async function boot(
               // A shell prompt proves the streamed output renders + flips status to
               // connected; held back instead when a test wants the pane to stay
               // "connecting" until it releases it.
-              if (holdConnect) pendingPrompts.push(chId);
+              if (holdConnect && !released) pendingPrompts.push(chId);
               else setTimeout(() => sendToChannel(chId, 'omnyssh-ready> '), 0);
               return Promise.resolve(sid);
             }
