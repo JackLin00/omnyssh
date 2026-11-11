@@ -29,6 +29,9 @@ async function boot(page: Page): Promise<void> {
       const listeners: Record<string, number[]> = {};
       const chIndex: Record<number, number> = {};
       let nextSession = 0;
+      let exitChannel = 0;
+      win.__exitSerial = (error: string) =>
+        (win[`__cb${exitChannel}`] as ((m: unknown) => void) | undefined)?.({ message: { error }, index: 0 });
       const calls: Call[] = [];
       win.__calls = calls;
       win.__refuse = null;
@@ -46,7 +49,9 @@ async function boot(page: Page): Promise<void> {
         }
       }
       win.__fire = fire;
-      // Physical pixels, as Tauri reports them.
+      // Page pixels x devicePixelRatio, which is what WebView2 (Windows) reports and the
+      // listener divides back out. Playwright's Desktop Chrome profile has a Windows user
+      // agent and a ratio of 1.
       win.__drag = (type: string, x: number, y: number, paths: string[]) => {
         const position = { x: x * devicePixelRatio, y: y * devicePixelRatio };
         if (type === 'leave') fire('tauri://drag-leave', null);
@@ -75,6 +80,7 @@ async function boot(page: Page): Promise<void> {
             case 'serial_list_ports':
               return Promise.resolve([{ name: 'COM3', description: null }]);
             case 'serial_open':
+              exitChannel = (args as { onExit: { id: number } }).onExit.id;
               return Promise.resolve(++nextSession);
             case 'terminal_upload':
             case 'serial_upload': {
@@ -313,4 +319,37 @@ test('the serial device editor keeps the upload protocol', async ({ page }) => {
   await expect.poll(async () => (await calls(page, 'save_serial_device'))[0]).toMatchObject({
     device: { name: 'board', uploadProtocol: 'xmodem' }
   });
+});
+
+test('a serial upload ends when its port exits', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('term on board').click();
+  const view = page.locator('.xterm').first();
+  await expect(view).toBeVisible();
+  await dragOnto(page, view, ['/u-boot.bin']);
+  await expect(page.getByRole('status', { name: 'Upload' })).toBeVisible();
+  await expect(page.getByLabel('Upload protocol')).toBeDisabled();
+
+  await page.evaluate(() => (window as unknown as { __exitSerial: (e: string) => void }).__exitSerial('device unplugged'));
+  await expect(page.getByRole('status', { name: 'Upload' })).toHaveCount(0);
+  await expect(page.getByLabel('Upload protocol')).toBeEnabled();
+  await dragOnto(page, view, ['/u-boot.bin'], false);
+  await expect(page.getByTestId('drop-overlay')).toHaveText('COM3 is not open');
+});
+
+test('keystrokes are dropped during a serial upload', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('term on board').click();
+  const view = page.locator('.xterm').first();
+  await expect(view).toBeVisible();
+  await view.click();
+  await page.keyboard.type('a');
+  await expect.poll(() => calls(page, 'serial_write')).toHaveLength(1);
+
+  await dragOnto(page, view, ['/u-boot.bin']);
+  await expect(page.getByRole('status', { name: 'Upload' })).toBeVisible();
+  await view.click();
+  await page.keyboard.type('b');
+  await page.waitForTimeout(300);
+  expect(await calls(page, 'serial_write')).toHaveLength(1);
 });

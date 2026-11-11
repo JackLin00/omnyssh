@@ -8,12 +8,15 @@
   let {
     root,
     sessionId,
+    unavailable = null,
     onCancel
   }: {
     /** The view's registered drop target. */
     root: Element | undefined;
     /** The backend session id; undefined while connecting. */
     sessionId: number | undefined;
+    /** Why the view can't take a drop right now (shown as the refusal), if it can't. */
+    unavailable?: string | null;
     onCancel: () => void;
   } = $props();
 
@@ -21,9 +24,11 @@
   const busy = $derived(sessionId != null && $uploads.has(sessionId));
   const refusal = $derived(
     hover
-      ? busy
-        ? 'An upload is already running here'
-        : dropError(hover.protocol, hover.count)
+      ? unavailable
+        ? unavailable
+        : busy
+          ? 'An upload is already running here'
+          : dropError(hover.protocol, hover.count)
       : null
   );
   const note = $derived(hover ? dropNote(hover.protocol, hover.count) : null);

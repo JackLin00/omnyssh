@@ -109,7 +109,7 @@
     if (termId == null || bytes.length === 0 || blocksInput(get(uploads).get(termId))) return;
     writeChain = writeChain.then(async () => {
       for (const chunk of chunkBytes(bytes)) {
-        if (destroyed || termId == null) return;
+        if (destroyed || termId == null || blocksInput(get(uploads).get(termId))) return;
         try {
           await terminalWrite(termId, Array.from(chunk));
         } catch {
@@ -679,7 +679,12 @@
       <TerminalSearch addon={searchAddon} focusToken={searchFocus} onClose={closeSearch} />
     </div>
   {/if}
-  <UploadStatus {root} sessionId={termId} onCancel={cancelUpload} />
+  <UploadStatus
+    {root}
+    sessionId={termId}
+    unavailable={termId == null ? 'The terminal is still connecting' : null}
+    onCancel={cancelUpload}
+  />
   {#if sizeBadge !== null}
     <div
       class="pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 rounded-md bg-surface-raised px-3 py-1.5 text-sm font-medium text-fg shadow-soft"

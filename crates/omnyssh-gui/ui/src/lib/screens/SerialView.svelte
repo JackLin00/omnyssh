@@ -112,7 +112,7 @@
     if (serialId == null || bytes.length === 0 || blocksInput(get(uploads).get(serialId))) return;
     writeChain = writeChain.then(async () => {
       for (const chunk of chunkBytes(bytes)) {
-        if (destroyed || serialId == null) return;
+        if (destroyed || serialId == null || blocksInput(get(uploads).get(serialId))) return;
         try {
           await serialWrite(serialId, Array.from(chunk));
         } catch {
@@ -576,7 +576,12 @@
         {sizeBadge} px
       </div>
     {/if}
-    <UploadStatus root={dropRoot} sessionId={serialId} onCancel={cancelUpload} />
+    <UploadStatus
+      root={dropRoot}
+      sessionId={serialId}
+      unavailable={serialId == null || !canSend ? `${opts.config.port} is not open` : null}
+      onCancel={cancelUpload}
+    />
   </div>
   <QuickCommandBar
     enabled={canSend}
