@@ -39,6 +39,8 @@ vi.mock('$lib/bindings', () => {
       passwordRequired: channel('passwordRequired'),
       hostKeyChanged: channel('hostKeyChanged'),
       logStopped: channel('logStopped'),
+      uploadProgress: channel('uploadProgress'),
+      uploadFinished: channel('uploadFinished'),
       error: channel('error')
     }
   };
@@ -57,6 +59,7 @@ import { passwordPrompt, passwordQueue } from '$lib/stores/password';
 import { hostKeyPrompt, hostKeyQueue } from '$lib/stores/hostKey';
 import { sessionLogs, logStarted } from '$lib/stores/sessionLogs';
 import { statusNotice } from '$lib/stores/notifications';
+import { startUpload, uploads } from '$lib/stores/uploads';
 import { startEventBridge } from './subscribe';
 
 describe('startEventBridge', () => {
@@ -131,6 +134,17 @@ describe('startEventBridge', () => {
     expect(get(sessionLogs).has(42)).toBe(false);
     expect(get(statusNotice)?.message).toBe('Saved log to /logs/web-1.log');
     statusNotice.set(null);
+  });
+
+  it('upload events move the upload along and end it', async () => {
+    await startEventBridge();
+    await startUpload(42, 'zmodem', ['/a.bin'], () => Promise.resolve());
+    listeners.uploadProgress({
+      payload: { sessionId: 42, waiting: true, fileIndex: 0, fileCount: 0, fileName: '', sent: 0, total: 0 }
+    });
+    expect(get(uploads).get(42)?.phase).toBe('waiting');
+    listeners.uploadFinished({ payload: { sessionId: 42, ok: true, message: 'uploaded a.bin (1 B)' } });
+    expect(get(uploads).has(42)).toBe(false);
   });
 
   it('terminal-exited closes the tab whose backend id matches', async () => {

@@ -30,6 +30,7 @@ import {
   applyHostKeyChanged
 } from './router';
 import { applyLogStopped } from '$lib/stores/sessionLogs';
+import { applyUploadFinished, applyUploadProgress } from '$lib/stores/uploads';
 
 export async function startEventBridge(): Promise<() => void> {
   const offs: UnlistenFn[] = [];
@@ -57,6 +58,8 @@ export async function startEventBridge(): Promise<() => void> {
     offs.push(await events.passwordRequired.listen((e) => applyPasswordRequired(e.payload)));
     offs.push(await events.hostKeyChanged.listen((e) => applyHostKeyChanged(e.payload)));
     offs.push(await events.logStopped.listen((e) => applyLogStopped(e.payload)));
+    offs.push(await events.uploadProgress.listen((e) => applyUploadProgress(e.payload)));
+    offs.push(await events.uploadFinished.listen((e) => applyUploadFinished(e.payload)));
     offs.push(await events.error.listen((e) => applyError(e.payload.message)));
   } catch (err) {
     offs.forEach((off) => off());

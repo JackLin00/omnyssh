@@ -2,6 +2,7 @@
   import '../app.css';
   import { onMount } from 'svelte';
   import { startEventBridge } from '$lib/ipc/subscribe';
+  import { startDropListener } from '$lib/screens/dropTargets';
   import { reloadHosts, refreshMetrics, setTrayBehavior } from '$lib/ipc/commands';
   import { theme } from '$lib/stores/theme';
   import { sidebarCollapsed } from '$lib/stores/ui';
@@ -74,9 +75,16 @@
         reloadHosts().catch((err) => lastError.set(err instanceof Error ? err.message : String(err)));
       })
       .catch(() => {});
+    // Files dragged onto a terminal or serial view upload there (plan Q).
+    let stopDrop: (() => void) | undefined;
+    void startDropListener().then((off) => {
+      if (disposed) off();
+      else stopDrop = off;
+    });
     return () => {
       disposed = true;
       stop?.();
+      stopDrop?.();
       stopRefresh();
       stopTray();
       stopHotkey();
