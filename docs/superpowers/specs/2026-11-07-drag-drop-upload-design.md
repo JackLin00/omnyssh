@@ -23,14 +23,14 @@
 - 会话工具栏有一个协议下拉框，用来**临时覆盖**协议，只对本次会话生效，不写回配置。没有保存的临时串口会话默认用 ZMODEM。
 
 ## 拖放交互
-- 用 Tauri 2 webview 的 `onDragDropEvent`，按坐标找到落点所在的终端窗格或串口标签页。落点不在任何终端上就不做任何事。
+- 用 Tauri 2 webview 的 `onDragDropEvent`，按坐标找到落点所在的终端窗格或串口标签页。落点不在任何终端上就不做任何事。坐标：Windows（WebView2）是物理像素，需除以 `devicePixelRatio`；macOS、Linux 已是页面坐标。只接收（monitor）模式的串口标签页不接收拖放。
 - 拖动经过时，目标窗格上显示半透明遮罩："松开以 <协议> 上传到 <会话名>"。
 - **多个文件**：ZMODEM、YMODEM、SFTP 都支持一次传多个。XMODEM 拖入多个文件时拒绝，提示"XMODEM 仅支持单文件"。
 - **文件夹**：拒绝，提示"不支持上传文件夹"。
 - **已有传输进行中**：拒绝，提示"已有传输进行中"。
 - **传输期间**（ZMODEM、YMODEM、XMODEM）：
   - 窗格底部显示进度条：文件名、`第 i/n 个`、百分比、速率，以及"取消"按钮。
-  - 终端的键盘输入被禁用，避免按键混进协议数据流。
+  - 终端的键盘输入被禁用，避免按键混进协议数据流（实现为丢弃输入字节，不做禁用样式）。
   - 结束后在终端里打印一行（英文，界面文字都是英文），比如 `[upload] uploaded foo.bin (1.2 MB)`、`[upload] failed: <原因>`、`[upload] uploaded 2 of 3 files, 1 skipped by the receiver`。完整规则见计划 P 决定 2。
 - **SFTP**：终端不受影响，不禁用输入。进度用同一个进度条显示，同样来自 `upload-progress` 事件。
 
@@ -129,7 +129,7 @@ pub fn start(protocol: Protocol, files: Vec<UploadFile>, now: Instant) -> Box<dy
 - **会话日志**：协议字节不写入日志，终端里的结果行（见计划 P 决定 2）作为普通输出进入日志。
 
 ### 前端：`omnyssh-gui/ui`
-- 拖放的命中判断和协议决策（预设、临时覆盖、多文件和文件夹拒绝）放进一个纯 TS 模块。
+- 命中判断在 `screens/dropTargets.ts`；XMODEM 多文件和"已有上传"的预检查在 `stores/uploads.ts`；预设和临时覆盖在各视图里取值；文件夹由后端命令拒绝（拖动经过时无法知道是不是文件夹），拒绝原因以 `Upload: <原因>` 显示在状态栏。详见计划 Q。
 - `TerminalPane.svelte` 和 `SerialView.svelte` 负责遮罩、进度条，以及传输期间禁用输入。
 - 主机表单和串口设备表单加协议字段，SFTP 时加上传目录。
 

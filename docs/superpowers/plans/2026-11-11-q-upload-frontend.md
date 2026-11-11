@@ -24,6 +24,8 @@
 
 ## 实现中确定的设计决定
 
+> **执行记录**：执行中各任务的代码审查又发现并修复了若干问题（Windows 以外的拖放坐标、不带文件的拖动、长粘贴混进上传流、分屏标题栏里的下拉框打不开、下拉框配色和焦点、取消后键盘不回终端、终端连上之前就接受拖放、关闭标签后的迟到错误、速率取样），设计决定已按最终行为更新。最终：vitest 479 个、Playwright 109 个（原有 97 个，`upload.spec.ts` 11 个，`terminal.spec.ts` 新增 1 个）。各任务里的补丁是最初版本，最终代码以仓库为准。
+
 > 写这份计划时，整套改动已经在仓库的临时副本里完整实现并验证过：`npm run check`（0 错误 0 警告）、`npx vitest run`（470 个）、全量 Playwright（104 个，原有 97 个加新增 7 个）都通过。之后按下面 5 个任务在另一个副本里逐个重放、逐个验证，补丁就是从这串提交生成的，又在第三个副本上按顺序应用验证过：每个测试补丁之后相关测试失败（失败情况写在各任务里），每个实现补丁之后通过；最后连跑 3 遍全量 Playwright 都通过。
 
 1. **拖放怎么接收**：Tauri 2 默认开启 `dragDropEnabled`，系统的文件拖放会被 Tauri 接走，页面自己的 HTML5 拖放事件不会触发。所以在 `+layout.svelte` 启动时挂一个 `getCurrentWebview().onDragDropEvent` 监听（全局只有一个）。事件里的坐标虽然标成 `PhysicalPosition`，Tauri 其实没有换算，是 wry 原样给的：Windows（WebView2，`ScreenToClient`）是物理像素，要除以 `devicePixelRatio`；macOS（`draggingLocation`，AppKit point）和 Linux（GTK 控件坐标）本身就是页面坐标，不能再除。（执行中修正：计划原本对所有平台都除以 `devicePixelRatio`，在 Retina 屏上文件会落到错误的窗格。执行时还加了：拖动的不是文件（macOS 会对文字、链接拖动发出不带路径的 enter）时不显示遮罩；悬停状态没变时不重写 store。）不在 Tauri 里（普通浏览器、没有 webview 元数据的测试页）时，监听什么都不做。
@@ -31,18 +33,18 @@
 3. **上传状态**按后端会话 id 记在 `uploads` store 里：
    - 发出命令时进入 `starting`（SFTP 显示"Connecting for SFTP…"，可能停在密码提示上），收到 `waiting: true` 进入 `waiting`，收到进度进入 `sending`。
    - 收到 `upload-finished` 时清掉；会话结束（窗格销毁：用户关闭或 `terminal-exited`；串口断开；串口重连；关闭标签页）时调用 `endUpload` 清掉，因为这些情况可能没有 `upload-finished`（见计划 P 的接口说明）。
-   - 命令返回错误：清掉，在状态栏显示 `Upload: <原因>`；错误是 `cancelled`（SFTP 连接建立期间取消）时不算错误，什么都不显示。
+   - 命令返回错误：清掉，在状态栏显示 `Upload: <原因>`；错误是 `cancelled`（SFTP 连接建立期间取消）时不算错误，什么都不显示；会话在命令返回前已经结束（例如 SFTP 连接建立期间关掉了窗格）时，迟到的错误也不显示。
    - 结束时不弹提示：终端里的结果行由后端打印。
 4. **界面文字用英文**（和整个界面一致），spec 里的中文只是意思：
    - 遮罩：`Drop to upload with ZMODEM to web-1`；YMODEM 多文件时加一行 `A bootloader such as U-Boot takes only the first file`；XMODEM 多文件时遮罩直接显示 `XMODEM sends one file at a time`。
    - 进度条：`Starting ZMODEM…` / `Connecting for SFTP…` / `Waiting for rz…`（ZMODEM）/ `Waiting for the receiver…`（Y/XMODEM）/ `fw.bin · 2/3 · 50% · 1.2 MB/s`，右边一个 `Cancel` 按钮。速率按同一个文件相邻两次进度平滑计算（权重 0.3），换文件时重算；ZMODEM 进度倒退时不更新速率。
-5. **上传期间的键盘输入**：ZMODEM/YMODEM/XMODEM 进行时，窗格和串口的 `sendInput` 直接丢掉要发的字节（键盘、粘贴、快捷命令栏都走这里）；SFTP 不影响输入。没有另外把输入框做成禁用状态。
+5. **上传期间的键盘输入**：ZMODEM/YMODEM/XMODEM 进行时，窗格和串口的 `sendInput` 直接丢掉要发的字节（键盘、粘贴、快捷命令栏都走这里；长粘贴分块发送时每一块都再查一次）；SFTP 不影响输入。没有另外把输入框做成禁用状态。点 Cancel 不会把焦点从终端拿走，结束后可以直接接着打字。
 6. **协议下拉框**（spec 的"临时覆盖"）：
    - 终端：放在悬停工具栏和分屏标题栏里，选项 ZMODEM / SFTP；默认取主机的 `uploadProtocol`（没有时 ZMODEM），改了只对这个窗格生效，不写回配置。
    - 串口：放在标签页顶部栏，选项 ZMODEM / YMODEM / XMODEM；从已保存设备打开时取设备的 `uploadProtocol`，临时打开的串口默认 ZMODEM。
    - 上传进行中下拉框锁定。按仓库规则（`select.test.ts`），下拉框一律用 `Select.svelte`，不能直接写 `<select>`；终端下拉框用 Svelte 5 的函数式绑定，显示"覆盖值，没有覆盖时用主机设置"。
 7. **只接收（monitor）模式的串口标签页**不发数据，所以不登记拖放目标、也不显示协议下拉框；拖到上面没有任何反应。
-8. **前端的预检查**（其余由后端检查，后端的拒绝原样显示）：XMODEM 多文件、这个会话已有上传、终端还在连接（`The terminal is still connecting`）、串口没有打开（`COM3 is not open`）。
+8. **前端的预检查**（其余由后端检查，后端的拒绝原样显示）：XMODEM 多文件、这个会话已有上传、终端还没连上（状态不是 connected 时：`The terminal is still connecting`，连接失败时 `The terminal is not connected`）、串口没有打开（`COM3 is not open`）。这些情况在拖动经过时遮罩就直接显示拒绝原因。
 9. **表单**：
    - 主机：`Drag-and-drop upload` 下拉框（`ZMODEM (rz)` / `SFTP`），选 SFTP 时出现 `Upload folder` 输入框（空表示 home）。保存时总是带上 `uploadProtocol`（后端把省略理解为"保持原值"，而且目录跟着协议走），`uploadDir` 只在 SFTP 时发送。
    - 串口设备：`Drag-and-drop upload` 下拉框（ZMODEM / YMODEM / XMODEM），保存时带上 `uploadProtocol`，修掉计划 P 留下的"保存会重置为 ZMODEM"。
@@ -1998,7 +2000,7 @@ cd crates/omnyssh-gui/ui && nohup sh -c 'npm run check 2>&1 | tail -1; npx vites
 ```
 然后反复 `tail -20 /tmp/q.log`，直到出现 `EXIT=`（命令结束后回到仓库根目录：`cd ../../..`）。
 
-Expected: svelte-check `0 ERRORS 0 WARNINGS`；vitest 470 个通过；两遍 Playwright 都是 104 个通过。如果某个原有用例偶发失败，单独重跑它（`npx playwright test e2e/<文件>:<行号> --repeat-each=5`）并在报告里写明，不要改代码掩盖。
+Expected: svelte-check `0 ERRORS 0 WARNINGS`；vitest 470 个通过；两遍 Playwright 都是 104 个通过（这是计划原始代码的数字；执行中审查补了测试，最终是 vitest 479 个、Playwright 109 个）。如果某个原有用例偶发失败，单独重跑它（`npx playwright test e2e/<文件>:<行号> --repeat-each=5`）并在报告里写明，不要改代码掩盖。
 
 - [ ] **Step 2: 手动验证清单（需要人在真实应用里做，执行者只需在报告里列出来）**
 
@@ -2010,6 +2012,16 @@ Expected: svelte-check `0 ERRORS 0 WARNINGS`；vitest 470 个通过；两遍 Pla
 5. 分屏后拖到右边的窗格：传到右边窗格的会话。
 6. 串口（如果有开发板）：U-Boot 里执行 `loady`，在串口标签页把协议改成 YMODEM 后拖入 `.bin`，进度条走完，U-Boot 报告收到的大小。
 7. Windows 和 macOS 上各试一次拖放坐标（高 DPI 屏幕）：遮罩出现在鼠标所在的窗格上。
+8. 点 Cancel 后不点终端直接打字：按键进入 shell（单窗格和分屏各试一次）。
+9. Windows 缩放 125%/150% 的屏幕上拖放，再把窗口拖到 100% 的屏幕上重试；macOS Retina 屏上试，包括窗口一部分在屏幕外时。
+10. Windows：拖 Outlook 附件、资源管理器里 zip 内的文件、浏览器里的图片：没有遮罩、没有反应（WebView2 对不带文件列表的拖动不发事件），记为已知行为。
+11. Linux：拖进窗口、不松手移出、再移回：遮罩正确消失和出现，移出后没有残留；从文件管理器拖入路径带空格或中文的文件。
+12. 拖过分屏分隔线、窗格标题栏、悬停工具栏、打开的查找框：遮罩跟着鼠标下的窗格走，松在标题栏上传给该窗格。（分隔线上没有遮罩、松手无反应，属于已知行为。）
+13. 打开设置或密码对话框时拖过窗口：没有遮罩，松手无反应。
+14. 终端还在连接（慢主机、或密码对话框开着）时拖入：遮罩显示 `The terminal is still connecting`，松手无反应。
+15. 密码登录的主机用 SFTP：拖入后在密码对话框点取消：进度条消失，状态栏显示原因；再试一次，在 `Connecting for SFTP…` 时点 Cancel：不显示错误。
+16. YMODEM 上传中拔掉 USB 串口，再重连：进度条消失，可以打字，新的拖放能重新开始。
+17. 在后台标签页里上传，切走再切回：进度条正常；上传中关掉这个标签页：不留残留、不报错。
 
 - [ ] **Step 3: 如果 Step 1 有失败**
 
