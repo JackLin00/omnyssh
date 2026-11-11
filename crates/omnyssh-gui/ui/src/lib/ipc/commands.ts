@@ -7,6 +7,7 @@ import type {
   FileEntryDto,
   HostDto,
   HostInputDto,
+  HostUploadProtocolDto,
   HostKeyDecisionDto,
   LogModeDto,
   LogStatusDto,
@@ -16,6 +17,7 @@ import type {
   SerialDeviceDto,
   SerialExitDto,
   SerialPortDto,
+  SerialUploadProtocolDto,
   SnippetDto,
   TerminalBytes,
   TraySupportDto,
@@ -392,5 +394,32 @@ export async function saveTextFile(path: string, text: string): Promise<void> {
 /** Show a saved log or export in the system file manager. */
 export async function revealPath(path: string): Promise<void> {
   const res = await commands.revealPath(path);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Upload `paths` into terminal `sessionId` (ZMODEM to `rz`, or SFTP). Resolves once it
+ *  started; `upload-progress` and `upload-finished` follow. */
+export async function terminalUpload(
+  sessionId: number,
+  protocol: HostUploadProtocolDto,
+  paths: string[]
+): Promise<void> {
+  const res = await commands.terminalUpload(sessionId, protocol, paths);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Upload `paths` to serial port `sessionId`. */
+export async function serialUpload(
+  sessionId: number,
+  protocol: SerialUploadProtocolDto,
+  paths: string[]
+): Promise<void> {
+  const res = await commands.serialUpload(sessionId, protocol, paths);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Cancel session `sessionId`'s upload, if any. */
+export async function uploadCancel(sessionId: number): Promise<void> {
+  const res = await commands.uploadCancel(sessionId);
   if (res.status === 'error') throw new Error(res.error.message);
 }
