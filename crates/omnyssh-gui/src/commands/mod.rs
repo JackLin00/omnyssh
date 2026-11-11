@@ -14,3 +14,4 @@ pub mod terminal;
 pub mod tray;
 pub mod tunnels;
 pub mod update;
+pub mod upload;

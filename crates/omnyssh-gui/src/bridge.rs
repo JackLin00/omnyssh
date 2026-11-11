@@ -4,6 +4,7 @@
 //! forwarder (`forward_terminal_output`) into the per-session channels (§3.6).
 
 use omnyssh_core::event::{CoreEvent, SessionId};
+use omnyssh_core::transfer::{UploadEvent, UploadResult};
 use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 use tokio::sync::mpsc;
@@ -11,6 +12,7 @@ use tokio::sync::mpsc;
 use crate::dto::{FileEntryDto, KeyFingerprintDto, TransferProgressDto, TunnelStatusDto};
 use crate::events;
 use crate::state::GuiState;
+use crate::upload;
 
 pub async fn forward_core_events(app: AppHandle, mut rx: mpsc::Receiver<CoreEvent>) {
     while let Some(event) = rx.recv().await {
@@ -110,6 +112,14 @@ pub async fn forward_core_events(app: AppHandle, mut rx: mpsc::Receiver<CoreEven
                     let _ = events::TerminalExited { session_id }.emit(&app);
                 }
             }
+            // A terminal's upload, by inner PTY id. The core has already shown its
+            // result line in the terminal; a closed tab gets nothing.
+            CoreEvent::Upload(inner_id, event) => {
+                let state = app.state::<GuiState>();
+                if let Some(session_id) = state.terminal_public(inner_id) {
+                    emit_upload(&app, &state, session_id, event);
+                }
+            }
             // Auto key-setup (§4.2): `start_key_setup` drives the core and reports these
             // on the shared engine channel; the host name identifies the run.
             CoreEvent::KeySetupProgress(host_name, step) => {
@@ -154,6 +164,65 @@ pub async fn forward_terminal_output(app: AppHandle, mut rx: mpsc::Receiver<(Ses
         app.state::<GuiState>()
             .send_terminal_output(inner_id, bytes);
     }
+}
+
+/// Emit an upload event of session `session_id`; an ending also frees the
+/// session for the next upload.
+pub fn emit_upload(app: &AppHandle, state: &GuiState, session_id: SessionId, event: UploadEvent) {
+    match event {
+        UploadEvent::Progress(progress) => {
+            if let Some(e) = upload::progress_event(session_id, &progress) {
+                let _ = e.emit(app);
+            }
+        }
+        UploadEvent::Finished(result) => {
+            state.uploads().end(session_id);
+            let _ = finished_event(session_id, result).emit(app);
+        }
+    }
+}
+
+fn finished_event(session_id: SessionId, result: UploadResult) -> events::UploadFinished {
+    events::UploadFinished {
+        session_id,
+        ok: result.ok,
+        message: result.message,
+    }
+}
+
+/// Drains the SFTP connection a terminal uploads through: progress becomes
+/// `upload-progress`, each finished file sends the next, and the end prints
+/// the result line in the terminal. A connection that goes away mid-upload
+/// ends it as lost.
+pub async fn forward_upload_sftp_events(
+    app: AppHandle,
+    session_id: SessionId,
+    mut rx: mpsc::Receiver<CoreEvent>,
+) {
+    let state = app.state::<GuiState>();
+    while let Some(event) = rx.recv().await {
+        let end = match event {
+            CoreEvent::FileTransferProgress(_, done, total) => {
+                if let Some(e) = state.uploads().sftp_progress(session_id, done, total) {
+                    let _ = e.emit(&app);
+                }
+                None
+            }
+            CoreEvent::SftpOpDone { result } => state.uploads().sftp_done(session_id, result),
+            _ => None,
+        };
+        if let Some(result) = end {
+            finish_sftp(&app, &state, session_id, result);
+        }
+    }
+    if let Some(result) = state.uploads().sftp_lost(session_id) {
+        finish_sftp(&app, &state, session_id, result);
+    }
+}
+
+fn finish_sftp(app: &AppHandle, state: &GuiState, session_id: SessionId, result: UploadResult) {
+    state.print_to_terminal(session_id, result.line().as_bytes());
+    let _ = finished_event(session_id, result).emit(app);
 }
 
 /// A typed SFTP event stamped with its owning session id, ready to emit. Built by

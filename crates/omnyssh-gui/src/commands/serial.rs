@@ -1,7 +1,8 @@
 //! Serial port commands. Received bytes stream out on the tab's own raw
 //! `Channel`, like a terminal's; a port that fails reports once on the tab's exit
-//! channel, so nothing goes through the global event bus and no exit can race
-//! ahead of the id the frontend is waiting for.
+//! channel, so no exit can race ahead of the id the frontend is waiting for.
+//! Only uploads report on the global bus, as `upload-*` events like a
+//! terminal's.
 
 use omnyssh_core::config::serial_devices::{
     load_serial_devices, save_serial_devices, SerialDevice,
@@ -10,8 +11,9 @@ use omnyssh_core::event::SessionId;
 use omnyssh_core::serial::{self, SerialOutput, SerialSession};
 use omnyssh_core::transfer::UploadEvent;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
+use crate::bridge;
 use crate::dto::{SerialConfigDto, SerialDeviceDto, SerialExitDto, SerialPortDto, TerminalBytes};
 use crate::error::CommandError;
 use crate::session_log::SessionLogs;
@@ -40,6 +42,7 @@ pub async fn serial_list_ports() -> Result<Vec<SerialPortDto>, CommandError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn serial_open(
+    app: AppHandle,
     state: State<'_, GuiState>,
     config: SerialConfigDto,
     on_output: Channel<TerminalBytes>,
@@ -60,8 +63,7 @@ pub async fn serial_open(
                 |error| {
                     let _ = on_exit.send(SerialExitDto { error });
                 },
-                // Nothing starts an upload yet.
-                |_| {},
+                |event| bridge::emit_upload(&app, &app.state::<GuiState>(), id, event),
             )
         })
     })

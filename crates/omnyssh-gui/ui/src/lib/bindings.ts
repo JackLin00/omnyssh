@@ -270,6 +270,42 @@ async deleteSerialDevice(name: string) : Promise<Result<null, CommandError>> {
 }
 },
 /**
+ * Upload `paths` into terminal `session_id`: ZMODEM to `rz` in its shell, or
+ * SFTP into the host's upload folder over a connection kept for the terminal.
+ */
+async terminalUpload(sessionId: number, protocol: HostUploadProtocolDto, paths: string[]) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("terminal_upload", { sessionId, protocol, paths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Upload `paths` to serial port `session_id`. ZMODEM types `rz -b` first;
+ * YMODEM and XMODEM wait for the receiver the user started (`loady`, `rx`).
+ */
+async serialUpload(sessionId: number, protocol: SerialUploadProtocolDto, paths: string[]) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("serial_upload", { sessionId, protocol, paths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancel session `session_id`'s upload. ZMODEM, YMODEM and XMODEM stop at once;
+ * SFTP after the file being sent. A session without one is a no-op.
+ */
+async uploadCancel(sessionId: number) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("upload_cancel", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Ask where to save, starting from `default_name` in the folder of the last
  * save (the Documents folder the first time). `None` when the user cancels.
  * Overwriting an existing file is confirmed by the dialog itself.
@@ -690,7 +726,9 @@ snippetResult: SnippetResult,
 terminalExited: TerminalExited,
 transferProgress: TransferProgress,
 tunnelStatusChanged: TunnelStatusChanged,
-updateAvailable: UpdateAvailable
+updateAvailable: UpdateAvailable,
+uploadFinished: UploadFinished,
+uploadProgress: UploadProgress
 }>({
 error: "error",
 filePreview: "file-preview",
@@ -715,7 +753,9 @@ snippetResult: "snippet-result",
 terminalExited: "terminal-exited",
 transferProgress: "transfer-progress",
 tunnelStatusChanged: "tunnel-status-changed",
-updateAvailable: "update-available"
+updateAvailable: "update-available",
+uploadFinished: "upload-finished",
+uploadProgress: "upload-progress"
 })
 
 /** user-defined constants **/
@@ -1049,6 +1089,18 @@ export type UpdateConfigDto = { checkOnStartup: boolean; skipVersion: string }
  * none is invented (§4.1).
  */
 export type UpdateInfoDto = { version: string; url: string; tag: string; canSelfUpdate: boolean }
+/**
+ * A drag-and-drop upload ended. `message` is what the terminal's result line
+ * says: `uploaded foo.bin (1.2 MB)`, `cancelled`, or why it failed. Ends every
+ * upload a command started, including one whose session went away.
+ */
+export type UploadFinished = { sessionId: number; ok: boolean; message: string }
+/**
+ * How a drag-and-drop upload in a terminal or serial tab is going. `waiting`
+ * while the receiver has not started yet (the other fields are then empty);
+ * `fileIndex` counts from 0. At most every 100 ms per session.
+ */
+export type UploadProgress = { sessionId: number; waiting: boolean; fileIndex: number; fileCount: number; fileName: string; sent: number; total: number }
 
 /** tauri-specta globals **/
 

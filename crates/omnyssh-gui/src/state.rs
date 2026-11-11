@@ -20,8 +20,11 @@ use omnyssh_core::ssh::tunnel::TunnelManager;
 use tauri::ipc::Channel;
 use tokio::sync::mpsc;
 
+use omnyssh_core::transfer::ActiveUpload;
+
 use crate::dto::{HostDto, TerminalBytes, TunnelStatusDto};
 use crate::session_log::SessionLogs;
+use crate::upload::Uploads;
 
 /// Metric poll cadence. Mirrors the TUI's fixed interval; a configurable refresh
 /// interval lands with settings in Stage 4.3 (tech-gui.md §4.3).
@@ -119,6 +122,8 @@ pub struct GuiState {
     picked_paths: Mutex<HashSet<PathBuf>>,
     /// The folder of the last picked path, where the next save dialog opens.
     save_dir: Mutex<Option<PathBuf>>,
+    /// Drag-and-drop uploads: who is uploading, and each terminal's SFTP connection.
+    uploads: Uploads,
     /// Shared engine channel the bridge drains; cloned to `PollManager`/`PtyManager`.
     engine_tx: mpsc::Sender<CoreEvent>,
 }
@@ -142,6 +147,7 @@ impl GuiState {
             logs: Arc::new(SessionLogs::default()),
             picked_paths: Mutex::new(HashSet::new()),
             save_dir: Mutex::new(None),
+            uploads: Uploads::default(),
             engine_tx,
         }
     }
@@ -359,11 +365,13 @@ impl GuiState {
             .lock()
             .expect("term_channels lock poisoned")
             .insert(inner, channel);
-        Ok(self
+        let public = self
             .sessions
             .lock()
             .expect("sessions lock poisoned")
-            .register_terminal(inner))
+            .register_terminal(inner);
+        self.uploads.terminal_opened(public, host_name);
+        Ok(public)
     }
 
     /// Resolve a public id to its live PTY inner id and run `f` on the manager. The
@@ -411,6 +419,7 @@ impl GuiState {
                 .expect("term_channels lock poisoned")
                 .remove(&inner);
         }
+        self.uploads.session_closed(public);
         self.logs.stop(public);
     }
 
@@ -455,6 +464,7 @@ impl GuiState {
             .expect("term_channels lock poisoned")
             .remove(&inner);
         if let Some(public) = public {
+            self.uploads.session_closed(public);
             self.logs.stop(public);
         }
         public
@@ -556,10 +566,80 @@ impl GuiState {
     /// session's callback might take. A port that already failed stays in the map
     /// until this, which is harmless — writes to it go nowhere.
     pub fn take_serial(&self, id: SessionId) -> Option<SerialSession> {
+        self.uploads.session_closed(id);
         self.serial
             .lock()
             .expect("serial lock poisoned")
             .remove(&id)
+    }
+
+    /// Drag-and-drop upload bookkeeping.
+    pub fn uploads(&self) -> &Uploads {
+        &self.uploads
+    }
+
+    /// Run `upload` in terminal `public`, after typing `preamble` there.
+    pub fn upload_terminal(
+        &self,
+        public: SessionId,
+        preamble: &[u8],
+        upload: ActiveUpload,
+    ) -> Result<(), String> {
+        let mut upload = Some(upload);
+        self.on_pty_inner(public, |pty, inner| {
+            if let Some(upload) = upload.take() {
+                pty.upload(inner, preamble, upload);
+            }
+        });
+        match upload {
+            None => Ok(()),
+            Some(_) => Err("the terminal is closed".to_string()),
+        }
+    }
+
+    /// Run `upload` on serial port `id`, after sending `preamble` there.
+    pub fn upload_serial(
+        &self,
+        id: SessionId,
+        preamble: &[u8],
+        upload: ActiveUpload,
+    ) -> Result<(), String> {
+        match self.serial.lock().expect("serial lock poisoned").get(&id) {
+            Some(session) => {
+                session.upload(preamble, upload);
+                Ok(())
+            }
+            None => Err("the port is closed".to_string()),
+        }
+    }
+
+    /// Cancel whatever upload session `id` runs. Unknown ids are a no-op.
+    pub fn cancel_upload(&self, id: SessionId) {
+        self.on_pty_inner(id, |pty, inner| pty.cancel_upload(inner));
+        if let Some(session) = self.serial.lock().expect("serial lock poisoned").get(&id) {
+            session.cancel_upload();
+        }
+        self.uploads.cancel_sftp(id);
+    }
+
+    /// The public id of the terminal with PTY inner id `inner`, while it is open.
+    pub fn terminal_public(&self, inner: SessionId) -> Option<SessionId> {
+        self.sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .public_of(inner)
+    }
+
+    /// Show `bytes` in terminal `public`, and its log, as if the server sent them.
+    pub fn print_to_terminal(&self, public: SessionId, bytes: &[u8]) {
+        let inner = self
+            .sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .pty_inner(public);
+        if let Some(inner) = inner {
+            self.send_terminal_output(inner, bytes.to_vec());
+        }
     }
 
     /// The session logs, for a serial session's output callback and the flush tick.

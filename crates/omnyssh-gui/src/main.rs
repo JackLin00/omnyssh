@@ -41,6 +41,7 @@ use commands::terminal::{
 use commands::tray::set_tray_behavior;
 use commands::tunnels::{tunnel_start, tunnel_stop};
 use commands::update::{check_update, install_update, load_update_config, save_update_config};
+use commands::upload::{serial_upload, terminal_upload, upload_cancel};
 use omnyssh_core::event::{CoreEvent, SessionId};
 use omnyssh_core::ssh::pty::PtyManager;
 use state::GuiState;
@@ -125,6 +126,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
             list_serial_devices,
             save_serial_device,
             delete_serial_device,
+            terminal_upload,
+            serial_upload,
+            upload_cancel,
             pick_save_path,
             log_start,
             log_stop,
@@ -183,6 +187,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             events::PasswordRequired,
             events::HostKeyChanged,
             events::LogStopped,
+            events::UploadProgress,
+            events::UploadFinished,
             events::Error
         ])
 }
