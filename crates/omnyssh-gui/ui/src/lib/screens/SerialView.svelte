@@ -530,6 +530,7 @@
         title="Files dropped here upload with this"
         disabled={uploading}
         bind:value={uploadProtocol}
+        onchange={() => term?.focus()}
       >
         <option value="zmodem">ZMODEM</option>
         <option value="ymodem">YMODEM</option>
