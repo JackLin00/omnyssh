@@ -285,6 +285,12 @@ fn run<P: Read + Write>(
                     }
                 }
                 Ok(Ctrl::Close) | Err(TryRecvError::Disconnected) => {
+                    // Cancel first: the `pump` below then queues the cancel
+                    // sequence (dropping queued file data) for the close
+                    // flush, so the device is not left in receive mode.
+                    if let Some(up) = upload.as_mut() {
+                        up.cancel();
+                    }
                     closing = true;
                     break;
                 }
@@ -666,6 +672,10 @@ mod tests {
         let (session, rx) = start(port);
         let upload = ActiveUpload::start(Protocol::Xmodem, vec![one_block_file()], Instant::now());
         session.upload(b"", upload);
+        assert_eq!(
+            next(&rx),
+            SerialOutput::Upload(UploadEvent::Progress(UploadState::Waiting))
+        );
 
         feed.send(Ok(b"C".to_vec())).unwrap();
         let block = written_len(&written, 133);
@@ -688,9 +698,6 @@ mod tests {
             [&b"=> \r\n[upload] uploaded a.bin (128 B)\r\n".to_vec()],
             "protocol bytes never reach the terminal"
         );
-        assert!(seen.contains(&SerialOutput::Upload(UploadEvent::Progress(
-            UploadState::Waiting
-        ))));
 
         // Back to the terminal afterwards.
         feed.send(Ok(b"ok".to_vec())).unwrap();
@@ -717,11 +724,35 @@ mod tests {
     }
 
     #[test]
+    fn closing_during_an_upload_cancels_it() {
+        let (port, written, _feed) = FakePort::fed();
+        let (session, rx) = start(port);
+        let upload = ActiveUpload::start(Protocol::Zmodem, vec![one_block_file()], Instant::now());
+        session.upload(b"rz -b\r", upload);
+        assert_eq!(
+            next(&rx),
+            SerialOutput::Upload(UploadEvent::Progress(UploadState::Waiting))
+        );
+        assert_eq!(written_len(&written, 6), b"rz -b\r");
+        session.close();
+        while next(&rx) != SerialOutput::Closed(None) {}
+        let w = written.lock().unwrap().clone();
+        assert!(
+            w[6..].starts_with(&[0x18; 10]),
+            "the cancel sequence: {w:?}"
+        );
+    }
+
+    #[test]
     fn a_port_failing_mid_upload_reports_the_upload_lost() {
         let (port, _written, feed) = FakePort::fed();
         let (session, rx) = start(port);
         let upload = ActiveUpload::start(Protocol::Xmodem, vec![one_block_file()], Instant::now());
         session.upload(b"", upload);
+        assert_eq!(
+            next(&rx),
+            SerialOutput::Upload(UploadEvent::Progress(UploadState::Waiting))
+        );
         feed.send(Err(io::Error::new(ErrorKind::BrokenPipe, "device removed")))
             .unwrap();
 
