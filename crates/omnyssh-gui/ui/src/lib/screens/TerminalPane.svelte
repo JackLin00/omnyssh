@@ -35,6 +35,7 @@
   import { blocksInput, endUpload, startUpload, uploads } from '$lib/stores/uploads';
   import { registerDropTarget } from './dropTargets';
   import UploadStatus from './UploadStatus.svelte';
+  import { createCwdTracker, CWD_SETUP, sftpFolder } from './shellCwd';
   import Select from '$lib/components/Select.svelte';
   import { shouldFadeTop } from './terminalFade';
   import { chunkBytes, layoutFallback } from './terminalInput';
@@ -259,6 +260,12 @@
       term.onScroll(syncScrolled);
       // The shell's own title (user@host: dir) names the pane when it sets one.
       term.onTitleChange((t) => (title = t));
+      // Its folder, when it reports one (OSC 7), is where SFTP drops go.
+      term.parser.registerOscHandler(7, (data) => {
+        cwdTracker.report(data);
+        cwd = cwdTracker.cwd();
+        return true;
+      });
 
       // The #1 theme-regression guard (§5.1): push the matching xterm theme to this
       // terminal — including already-open ones — whenever the chosen scheme or the app
@@ -495,10 +502,17 @@
     protocolOverride ?? $hosts.find((h) => h.name === hostName)?.uploadProtocol ?? 'zmodem'
   );
   const uploading = $derived(termId != null && $uploads.has(termId));
+  // The shell's folder from OSC 7; null until it reports one, or while a shell on
+  // another machine (an `ssh` from this one) does.
+  const cwdTracker = createCwdTracker();
+  let cwd = $state<string | null>(null);
   $effect(() => {
     if (!root) return;
     return registerDropTarget(root, {
-      label: () => hostName,
+      label: () =>
+        uploadProtocol === 'sftp'
+          ? `${hostName}:${sftpFolder(cwd, get(hosts).find((h) => h.name === hostName)?.uploadDir)}`
+          : hostName,
       protocol: () => uploadProtocol,
       drop: upload
     });
@@ -515,9 +529,17 @@
       lastError.set(notReady);
       return;
     }
+    const dir = uploadProtocol === 'sftp' ? cwd : null;
     void startUpload(termId, uploadProtocol, paths, (id, protocol, files) =>
-      terminalUpload(id, protocol as HostUploadProtocolDto, files)
+      terminalUpload(id, protocol as HostUploadProtocolDto, files, dir)
     );
+  }
+
+  // Makes the shell report its folder, so SFTP drops follow it: types a one-line
+  // setup into the shell, lasting as long as the shell does.
+  function followFolder(): void {
+    sendInput(ENCODER.encode(CWD_SETUP));
+    term?.focus();
   }
 
   function cancelUpload(): void {
@@ -588,6 +610,21 @@
     <option value="zmodem">ZMODEM</option>
     <option value="sftp">SFTP</option>
   </Select>
+  <!-- SFTP drops go to the shell's folder once it reports one; until then, offer to
+       make it. -->
+  {#if uploadProtocol === 'sftp' && cwd === null}
+    <button
+      type="button"
+      class="{cls} grid w-auto place-items-center px-1 disabled:cursor-not-allowed disabled:opacity-40"
+      style="{style}{pickerColor}"
+      title="Upload to the shell's current folder: types a one-line setup into this shell (bash, zsh)"
+      aria-label="Follow the shell's folder"
+      disabled={uploading || status !== 'connected'}
+      onclick={followFolder}
+    >
+      <Icon name="sftp" size={13} />
+    </button>
+  {/if}
 {/snippet}
 
 <!-- Clicking anywhere in the pane, or xterm's textarea taking focus, makes it the

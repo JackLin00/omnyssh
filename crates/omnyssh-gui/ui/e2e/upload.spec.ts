@@ -82,6 +82,8 @@ async function boot(page: Page, holdConnect = false): Promise<void> {
             case 'terminal_open': {
               const chId = (args.onOutput as { id: number }).id;
               const sid = ++nextSession;
+              // Shell output on the latest terminal, for the test to send.
+              win.__output = (text: string) => send(chId, text);
               if (holdConnect && !released) held.push(chId);
               else setTimeout(() => send(chId, 'omnyssh-ready> '), 0);
               return Promise.resolve(sid);
@@ -198,7 +200,7 @@ test('a file dropped on a terminal goes up by ZMODEM, keys stay out of the trans
   await dragOnto(page, term, ['/home/me/fw.bin']);
   await expect(page.getByTestId('drop-overlay')).toHaveCount(0);
   await expect.poll(() => calls(page, 'terminal_upload')).toEqual([
-    { sessionId: 1, protocol: 'zmodem', paths: ['/home/me/fw.bin'] }
+    { sessionId: 1, protocol: 'zmodem', paths: ['/home/me/fw.bin'], dir: null }
   ]);
 
   const bar = page.getByRole('status', { name: 'Upload' });
@@ -228,10 +230,10 @@ test('the host setting and the pane override pick the protocol; SFTP leaves the 
   await boot(page);
   const term = await openTerminal(page, 'nas');
   await dragOnto(page, term, ['/a.txt', '/b.txt'], false);
-  await expect(page.getByTestId('drop-overlay')).toHaveText('Drop to upload with SFTP to nas');
+  await expect(page.getByTestId('drop-overlay')).toHaveText('Drop to upload with SFTP to nas:~/drop');
   await dragOnto(page, term, ['/a.txt', '/b.txt']);
   await expect.poll(() => calls(page, 'terminal_upload')).toEqual([
-    { sessionId: 1, protocol: 'sftp', paths: ['/a.txt', '/b.txt'] }
+    { sessionId: 1, protocol: 'sftp', paths: ['/a.txt', '/b.txt'], dir: null }
   ]);
   await expect(page.getByRole('status', { name: 'Upload' })).toContainText('Connecting for SFTP…');
   await term.click();
@@ -247,7 +249,8 @@ test('the host setting and the pane override pick the protocol; SFTP leaves the 
   await expect.poll(async () => (await calls(page, 'terminal_upload')).at(-1)).toEqual({
     sessionId: 1,
     protocol: 'zmodem',
-    paths: ['/c.bin']
+    paths: ['/c.bin'],
+    dir: null
   });
 });
 
@@ -394,6 +397,41 @@ test('a terminal still connecting takes no drops until it is connected', async (
   await expect(page.locator('.xterm-rows')).toContainText('omnyssh-ready');
   await dragOnto(page, term, ['/a.bin']);
   await expect.poll(() => calls(page, 'terminal_upload')).toEqual([
-    { sessionId: 1, protocol: 'zmodem', paths: ['/a.bin'] }
+    { sessionId: 1, protocol: 'zmodem', paths: ['/a.bin'], dir: null }
   ]);
+});
+
+test('SFTP drops follow the folder the shell reports, once it is set up to', async ({ page }) => {
+  await boot(page);
+  const term = await openTerminal(page, 'nas');
+  const output = (text: string) =>
+    page.evaluate((t) => (window as unknown as { __output: (t: string) => void }).__output(t), text);
+
+  // Until the shell reports a folder, the host's upload folder, and an offer to set it up.
+  const follow = page.getByRole('button', { name: "Follow the shell's folder" });
+  await follow.click();
+  await expect
+    .poll(async () =>
+      (await calls(page, 'terminal_write')).map((a) => new TextDecoder().decode(new Uint8Array(a.data as number[]))).join('')
+    )
+    .toContain('__omny_cwd');
+
+  // The shell now says where it is (OSC 7), after each command.
+  await output('\x1b]7;file://nas-box/var/log\x1b\\$ ');
+  await expect(follow).toHaveCount(0);
+  await dragOnto(page, term, ['/a.txt'], false);
+  await expect(page.getByTestId('drop-overlay')).toHaveText('Drop to upload with SFTP to nas:/var/log');
+  await dragOnto(page, term, ['/a.txt']);
+  await expect.poll(async () => (await calls(page, 'terminal_upload')).at(-1)).toEqual({
+    sessionId: 1,
+    protocol: 'sftp',
+    paths: ['/a.txt'],
+    dir: '/var/log'
+  });
+  await fire(page, 'upload-finished', { sessionId: 1, ok: true, message: 'uploaded 1 file' });
+
+  // `ssh` on to another machine: its folders are not where SFTP connects.
+  await output('\x1b]7;file://other/tmp\x1b\\$ ');
+  await dragOnto(page, term, ['/b.txt']);
+  await expect.poll(async () => (await calls(page, 'terminal_upload')).at(-1)?.dir).toBeNull();
 });

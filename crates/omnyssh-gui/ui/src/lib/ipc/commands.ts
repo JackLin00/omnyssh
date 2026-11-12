@@ -402,9 +402,11 @@ export async function revealPath(path: string): Promise<void> {
 export async function terminalUpload(
   sessionId: number,
   protocol: HostUploadProtocolDto,
-  paths: string[]
+  paths: string[],
+  /** SFTP's folder: the shell's, when known; null for the host's upload folder. */
+  dir: string | null = null
 ): Promise<void> {
-  const res = await commands.terminalUpload(sessionId, protocol, paths);
+  const res = await commands.terminalUpload(sessionId, protocol, paths, dir);
   if (res.status === 'error') throw new Error(res.error.message);
 }
 

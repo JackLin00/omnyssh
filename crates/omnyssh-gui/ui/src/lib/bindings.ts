@@ -271,13 +271,14 @@ async deleteSerialDevice(name: string) : Promise<Result<null, CommandError>> {
 },
 /**
  * Upload `paths` into terminal `session_id`: ZMODEM to `rz` in its shell, or
- * SFTP into the host's upload folder over a connection kept for the terminal.
+ * SFTP over a connection kept for the terminal, into `dir` (the shell's folder,
+ * when the terminal knows it) or else the host's upload folder.
  * A cancel that arrives while the SFTP connection is still being made makes this
  * return `Err("cancelled")`: treat that as a cancel, not a failure.
  */
-async terminalUpload(sessionId: number, protocol: HostUploadProtocolDto, paths: string[]) : Promise<Result<null, CommandError>> {
+async terminalUpload(sessionId: number, protocol: HostUploadProtocolDto, paths: string[], dir: string | null) : Promise<Result<null, CommandError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("terminal_upload", { sessionId, protocol, paths }) };
+    return { status: "ok", data: await TAURI_INVOKE("terminal_upload", { sessionId, protocol, paths, dir }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

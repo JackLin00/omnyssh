@@ -28,7 +28,8 @@ use crate::upload::{self, Dropped, Method, SftpFile, SftpUpload, RZ_COMMAND};
 const SFTP_EVENT_BUFFER: usize = 256;
 
 /// Upload `paths` into terminal `session_id`: ZMODEM to `rz` in its shell, or
-/// SFTP into the host's upload folder over a connection kept for the terminal.
+/// SFTP over a connection kept for the terminal, into `dir` (the shell's folder,
+/// when the terminal knows it) or else the host's upload folder.
 /// A cancel that arrives while the SFTP connection is still being made makes this
 /// return `Err("cancelled")`: treat that as a cancel, not a failure.
 #[tauri::command]
@@ -39,6 +40,7 @@ pub async fn terminal_upload(
     session_id: u64,
     protocol: HostUploadProtocolDto,
     paths: Vec<String>,
+    dir: Option<String>,
 ) -> Result<(), CommandError> {
     let method = match protocol {
         HostUploadProtocolDto::Zmodem => Method::Zmodem,
@@ -47,7 +49,7 @@ pub async fn terminal_upload(
     let dropped = checked(method, &paths)?;
     state.uploads().begin(session_id).map_err(error)?;
     let started = match method {
-        Method::Sftp => start_sftp(&app, &state, session_id, &dropped).await,
+        Method::Sftp => start_sftp(&app, &state, session_id, &dropped, dir).await,
         _ => open(&dropped).and_then(|files| {
             let upload = ActiveUpload::start(Protocol::Zmodem, files, Instant::now());
             state.upload_terminal(session_id, RZ_COMMAND, upload)
@@ -119,6 +121,7 @@ async fn start_sftp(
     state: &GuiState,
     id: u64,
     dropped: &[Dropped],
+    dir: Option<String>,
 ) -> Result<(), String> {
     // The host the terminal connected to, not whatever its name means now.
     let host = state
@@ -153,11 +156,12 @@ async fn start_sftp(
             rx,
         ));
     }
+    let dir = dir.or(host.upload_dir);
     let files = dropped
         .iter()
         .map(|d| SftpFile {
             local: d.path.clone(),
-            remote: upload::sftp_target(host.upload_dir.as_deref(), &d.name),
+            remote: upload::sftp_target(dir.as_deref(), &d.name),
             name: d.name.clone(),
             size: d.size,
         })
