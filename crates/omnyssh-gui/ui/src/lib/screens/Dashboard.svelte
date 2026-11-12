@@ -354,7 +354,8 @@
               {/if}
               <!-- Editing an import adopts it into hosts.toml (§4.2); ~/.ssh/config is
                    never written, so the action is offered whatever the source. Delete
-                   stays manual-only: there is nothing of an import to remove here. -->
+                   stays manual-only: there is nothing of an import to remove here, so an
+                   import shows it disabled with a tooltip pointing at the file. -->
               <button
                 type="button"
                 class={iconBtn}
@@ -380,6 +381,18 @@
                   title="Delete {card.host.name}"
                   aria-label="Delete {card.host.name}"
                   onclick={() => (dialog = { kind: 'delete', host: card.host })}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              {:else}
+                <!-- Shown greyed out so the missing action explains itself. aria-disabled,
+                     not disabled: a disabled button gets no hover, so no tooltip. -->
+                <button
+                  type="button"
+                  class="grid h-7 w-7 cursor-not-allowed place-items-center rounded-lg text-muted opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+                  aria-disabled="true"
+                  title="{card.host.name} comes from ~/.ssh/config — delete it there"
+                  aria-label="Delete {card.host.name}"
                 >
                   <Icon name="trash" size={14} />
                 </button>

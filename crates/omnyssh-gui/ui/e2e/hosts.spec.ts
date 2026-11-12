@@ -176,7 +176,12 @@ test('an SSH-config host is adopted by editing it', async ({ page }) => {
   // The import is marked, and there is nothing here to delete: it lives in
   // ~/.ssh/config, which this app never writes.
   await expect(page.getByText('ssh config')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Delete imported' })).toHaveCount(0);
+  // Delete is shown disabled, saying where the host lives, and does nothing.
+  const del = page.getByRole('button', { name: 'Delete imported' });
+  await expect(del).toHaveAttribute('aria-disabled', 'true');
+  await expect(del).toHaveAttribute('title', /comes from ~\/\.ssh\/config/);
+  await del.click({ force: true });
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Edit imported' }).click();
   const editor = page.getByRole('dialog', { name: 'Edit host' });
@@ -191,7 +196,10 @@ test('an SSH-config host is adopted by editing it', async ({ page }) => {
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByText('root@adopted.example.com:22')).toBeVisible();
   await expect(page.getByText('ssh config')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Delete imported' })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Delete imported' })).not.toHaveAttribute(
+    'aria-disabled',
+    'true'
+  );
 });
 
 test('rejects a new host whose name already exists', async ({ page }) => {
