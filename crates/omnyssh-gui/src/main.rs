@@ -176,6 +176,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             events::SftpDirListed,
             events::SftpOpDone,
             events::SftpDisconnected,
+            events::SftpLost,
             events::FilePreview,
             events::TransferProgress,
             events::KeySetupProgress,

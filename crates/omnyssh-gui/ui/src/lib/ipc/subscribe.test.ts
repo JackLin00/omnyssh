@@ -28,6 +28,7 @@ vi.mock('$lib/bindings', () => {
       sftpDirListed: channel('sftpDirListed'),
       sftpOpDone: channel('sftpOpDone'),
       sftpDisconnected: channel('sftpDisconnected'),
+      sftpLost: channel('sftpLost'),
       filePreview: channel('filePreview'),
       transferProgress: channel('transferProgress'),
       keySetupProgress: channel('keySetupProgress'),
@@ -180,6 +181,11 @@ describe('startEventBridge', () => {
     // The other tab stays untouched — the stamped session id keeps them apart.
     expect(tab22?.status).toBe('connecting');
     expect(tab22?.remote.entries).toHaveLength(0);
+
+    // A lost connection ends only its own tab.
+    listeners.sftpLost({ payload: { sessionId: 22, reason: 'gone' } });
+    expect(get(sftp).get(22)?.lost).toBe('gone');
+    expect(get(sftp).get(11)?.lost).toBeUndefined();
 
     sftp.remove(11);
     sftp.remove(22);

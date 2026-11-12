@@ -20,6 +20,7 @@ import {
   applySftpConnected,
   applySftpDirListed,
   applySftpDisconnected,
+  applySftpLost,
   applySftpOpDone,
   applySnippetResult,
   applyTerminalExited,
@@ -47,6 +48,7 @@ export async function startEventBridge(): Promise<() => void> {
     offs.push(await events.sftpDirListed.listen((e) => applySftpDirListed(e.payload)));
     offs.push(await events.sftpOpDone.listen((e) => applySftpOpDone(e.payload)));
     offs.push(await events.sftpDisconnected.listen((e) => applySftpDisconnected(e.payload)));
+    offs.push(await events.sftpLost.listen((e) => applySftpLost(e.payload)));
     offs.push(await events.filePreview.listen((e) => applyFilePreview(e.payload)));
     offs.push(await events.transferProgress.listen((e) => applyTransferProgress(e.payload)));
     offs.push(await events.keySetupProgress.listen((e) => applyKeySetupProgress(e.payload)));

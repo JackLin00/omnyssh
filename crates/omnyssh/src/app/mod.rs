@@ -1026,7 +1026,7 @@ impl App {
                 self.view.status_message = Some(format!("Connected to '{}'", host_name));
             }
 
-            CoreEvent::SftpDisconnected { reason } => {
+            CoreEvent::SftpDisconnected { reason } | CoreEvent::SftpLost { reason } => {
                 self.sftp_manager = None;
                 self.view.file_manager.connected_host = None;
                 self.view.file_manager.sftp_connecting = false;

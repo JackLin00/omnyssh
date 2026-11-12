@@ -109,6 +109,9 @@ pub enum CoreEvent {
     },
     /// SFTP session closed or failed.
     SftpDisconnected { reason: String },
+    /// The SSH connection under a running SFTP session is gone; the session has
+    /// ended and takes no more commands.
+    SftpLost { reason: String },
     /// Preview bytes available for a file.
     FilePreviewReady { path: String, content: String },
     /// A mutating SFTP operation (delete, mkdir, rename, upload, download) finished.

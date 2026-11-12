@@ -119,6 +119,16 @@ pub struct SftpDisconnected {
     pub reason: String,
 }
 
+/// The connection under an SFTP session is gone (tech-gui.md §4.3). Unlike
+/// `sftp-disconnected` this is final: the session takes no more commands, and the
+/// tab offers to reconnect.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpLost {
+    pub session_id: u64,
+    pub reason: String,
+}
+
 /// Preview bytes for a remote file (tech-gui.md §4.3). Stamped with `sessionId`; the
 /// core `FilePreviewReady` carries only the path + content (§3.4).
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]

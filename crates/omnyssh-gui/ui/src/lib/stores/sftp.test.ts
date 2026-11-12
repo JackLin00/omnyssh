@@ -218,4 +218,21 @@ describe('sftp store', () => {
     expect(s?.local.loading).toBe(true);
     sftp.remove(1);
   });
+
+  it('lost ends the session: failed, the reason kept, nothing left waiting on it', () => {
+    sftp.open(1, 'web-1');
+    sftp.setStatus(1, 'connected');
+    sftp.beginLoading(1, 'remote');
+    sftp.pushOp(1, { kind: 'upload', name: 'a.bin', refresh: 'remote' });
+    sftp.progress(1, { sessionId: 1, transferId: 1, done: 1, total: 2 });
+    sftp.lost(1, "The connection to 'web-1' was lost");
+    const s = get(sftp).get(1);
+    expect(s?.status).toBe('failed');
+    expect(s?.lost).toBe("The connection to 'web-1' was lost");
+    // The core takes no more commands: an op or listing would wait forever.
+    expect(s?.pending).toEqual([]);
+    expect(s?.transfer).toBeUndefined();
+    expect(s?.remote.loading).toBe(false);
+    sftp.remove(1);
+  });
 });

@@ -725,6 +725,7 @@ servicesFailed: ServicesFailed,
 sftpConnected: SftpConnected,
 sftpDirListed: SftpDirListed,
 sftpDisconnected: SftpDisconnected,
+sftpLost: SftpLost,
 sftpOpDone: SftpOpDone,
 snippetResult: SnippetResult,
 terminalExited: TerminalExited,
@@ -752,6 +753,7 @@ servicesFailed: "services-failed",
 sftpConnected: "sftp-connected",
 sftpDirListed: "sftp-dir-listed",
 sftpDisconnected: "sftp-disconnected",
+sftpLost: "sftp-lost",
 sftpOpDone: "sftp-op-done",
 snippetResult: "snippet-result",
 terminalExited: "terminal-exited",
@@ -1007,6 +1009,12 @@ export type SftpDirListed = { sessionId: number; path: string; entries: FileEntr
  * listing error with a human reason; it does not by itself tear the session down.
  */
 export type SftpDisconnected = { sessionId: number; reason: string }
+/**
+ * The connection under an SFTP session is gone (tech-gui.md §4.3). Unlike
+ * `sftp-disconnected` this is final: the session takes no more commands, and the
+ * tab offers to reconnect.
+ */
+export type SftpLost = { sessionId: number; reason: string }
 /**
  * A mutating SFTP op (upload/download/mkdir/rename/delete) finished (tech-gui.md
  * §4.3). The core's `Result<(), String>` is flattened to `ok` + an optional `error`.

@@ -678,6 +678,12 @@ impl SshSession {
         Ok(channel.into_stream())
     }
 
+    /// Whether the connection is gone: the peer hung up, or keepalives went
+    /// unanswered.
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
     /// Gracefully close the SSH connection.
     pub async fn disconnect(self) {
         let _ = self

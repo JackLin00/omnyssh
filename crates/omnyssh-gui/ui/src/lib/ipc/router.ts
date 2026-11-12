@@ -18,6 +18,7 @@ import type {
   SftpConnected,
   SftpDirListed,
   SftpDisconnected,
+  SftpLost,
   SftpOpDone,
   SnippetResult,
   TransferProgressDto,
@@ -139,6 +140,11 @@ export function applySftpOpDone(payload: SftpOpDone): void {
 // surface the reason but keep the tab — the user closes it explicitly.
 export function applySftpDisconnected(payload: SftpDisconnected): void {
   sftp.sessionError(payload.sessionId, payload.reason);
+}
+
+// The connection under the session is gone; the tab offers to reconnect.
+export function applySftpLost(payload: SftpLost): void {
+  sftp.lost(payload.sessionId, payload.reason);
 }
 
 export function applyFilePreview(payload: FilePreview): void {

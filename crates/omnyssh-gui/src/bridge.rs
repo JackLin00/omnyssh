@@ -244,6 +244,7 @@ enum SftpOutbound {
     DirListed(events::SftpDirListed),
     OpDone(events::SftpOpDone),
     Disconnected(events::SftpDisconnected),
+    Lost(events::SftpLost),
     Preview(events::FilePreview),
     Progress(events::TransferProgress),
 }
@@ -255,6 +256,7 @@ impl SftpOutbound {
             SftpOutbound::DirListed(e) => e.emit(app),
             SftpOutbound::OpDone(e) => e.emit(app),
             SftpOutbound::Disconnected(e) => e.emit(app),
+            SftpOutbound::Lost(e) => e.emit(app),
             SftpOutbound::Preview(e) => e.emit(app),
             SftpOutbound::Progress(e) => e.emit(app),
         };
@@ -292,6 +294,9 @@ fn map_sftp_event(session_id: SessionId, event: CoreEvent) -> Option<SftpOutboun
         }
         CoreEvent::SftpDisconnected { reason } => {
             SftpOutbound::Disconnected(events::SftpDisconnected { session_id, reason })
+        }
+        CoreEvent::SftpLost { reason } => {
+            SftpOutbound::Lost(events::SftpLost { session_id, reason })
         }
         CoreEvent::FilePreviewReady { path, content } => {
             SftpOutbound::Preview(events::FilePreview {
@@ -427,6 +432,20 @@ mod tests {
                 assert_eq!(e.error.as_deref(), Some("permission denied"));
             }
             _ => panic!("expected OpDone"),
+        }
+    }
+
+    #[test]
+    fn a_lost_connection_carries_its_owner_and_reason() {
+        let lost = CoreEvent::SftpLost {
+            reason: "gone".to_string(),
+        };
+        match map_sftp_event(4, lost).unwrap() {
+            SftpOutbound::Lost(e) => {
+                assert_eq!(e.session_id, 4);
+                assert_eq!(e.reason, "gone");
+            }
+            _ => panic!("expected Lost"),
         }
     }
 

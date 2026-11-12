@@ -74,6 +74,16 @@ async function boot(page: Page, windows = false): Promise<void> {
         }
       }
 
+      // The connection under a session goes away, as the core reports it.
+      (win as { __lose?: (sid: number) => void }).__lose = (sid) =>
+        fireEvent('sftp-lost', { sessionId: sid, reason: "The connection to 'web-1' was lost" });
+      // The next sftp_open fails, the way a refused login does.
+      let failNextOpen = false;
+      (win as { __failNextOpen?: () => void }).__failNextOpen = () => (failNextOpen = true);
+      // Every sftp_open and sftp_close, in order, for the test to read back.
+      const calls: string[] = [];
+      (win as { __sftpCalls?: string[] }).__sftpCalls = calls;
+
       // Fire the oldest still-pending transfer's op-done (deterministic completion).
       (win as { __completeTransfer?: () => void }).__completeTransfer = () => completions.shift()?.();
 
@@ -106,6 +116,11 @@ async function boot(page: Page, windows = false): Promise<void> {
               return Promise.resolve(withParent(path, local[path] ?? []));
             }
             case 'sftp_open': {
+              calls.push('open');
+              if (failNextOpen) {
+                failNextOpen = false;
+                return Promise.reject({ message: 'SFTP SSH connect: connection refused' });
+              }
               const sid = ++nextSession;
               setTimeout(() => fireEvent('sftp-connected', { sessionId: sid, hostName: args.hostName }), 0);
               return Promise.resolve(sid);
@@ -140,6 +155,7 @@ async function boot(page: Page, windows = false): Promise<void> {
               return Promise.resolve(null);
             }
             case 'sftp_close':
+              calls.push(`close ${args.sessionId}`);
               return Promise.resolve(null);
             case 'plugin:event|listen': {
               const { event, handler } = args as { event: string; handler: number };
@@ -311,4 +327,44 @@ test('Windows: a slow drive left for another does not take the pane back', async
   await expect(localPane.getByText('Media')).toBeVisible();
   await expect(localPane.getByText('Share')).toHaveCount(0);
   await expect(drive).toHaveValue('D:\\');
+});
+
+test('a lost connection says so and reconnects in the same directories', async ({ page }) => {
+  await boot(page);
+  await page.getByTitle('files on web-1').click();
+  const localPane = page.getByRole('region', { name: 'Local' });
+  const remotePane = page.getByRole('region', { name: 'web-1' });
+  await remotePane.getByRole('button', { name: 'var' }).click();
+  await expect(remotePane.getByText('/var', { exact: true })).toBeVisible();
+  await localPane.getByRole('checkbox', { name: 'Mark notes.txt' }).click();
+
+  await page.evaluate(() => (window as unknown as { __lose: (sid: number) => void }).__lose(1));
+
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText("The connection to 'web-1' was lost");
+  // Nothing remote works without the connection; the local side still browses.
+  await expect(page.getByRole('button', { name: 'Upload' })).toBeDisabled();
+  await expect(remotePane.locator('xpath=..')).toHaveAttribute('inert', '');
+
+  await alert.getByRole('button', { name: 'Reconnect' }).click();
+
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(remotePane.getByText('/var', { exact: true })).toBeVisible();
+  await expect(localPane.getByText('notes.txt')).toBeVisible();
+  await expect(remotePane.locator('xpath=..')).not.toHaveAttribute('inert', '');
+  const calls = await page.evaluate(() => (window as unknown as { __sftpCalls: string[] }).__sftpCalls);
+  expect(calls).toEqual(['open', 'close 1', 'open']);
+});
+
+test('a session that could not open can be tried again', async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => (window as unknown as { __failNextOpen: () => void }).__failNextOpen());
+  await page.getByTitle('files on web-1').click();
+
+  await expect(page.getByText('Could not open SFTP on web-1')).toBeVisible();
+  // Shown on the page (and in the error toast).
+  await expect(page.getByText('connection refused').first()).toBeVisible();
+  await page.getByRole('button', { name: 'Try again' }).click();
+
+  await expect(page.getByRole('region', { name: 'web-1' }).getByText('config.yml')).toBeVisible();
 });

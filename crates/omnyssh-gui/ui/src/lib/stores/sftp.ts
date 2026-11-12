@@ -57,6 +57,9 @@ export interface SftpSession {
   /** Pane(s) to re-list once `pending` drains (a mutation changed the FS); the
    *  component performs the listing and clears this. */
   refresh?: PaneSide | 'both';
+  /** Why the connection went away (`sftp-lost`). The session is over: the tab offers
+   *  to reconnect, which opens a new one. */
+  lost?: string;
 }
 
 function emptyPane(): Pane {
@@ -216,6 +219,19 @@ function createSftp() {
      *  its own spinner. */
     sessionError(id: number, error: string): void {
       mut(id, (s) => ({ ...s, error, remote: { ...s.remote, loading: false } }));
+    },
+    /** The connection is gone and the core session with it, so nothing in flight will
+     *  ever answer: drop the queued ops, the transfer and the remote spinner. */
+    lost(id: number, reason: string): void {
+      mut(id, (s) => ({
+        ...s,
+        status: 'failed',
+        lost: reason,
+        pending: [],
+        transfer: undefined,
+        refresh: undefined,
+        remote: { ...s.remote, loading: false }
+      }));
     },
     remove(id: number): void {
       update((m) => {

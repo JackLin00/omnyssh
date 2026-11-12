@@ -22,6 +22,10 @@ use crate::ssh::session::{Passwords, SshSession};
 /// How long the SFTP channel and subsystem may take once logged in.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How often an idle session checks that its connection is still there. A
+/// silent network drop is noticed by the keepalives (session.rs) first.
+const LIVENESS_INTERVAL: Duration = Duration::from_secs(1);
+
 // ---------------------------------------------------------------------------
 // FileEntry — represents one file or directory in a panel listing
 // ---------------------------------------------------------------------------
@@ -157,7 +161,7 @@ impl SftpManager {
                     host_name: host_name.clone(),
                 })
                 .await;
-            sftp_task_loop(session, sftp, cmd_rx, event_tx.clone()).await;
+            sftp_task_loop(&host_name, session, sftp, cmd_rx, event_tx.clone()).await;
             tracing::info!("SFTP task for '{}' exited", host_name);
         });
 
@@ -179,80 +183,110 @@ impl SftpManager {
 // Background task loop
 // ---------------------------------------------------------------------------
 
+/// Runs commands until [`SftpCommand::Disconnect`], the manager is dropped, or
+/// the connection goes away. The last sends [`CoreEvent::SftpLost`]: commands
+/// sent after it would otherwise vanish without an answer.
 async fn sftp_task_loop(
-    _ssh: SshSession, // kept alive to hold the SSH connection open
+    host_name: &str,
+    ssh: SshSession, // also keeps the SSH connection open
     sftp: russh_sftp::client::SftpSession,
     mut cmd_rx: mpsc::Receiver<SftpCommand>,
     event_tx: mpsc::Sender<CoreEvent>,
 ) {
-    while let Some(cmd) = cmd_rx.recv().await {
-        match cmd {
-            SftpCommand::ListDir(path) => match do_list_dir(&sftp, &path).await {
-                Ok(entries) => {
-                    let _ = event_tx
-                        .send(CoreEvent::FileDirListed { path, entries })
-                        .await;
-                }
-                Err(e) => {
-                    let _ = event_tx
-                        .send(CoreEvent::SftpDisconnected {
-                            reason: format!("ListDir failed: {e}"),
-                        })
-                        .await;
-                }
+    let mut liveness = time::interval(LIVENESS_INTERVAL);
+    liveness.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => match cmd {
+                Some(SftpCommand::Disconnect) | None => break,
+                Some(cmd) => run_command(&sftp, cmd, &event_tx).await,
             },
-
-            SftpCommand::Download {
-                remote,
-                local,
-                transfer_id,
-            } => {
-                let result = do_download(&sftp, &remote, &local, transfer_id, &event_tx)
-                    .await
-                    .map_err(|e| e.to_string());
-                let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
-            }
-
-            SftpCommand::Upload {
-                local,
-                remote,
-                transfer_id,
-            } => {
-                let result = do_upload(&local, &sftp, &remote, transfer_id, &event_tx)
-                    .await
-                    .map_err(|e| e.to_string());
-                let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
-            }
-
-            SftpCommand::Delete(path) => {
-                // Try remove_file first; on failure try remove_dir (empty dirs only).
-                let result = match sftp.remove_file(&path).await {
-                    Ok(()) => Ok(()),
-                    Err(_) => sftp.remove_dir(&path).await.map_err(|e| e.to_string()),
-                };
-                let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
-            }
-
-            SftpCommand::MkDir(path) => {
-                let result = sftp.create_dir(&path).await.map_err(|e| e.to_string());
-                let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
-            }
-
-            SftpCommand::Rename { from, to } => {
-                let result = sftp.rename(&from, &to).await.map_err(|e| e.to_string());
-                let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
-            }
-
-            SftpCommand::ReadPreview(path) => {
-                if let Ok(content) = do_read_preview(&sftp, &path).await {
-                    let _ = event_tx
-                        .send(CoreEvent::FilePreviewReady { path, content })
-                        .await;
-                }
-            }
-
-            SftpCommand::Disconnect => break,
+            _ = liveness.tick() => {}
         }
+        if ssh.is_closed() {
+            let _ = event_tx
+                .send(CoreEvent::SftpLost {
+                    reason: format!("The connection to '{host_name}' was lost"),
+                })
+                .await;
+            break;
+        }
+    }
+}
+
+/// Runs one command, reporting its outcome through `event_tx`.
+async fn run_command(
+    sftp: &russh_sftp::client::SftpSession,
+    cmd: SftpCommand,
+    event_tx: &mpsc::Sender<CoreEvent>,
+) {
+    match cmd {
+        SftpCommand::ListDir(path) => match do_list_dir(sftp, &path).await {
+            Ok(entries) => {
+                let _ = event_tx
+                    .send(CoreEvent::FileDirListed { path, entries })
+                    .await;
+            }
+            Err(e) => {
+                let _ = event_tx
+                    .send(CoreEvent::SftpDisconnected {
+                        reason: format!("ListDir failed: {e}"),
+                    })
+                    .await;
+            }
+        },
+
+        SftpCommand::Download {
+            remote,
+            local,
+            transfer_id,
+        } => {
+            let result = do_download(sftp, &remote, &local, transfer_id, event_tx)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
+        }
+
+        SftpCommand::Upload {
+            local,
+            remote,
+            transfer_id,
+        } => {
+            let result = do_upload(&local, sftp, &remote, transfer_id, event_tx)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
+        }
+
+        SftpCommand::Delete(path) => {
+            // Try remove_file first; on failure try remove_dir (empty dirs only).
+            let result = match sftp.remove_file(&path).await {
+                Ok(()) => Ok(()),
+                Err(_) => sftp.remove_dir(&path).await.map_err(|e| e.to_string()),
+            };
+            let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
+        }
+
+        SftpCommand::MkDir(path) => {
+            let result = sftp.create_dir(&path).await.map_err(|e| e.to_string());
+            let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
+        }
+
+        SftpCommand::Rename { from, to } => {
+            let result = sftp.rename(&from, &to).await.map_err(|e| e.to_string());
+            let _ = event_tx.send(CoreEvent::SftpOpDone { result }).await;
+        }
+
+        SftpCommand::ReadPreview(path) => {
+            if let Ok(content) = do_read_preview(sftp, &path).await {
+                let _ = event_tx
+                    .send(CoreEvent::FilePreviewReady { path, content })
+                    .await;
+            }
+        }
+
+        // Handled by the loop.
+        SftpCommand::Disconnect => {}
     }
 }
 

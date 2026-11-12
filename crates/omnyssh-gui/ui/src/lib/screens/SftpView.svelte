@@ -117,34 +117,57 @@
     void sftpList(id, path).catch((err) => sftp.paneError(id, 'remote', errMsg(err)));
   }
 
-  onMount(() => {
-    void (async () => {
-      let home = '/';
+  // Opens a backend session and lists both panes: the home directory and `/` the
+  // first time, where they were on a reconnect.
+  async function open(localPath?: string, remotePath = '/'): Promise<void> {
+    if (localPath === undefined) {
       try {
-        home = await homeDir();
+        localPath = await homeDir();
       } catch {
-        home = '/';
+        localPath = '/';
       }
-      let id: number;
-      try {
-        id = await sftpOpen(session.hostName);
-      } catch (err) {
-        sessions.setStatus(session.id, 'failed');
-        openError = errMsg(err);
-        lastError.set(errMsg(err));
-        return;
-      }
-      if (destroyed) {
-        void sftpClose(id).catch(() => {});
-        return;
-      }
-      backendId = id;
-      sftp.open(id, session.hostName);
-      void loadRoots();
-      void refreshLocal(home);
-      refreshRemote('/');
-    })();
+    }
+    let id: number;
+    try {
+      id = await sftpOpen(session.hostName);
+    } catch (err) {
+      sessions.setStatus(session.id, 'failed');
+      openError = errMsg(err);
+      lastError.set(errMsg(err));
+      return;
+    }
+    if (destroyed) {
+      void sftpClose(id).catch(() => {});
+      return;
+    }
+    backendId = id;
+    sftp.open(id, session.hostName);
+    void loadRoots();
+    void refreshLocal(localPath);
+    refreshRemote(remotePath);
+  }
+
+  onMount(() => {
+    void open();
   });
+
+  // After a lost connection or a failed open: a new backend session, in the same
+  // directories when there were any. The old one is already gone; closing it only
+  // tidies the backend's table.
+  function reconnect(): void {
+    const old = backendId;
+    const paths = view ? { local: view.local.path, remote: view.remote.path } : undefined;
+    if (old != null) {
+      void sftpClose(old).catch(() => {});
+      sftp.remove(old);
+    }
+    backendId = undefined;
+    openError = undefined;
+    outbox = [];
+    prompt = null;
+    sessions.setStatus(session.id, 'connecting');
+    void open(paths?.local || undefined, paths?.remote || '/');
+  }
 
   onDestroy(() => {
     destroyed = true;
@@ -320,12 +343,28 @@
     <div class="flex flex-1 flex-col items-center justify-center gap-2 p-10 text-center">
       <p class="font-medium">Could not open SFTP on {session.hostName}</p>
       <p class="max-w-md text-sm text-muted">{openError}</p>
+      <button type="button" class="{toolBtn} mt-2" onclick={reconnect}>
+        <Icon name="refresh" size={13} />
+        Try again
+      </button>
     </div>
   {:else if !view}
     <div class="flex flex-1 items-center justify-center p-10 text-center">
       <p class="text-sm text-muted">Connecting to {session.hostName}…</p>
     </div>
   {:else}
+    {#if view.lost}
+      <div
+        role="alert"
+        class="flex shrink-0 items-center justify-between gap-3 border-b border-default px-4 py-2 text-xs"
+      >
+        <span class="min-w-0 truncate text-status-crit">{view.lost}</span>
+        <button type="button" class={toolBtn} onclick={reconnect}>
+          <Icon name="refresh" size={13} />
+          Reconnect
+        </button>
+      </div>
+    {/if}
     <div class="grid min-h-0 flex-1 grid-cols-2 divide-x divide-default">
       <SftpPane
         title="Local"
@@ -355,7 +394,7 @@
             type="button"
             class={toolBtn}
             title="Upload marked files to the remote directory"
-            disabled={localMarkedFiles.length === 0}
+            disabled={localMarkedFiles.length === 0 || !!view.lost}
             onclick={upload}
           >
             <Icon name="upload" size={13} />
@@ -377,58 +416,61 @@
         {/snippet}
       </SftpPane>
 
-      <SftpPane
-        title={session.hostName}
-        pane={view.remote}
-        onNavigate={(e) => navigate('remote', e)}
-        onToggleMark={(p) => toggleMark('remote', p)}
-        onPreview={(e) => preview('remote', e)}
-      >
-        {#snippet toolbar()}
-          <button
-            type="button"
-            class={toolBtn}
-            title="Download marked files to the local directory"
-            disabled={remoteMarkedFiles.length === 0}
-            onclick={download}
-          >
-            <Icon name="download" size={13} />
-            Download
-          </button>
-          <button type="button" class={toolBtn} title="New folder" onclick={() => openPrompt('mkdir')}>
-            <Icon name="plus" size={13} />
-            Folder
-          </button>
-          <button
-            type="button"
-            class={toolBtn}
-            title="Rename the marked entry"
-            disabled={!singleRemoteMark}
-            onclick={() => openPrompt('rename')}
-          >
-            <Icon name="edit" size={13} />
-          </button>
-          <button
-            type="button"
-            class={toolBtn}
-            title="Delete marked entries"
-            aria-label="Delete marked entries"
-            disabled={remoteMarked.length === 0}
-            onclick={remove}
-          >
-            <Icon name="trash" size={13} />
-          </button>
-          <button
-            type="button"
-            class={toolBtn}
-            title="Refresh"
-            aria-label="Refresh remote"
-            onclick={() => refreshRemote(view.remote.path)}
-          >
-            <Icon name="refresh" size={13} />
-          </button>
-        {/snippet}
-      </SftpPane>
+      <!-- Nothing on the remote side works without the connection. -->
+      <div class="flex min-h-0 min-w-0 {view.lost ? 'opacity-50' : ''}" inert={!!view.lost}>
+        <SftpPane
+          title={session.hostName}
+          pane={view.remote}
+          onNavigate={(e) => navigate('remote', e)}
+          onToggleMark={(p) => toggleMark('remote', p)}
+          onPreview={(e) => preview('remote', e)}
+        >
+          {#snippet toolbar()}
+            <button
+              type="button"
+              class={toolBtn}
+              title="Download marked files to the local directory"
+              disabled={remoteMarkedFiles.length === 0}
+              onclick={download}
+            >
+              <Icon name="download" size={13} />
+              Download
+            </button>
+            <button type="button" class={toolBtn} title="New folder" onclick={() => openPrompt('mkdir')}>
+              <Icon name="plus" size={13} />
+              Folder
+            </button>
+            <button
+              type="button"
+              class={toolBtn}
+              title="Rename the marked entry"
+              disabled={!singleRemoteMark}
+              onclick={() => openPrompt('rename')}
+            >
+              <Icon name="edit" size={13} />
+            </button>
+            <button
+              type="button"
+              class={toolBtn}
+              title="Delete marked entries"
+              aria-label="Delete marked entries"
+              disabled={remoteMarked.length === 0}
+              onclick={remove}
+            >
+              <Icon name="trash" size={13} />
+            </button>
+            <button
+              type="button"
+              class={toolBtn}
+              title="Refresh"
+              aria-label="Refresh remote"
+              onclick={() => refreshRemote(view.remote.path)}
+            >
+              <Icon name="refresh" size={13} />
+            </button>
+          {/snippet}
+        </SftpPane>
+      </div>
     </div>
 
     {#if transfer}
