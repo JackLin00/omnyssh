@@ -19,7 +19,7 @@ use crate::ssh::client::Host;
 
 /// How long a login waits for the frontend's key. The code itself is stopped
 /// after 10 s there; this also covers a frontend that never answers.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What a key depends on: any change makes another.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -223,8 +223,11 @@ async fn ask(
         id
     };
     let _pending = Pending(request_id);
-    if service.send(event(request_id)).await.is_err() {
-        return Err("the desktop app is not running it".to_string());
+    // A full channel must not hold the login past its wait either.
+    match tokio::time::timeout(wait, service.send(event(request_id))).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => return Err("the desktop app is not running it".to_string()),
+        Err(_) => return Err(format!("no key within {} s", wait.as_secs())),
     }
     match tokio::time::timeout(wait, answered).await {
         Ok(Ok(answer)) => answer,
@@ -307,6 +310,25 @@ mod tests {
     }
 
     const WAIT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn a_full_channel_does_not_hold_the_login() {
+        let (tx, _rx) = mpsc::channel::<CoreEvent>(1);
+        tx.send(CoreEvent::Error(String::new())).await.unwrap();
+        let got = generate_with(
+            &host("aa:08"),
+            &config(true),
+            Some(tx),
+            Duration::from_millis(50),
+        )
+        .await;
+        match got {
+            Generated::Failed { reason, .. } => {
+                assert!(reason.starts_with("no key within"), "{reason}")
+            }
+            _ => panic!("expected a failure"),
+        }
+    }
 
     #[tokio::test]
     async fn the_frontend_gets_the_generator_and_the_device() {

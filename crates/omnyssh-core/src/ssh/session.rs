@@ -465,6 +465,15 @@ impl NoPassword {
             message,
         }
     }
+
+    /// Adds what a key generator did, last: frontends cut at the first ':' and
+    /// the hint before it must stay.
+    fn noted(mut self, note: Option<&str>) -> Self {
+        if let Some(note) = note {
+            self.message.push_str(&format!(" ({note})"));
+        }
+        self
+    }
 }
 
 impl fmt::Display for NoPassword {
@@ -903,7 +912,8 @@ async fn connect_hops(
 
 /// Wall-clock budget one [`SshSession::connect`] needs for `host`: the per-hop
 /// connect timeout and agent bound once for every bastion in its `ProxyJump`
-/// chain, plus the target.
+/// chain, plus the target, and [`KEY_GEN_BUDGET`] for each of those hosts that
+/// names a key generator.
 ///
 /// Callers that wrap the connect in a timeout of their own must scale it by
 /// this — a fixed budget trips on a bastion chain before the connection has had
@@ -911,10 +921,16 @@ async fn connect_hops(
 pub(crate) async fn connect_budget(host: &Host) -> Duration {
     // A chain that fails to resolve costs nothing to connect; the caller's own
     // attempt reports why.
-    let hops = jump_chain(host).await.map_or(0, |chain| chain.len());
+    let chain = jump_chain(host).await.unwrap_or_default();
+    let hops = chain.len();
+    let generators = chain
+        .iter()
+        .chain(std::iter::once(host))
+        .filter(|hop| hop.key_generator.is_some())
+        .count();
     // The agent's bound counts too, so a slow but working agent is not taken
     // for a dead host.
-    (CONNECT_TIMEOUT + AGENT_BUDGET) * (hops as u32 + 1)
+    (CONNECT_TIMEOUT + AGENT_BUDGET) * (hops as u32 + 1) + KEY_GEN_BUDGET * generators as u32
 }
 
 /// russh's key exchanges, then the SHA-1 ones old servers and appliances still
@@ -1283,7 +1299,9 @@ where
         return Err(PassphraseRequired::new(path, key).into());
     }
     if !known && !matches!(passwords, Passwords::KeysOnly) {
-        return Err(NoPassword::new(key, &host.name).into());
+        return Err(NoPassword::new(key, &host.name)
+            .noted(generated.as_deref())
+            .into());
     }
 
     let message = failed(format!("SSH authentication failed for {}", host.name));
@@ -1491,6 +1509,11 @@ where
 /// How long one login request may wait for the server's verdict.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The most a hop's key generator can take before its normal login starts: the
+/// frontend's answer, then the server's verdict on the key.
+const KEY_GEN_BUDGET: Duration =
+    Duration::from_secs(key_gen::ANSWER_TIMEOUT.as_secs() + AUTH_TIMEOUT.as_secs());
+
 /// How the key from `host`'s key generator did.
 enum GeneratedLogin {
     /// No generator in use.
@@ -1516,6 +1539,8 @@ async fn generated_login(
             )));
         }
     };
+    // A refused key still uses one of the server's authentication attempts
+    // (MaxAuthTries); the design accepts that for hosts that name a generator.
     let verdict = time::timeout(
         AUTH_TIMEOUT,
         handle.authenticate_publickey(host.user.clone(), Arc::new(*key)),
@@ -2131,6 +2156,19 @@ mod tests {
     use super::*;
     use russh::keys::key::KeyPair;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn a_hosts_generator_adds_its_share_to_the_connect_budget() {
+        let plain = Host::default();
+        let with_generator = Host {
+            key_generator: Some("vendor-a".to_string()),
+            ..Host::default()
+        };
+        assert_eq!(
+            connect_budget(&with_generator).await - connect_budget(&plain).await,
+            KEY_GEN_BUDGET
+        );
+    }
 
     #[test]
     fn only_the_exact_key_is_let_in_once() {

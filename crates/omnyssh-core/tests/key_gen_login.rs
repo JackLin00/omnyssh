@@ -184,3 +184,19 @@ async fn a_host_without_a_generator_does_not_use_one() {
     plain.key_generator = None;
     assert!(SshSession::connect(&plain).await.is_err());
 }
+
+#[tokio::test]
+async fn a_device_without_a_password_says_what_the_generator_did() {
+    setup();
+    let addr = serve().await;
+    let err = SshSession::connect(&host(addr, "broken", None))
+        .await
+        .err()
+        .expect("nothing should get in");
+    let message = format!("{err:#}");
+    assert!(message.contains("no password is saved"), "{message}");
+    assert!(
+        message.contains("key generator 'vendor-a': TypeError: master_key is undefined"),
+        "{message}"
+    );
+}
