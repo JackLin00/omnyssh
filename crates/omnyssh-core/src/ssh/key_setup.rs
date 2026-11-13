@@ -660,6 +660,8 @@ async fn setup_key_internal(
     }
     let mut test_host = host.clone();
     test_host.identity_file = Some(private_key_path.to_string_lossy().to_string());
+    // A key generator's key must not get in for it: the check is of the new key.
+    test_host.key_generator = None;
     test_host.password = None; // Force key-only auth.
 
     // Keys only: a password typed earlier this session would let a broken key
