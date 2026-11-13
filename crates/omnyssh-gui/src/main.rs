@@ -21,6 +21,10 @@ use commands::hosts::{
     delete_host, duplicate_host, list_hosts, refresh_metrics, reload_hosts, save_host,
 };
 use commands::hotkey::set_global_hotkey;
+use commands::key_gen::{
+    answer_generated_key, delete_key_generator, key_fingerprint, list_key_generators,
+    save_key_generator, set_key_generators_enabled,
+};
 use commands::keysetup::start_key_setup;
 use commands::quick_commands::{list_quick_commands, save_quick_commands};
 use commands::serial::{
@@ -156,6 +160,12 @@ fn specta_builder() -> Builder<tauri::Wry> {
             unlock_identity,
             answer_password,
             answer_host_key,
+            list_key_generators,
+            set_key_generators_enabled,
+            save_key_generator,
+            delete_key_generator,
+            answer_generated_key,
+            key_fingerprint,
             set_tray_behavior,
             set_global_hotkey,
             check_update,
@@ -177,6 +187,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             events::SftpOpDone,
             events::SftpDisconnected,
             events::SftpLost,
+            events::GeneratedKeyRequired,
             events::FilePreview,
             events::TransferProgress,
             events::KeySetupProgress,
@@ -405,6 +416,8 @@ fn main() {
             // Pre-load the shared host config so the first `list_hosts` paints
             // immediately. A load failure here is non-fatal — the frontend's
             // `reload_hosts` re-attempts and surfaces the error (tech-gui.md §3.4).
+            // The page runs key generators: logins ask it for their keys.
+            omnyssh_core::ssh::key_gen::serve(engine_tx.clone());
             let gui_state = GuiState::new(engine_tx, pty);
             if let Ok(hosts) = omnyssh_core::config::load_all_hosts() {
                 gui_state.set_hosts(hosts);

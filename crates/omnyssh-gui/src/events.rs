@@ -197,6 +197,22 @@ pub struct KeyPassphraseRequired {
     pub key_path: String,
 }
 
+/// A login to `hostName` waits for the key its key generator makes: run `code`'s
+/// `generateKey({ credential, mac, revision }, address)` (`credential` is JSON
+/// text, empty for none; no `revision` key when it is absent) and answer with
+/// `answer_generated_key`. Nothing waits on the user: answer at once.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedKeyRequired {
+    pub request_id: u64,
+    pub host_name: String,
+    pub code: String,
+    pub credential: String,
+    pub mac: String,
+    pub revision: Option<u32>,
+    pub address: String,
+}
+
 /// A connection waits for the login password of `login` (`user@host`). Answered
 /// with `answer_password`; the password only ever crosses inbound. `retry` says
 /// the previous one was refused; `newHostKey` is the fingerprint of a host key

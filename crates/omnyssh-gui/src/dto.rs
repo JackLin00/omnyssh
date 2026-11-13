@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use omnyssh_core::config::app_config::UpdateConfig;
+use omnyssh_core::config::key_generators::{KeyGenerator, KeyGenerators};
 use omnyssh_core::config::quick_commands::{Ending, PayloadKind, QuickCommand, QuickGroup};
 use omnyssh_core::config::serial_devices::{LineEnding, SerialDevice};
 use omnyssh_core::config::snippets::{Snippet, SnippetScope};
@@ -919,6 +920,51 @@ pub struct QuickCommandDto {
     pub kind: PayloadKindDto,
     pub payload: String,
     pub ending: EndingDto,
+}
+
+/// One key generator: its code (defining `generateKey(deviceInfo, address)`) and
+/// the credential (JSON text, empty for none) every device using it shares.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyGeneratorDto {
+    pub name: String,
+    pub code: String,
+    pub credential: String,
+}
+
+/// The key generators' switch and the generators.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyGeneratorsDto {
+    pub enabled: bool,
+    pub generators: Vec<KeyGeneratorDto>,
+}
+
+impl From<KeyGeneratorDto> for KeyGenerator {
+    fn from(dto: KeyGeneratorDto) -> Self {
+        Self {
+            name: dto.name,
+            code: dto.code,
+            credential: dto.credential,
+        }
+    }
+}
+
+impl From<&KeyGenerators> for KeyGeneratorsDto {
+    fn from(config: &KeyGenerators) -> Self {
+        Self {
+            enabled: config.enabled,
+            generators: config
+                .generators
+                .iter()
+                .map(|g| KeyGeneratorDto {
+                    name: g.name.clone(),
+                    code: g.code.clone(),
+                    credential: g.credential.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]

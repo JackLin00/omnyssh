@@ -68,6 +68,26 @@ pub async fn forward_core_events(app: AppHandle, mut rx: mpsc::Receiver<CoreEven
                 }
                 .emit(&app);
             }
+            CoreEvent::KeyRequired {
+                request_id,
+                host_name,
+                code,
+                credential,
+                mac,
+                revision,
+                address,
+            } => {
+                let _ = events::GeneratedKeyRequired {
+                    request_id,
+                    host_name,
+                    code,
+                    credential,
+                    mac,
+                    revision,
+                    address,
+                }
+                .emit(&app);
+            }
             CoreEvent::PasswordRequired {
                 request_id,
                 host_name,

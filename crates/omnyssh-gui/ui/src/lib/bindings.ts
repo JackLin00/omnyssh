@@ -628,6 +628,79 @@ async answerHostKey(requestId: number, decision: HostKeyDecisionDto) : Promise<R
 }
 },
 /**
+ * The switch and every generator, credential included: the settings page
+ * edits them.
+ */
+async listKeyGenerators() : Promise<Result<KeyGeneratorsDto, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_key_generators") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Switch key generators on or off for every host.
+ */
+async setKeyGeneratorsEnabled(enabled: boolean) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_key_generators_enabled", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Add `generator`, or replace the one named `previous_name`. A new name moves
+ * every host that named the old one over to it. The frontend reloads the hosts
+ * afterwards when it renamed one.
+ */
+async saveKeyGenerator(previousName: string | null, generator: KeyGeneratorDto) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_key_generator", { previousName, generator }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete the generator named `name`; the hosts that named it lose it, with
+ * their MAC and revision. A missing name is a no-op. The frontend reloads the
+ * hosts afterwards.
+ */
+async deleteKeyGenerator(name: string) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_key_generator", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Answer the `generated-key-required` request `request_id` with the private
+ * key text, or with why there is none. The key stays in memory only.
+ */
+async answerGeneratedKey(requestId: number, privateKey: string | null, error: string | null) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("answer_generated_key", { requestId, privateKey, error }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The `SHA256:…` fingerprint of private key `private_key`, read as a login
+ * reads it: the settings page's test. The key is not kept.
+ */
+async keyFingerprint(privateKey: string) : Promise<Result<string, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("key_fingerprint", { privateKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Minimize and close to the tray, or not. Resolves to what this desktop allows —
  * a tray at all, and minimizing into it; what it does not, the window keeps doing
  * as before.
@@ -710,6 +783,7 @@ async saveUpdateConfig(config: UpdateConfigDto) : Promise<Result<null, CommandEr
 export const events = __makeEvents__<{
 error: Error,
 filePreview: FilePreview,
+generatedKeyRequired: GeneratedKeyRequired,
 hostKeyChanged: HostKeyChanged,
 hostStatusChanged: HostStatusChanged,
 hostsLoaded: HostsLoaded,
@@ -738,6 +812,7 @@ uploadProgress: UploadProgress
 }>({
 error: "error",
 filePreview: "file-preview",
+generatedKeyRequired: "generated-key-required",
 hostKeyChanged: "host-key-changed",
 hostStatusChanged: "host-status-changed",
 hostsLoaded: "hosts-loaded",
@@ -799,6 +874,13 @@ export type FilePreview = { sessionId: number; path: string; content: string }
  * Flow control, mirrors `omnyssh_core::serial::FlowControl`.
  */
 export type FlowControlDto = "none" | "software" | "hardware"
+/**
+ * A login to `hostName` waits for the key its key generator makes: run `code`'s
+ * `generateKey({ credential, mac, revision }, address)` (`credential` is JSON
+ * text, empty for none; no `revision` key when it is absent) and answer with
+ * `answer_generated_key`. Nothing waits on the user: answer at once.
+ */
+export type GeneratedKeyRequired = { requestId: number; hostName: string; code: string; credential: string; mac: string; revision: number | null; address: string }
 /**
  * A host as the frontend sees it — password and private-key material omitted
  * (tech-gui.md §3.4). `hasKey` reports whether an identity file is configured;
@@ -869,6 +951,15 @@ export type HostsLoaded = HostDto[]
  * key itself.
  */
 export type KeyFingerprintDto = { keyType: string; fingerprint: string }
+/**
+ * One key generator: its code (defining `generateKey(deviceInfo, address)`) and
+ * the credential (JSON text, empty for none) every device using it shares.
+ */
+export type KeyGeneratorDto = { name: string; code: string; credential: string }
+/**
+ * The key generators' switch and the generators.
+ */
+export type KeyGeneratorsDto = { enabled: boolean; generators: KeyGeneratorDto[] }
 /**
  * A private key is encrypted and no passphrase is cached yet. Frontends prompt
  * once per key path; the passphrase never crosses back out of the backend.
