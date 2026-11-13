@@ -53,6 +53,7 @@ async function boot(page: Page, generators: Generators, hosts: unknown[] = [CAM,
             case 'load_update_config':
               return Promise.resolve({ checkOnStartup: false, skipVersion: '' });
             case 'list_key_generators':
+              calls.push({ cmd, args });
               return Promise.resolve(structuredClone(state.generators));
             case 'set_key_generators_enabled':
               calls.push({ cmd, args });
@@ -252,6 +253,8 @@ const SET_UP = { ...CAM, keyGenerator: 'vendor-a', deviceMac: '30:ae:7b:eb:17:82
 
 test('while generators are off the host form and the cards show nothing of them', async ({ page }) => {
   await boot(page, { ...ON, enabled: false }, [SET_UP, WEB]);
+  // Only once the switch is known does "nothing" say anything.
+  await expect.poll(async () => (await calls(page, 'list_key_generators')).length).toBeGreaterThan(0);
   await expect(page.getByText('gen', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Edit cam' }).click();
   const editor = page.getByRole('dialog', { name: 'Edit host' });

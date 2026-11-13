@@ -7,7 +7,7 @@
   import Modal from '$lib/components/Modal.svelte';
   import { keyFingerprint } from '$lib/ipc/commands';
   import { runGenerator } from '$lib/keyGen';
-  import { fingerprintsAgree, generatorFromFields, type GeneratorFields } from './keyGenForm';
+  import { fingerprintsAgree, generatorFromFields, revisionError, type GeneratorFields } from './keyGenForm';
 
   let {
     mode,
@@ -41,8 +41,9 @@
 
   async function runTest(): Promise<void> {
     const revision = testRevision.trim();
-    if (revision !== '' && !/^\d+$/.test(revision)) {
-      outcome = { kind: 'error', message: 'Revision must be a whole number' };
+    const bad = revisionError(revision);
+    if (bad) {
+      outcome = { kind: 'error', message: bad };
       return;
     }
     running = true;

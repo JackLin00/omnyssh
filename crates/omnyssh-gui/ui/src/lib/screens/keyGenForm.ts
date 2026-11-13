@@ -33,6 +33,15 @@ export function generatorFromFields(f: GeneratorFields, taken: readonly string[]
   return { ok: true, generator: { name, code: f.code, credential: f.credential.trim() } };
 }
 
+/** Why `raw` is not a device revision (1 to 4294967295, a host stores a u32), or null
+ *  when it is one or blank (blank leaves it to the code). */
+export function revisionError(raw: string): string | null {
+  const r = raw.trim();
+  if (r === '') return null;
+  if (/^\d+$/.test(r) && Number(r) >= 1 && Number(r) <= 0xffffffff) return null;
+  return `Revision must be a whole number from 1 to 4294967295, got '${r}'`;
+}
+
 /** Whether the code's own fingerprint agrees with the key's, `SHA256:` or not. */
 export function fingerprintsAgree(fromKey: string, fromCode: string | undefined): boolean {
   if (fromCode === undefined) return true;

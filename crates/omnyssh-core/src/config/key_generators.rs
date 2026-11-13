@@ -1,7 +1,8 @@
 //! Key generators: JS code that turns a shared credential and a device's MAC
 //! and revision into that device's SSH private key, in
 //! `~/.config/omnyssh/key_generators.toml`. Off unless `enabled`. The credential
-//! holds a master key, so the file is written owner-only from the first byte.
+//! holds a master key, so on Unix the file is written owner-only from the first
+//! byte; elsewhere it takes the folder's permissions, as `hosts.toml` does.
 
 use std::path::Path;
 
@@ -75,7 +76,8 @@ fn load_from(path: &Path) -> anyhow::Result<KeyGenerators> {
 fn save_to(path: &Path, config: &KeyGenerators) -> anyhow::Result<()> {
     let content = toml::to_string_pretty(config).context("Failed to serialise key generators")?;
     // A temp file renamed over the old one, so an interrupted write never leaves a
-    // corrupt file; created owner-only, so the credential is never readable by others.
+    // corrupt file; on Unix created owner-only, so the credential is never readable
+    // by others.
     let tmp_path = path.with_extension("toml.tmp");
     write_private(&tmp_path, content.as_bytes())
         .with_context(|| format!("Failed to write {}", tmp_path.display()))?;

@@ -384,8 +384,9 @@ describe('formToInput — key generator', () => {
     expect(formToInput(cam({ deviceMac: ' ' }), true)).toEqual({ ok: false, error: 'MAC is required for a key generator' });
     expect(formToInput(cam({ deviceRevision: '1.5' }), true)).toEqual({
       ok: false,
-      error: "Revision must be a whole number, got '1.5'"
+      error: "Revision must be a whole number from 1 to 4294967295, got '1.5'"
     });
+    expect(formToInput(cam({ deviceRevision: '0' }), true).ok).toBe(false);
     expect(formToInput(cam({ deviceRevision: '4294967296' }), true).ok).toBe(false);
   });
 

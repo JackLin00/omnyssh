@@ -220,7 +220,7 @@
       </p>
 
       {#if keyGenerators !== null}
-        <div class="grid grid-cols-[1fr,1fr,6rem] gap-3">
+        <div class="grid {fields.keyGenerator ? 'grid-cols-[1fr,1fr,6rem]' : 'grid-cols-2'} gap-3">
           <label class={label}>
             <span>Key generator</span>
             <Select bind:value={fields.keyGenerator} class={field}>
@@ -235,7 +235,13 @@
             </label>
             <label class={label}>
               <span>Revision</span>
-              <input bind:value={fields.deviceRevision} class={field} placeholder="Default" inputmode="numeric" />
+              <input
+                bind:value={fields.deviceRevision}
+                class={field}
+                placeholder="Default"
+                inputmode="numeric"
+                autocomplete="off"
+              />
             </label>
           {/if}
         </div>

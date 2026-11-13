@@ -11,6 +11,7 @@ import type {
   LocalForwardDto,
   MonitorModeDto
 } from '$lib/bindings';
+import { revisionError } from './keyGenForm';
 
 /** One port-forward row as typed: listen on `[address:]port` here, reach
  *  `remoteHost:remotePort` from the host. */
@@ -268,8 +269,7 @@ function parseKeyGen(f: HostFormFields): HostKeyGenDto | string {
   const mac = f.deviceMac.trim();
   if (!mac) return 'MAC is required for a key generator';
   const revision = f.deviceRevision.trim();
-  if (revision !== '' && (!/^\d+$/.test(revision) || Number(revision) > 0xffffffff)) {
-    return `Revision must be a whole number, got '${revision}'`;
-  }
+  const bad = revisionError(revision);
+  if (bad) return bad;
   return { generator, mac, revision: revision === '' ? null : Number(revision) };
 }

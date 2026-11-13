@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { HostDto } from '$lib/bindings';
-import { emptyGeneratorFields, fingerprintsAgree, generatorFromFields, hostsUsing } from './keyGenForm';
+import {
+  emptyGeneratorFields,
+  fingerprintsAgree,
+  generatorFromFields,
+  hostsUsing,
+  revisionError
+} from './keyGenForm';
 
 describe('generatorFromFields', () => {
   const fields = { name: ' vendor-a ', code: 'code', credential: ' {"master_key":"00ff"} ' };
@@ -37,6 +43,17 @@ describe('fingerprintsAgree', () => {
     expect(fingerprintsAgree('SHA256:abc', 'SHA256:abd')).toBe(false);
     // Code that reports none has nothing to disagree with.
     expect(fingerprintsAgree('SHA256:abc', undefined)).toBe(true);
+  });
+});
+
+describe('revisionError', () => {
+  it('takes blank or 1 to 4294967295', () => {
+    expect(revisionError(' ')).toBeNull();
+    expect(revisionError(' 1 ')).toBeNull();
+    expect(revisionError('4294967295')).toBeNull();
+    for (const bad of ['0', '4294967296', '1.5', '-1', 'two']) {
+      expect(revisionError(bad)).toBe(`Revision must be a whole number from 1 to 4294967295, got '${bad}'`);
+    }
   });
 });
 
