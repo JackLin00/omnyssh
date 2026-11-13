@@ -65,7 +65,7 @@ const keys = await generateKey(
 
 执行时：
 1. 先查内存缓存。缓存的键由生成器的代码和凭证、主机的 MAC 和 revision、主机的 name/hostname/user/port 组合而成，任何一项变化都会重新生成。只缓存生成成功的私钥，在本次运行期间有效。
-2. 缓存里没有，就发 `CoreEvent::KeyRequired { request_id, host_name, generator, mac, revision, address }`，最多等 15 秒（`address` 是主机的 Hostname / IP）。前端用 Worker 运行代码，再调用 `answer_generated_key(request_id, Ok(私钥) | Err(原因))` 回答。
+2. 缓存里没有，就发 `CoreEvent::KeyRequired { request_id, host_name, code, credential, mac, revision, address }`，最多等 15 秒（`address` 是主机的 Hostname / IP）。请求直接带上生成器的代码和凭证，前端不需要先加载生成器列表就能回答。前端用 Worker 运行代码，再调用 `answer_generated_key(request_id, Ok(私钥) | Err(原因))` 回答。
 3. 解析私钥，用它做一次公钥认证。
    - 成功：登录完成。
    - 不成功（生成失败、超时、解析失败、服务器不接受）：记下原因，继续执行原来的流程（agent → 密钥文件 → 默认密钥 → 密码），一切照旧。

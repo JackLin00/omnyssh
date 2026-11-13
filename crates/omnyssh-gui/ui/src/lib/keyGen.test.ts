@@ -116,6 +116,11 @@ describe('runGenerator', () => {
       'The code does not define generateKey'
     );
     await expect(runGenerator(request('function ('), { spawn: inProcess })).rejects.toThrow();
+    // A thrown value with no string form still gets an answer, not the 10 s wait.
+    const opaque = 'async function generateKey() { throw Object.create(null); }';
+    await expect(runGenerator(request(opaque), { spawn: inProcess, timeoutMs: 1000 })).rejects.toThrow(
+      'The code failed'
+    );
   });
 
   it('refuses a credential that is not JSON before running anything', async () => {

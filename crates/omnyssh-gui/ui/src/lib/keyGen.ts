@@ -55,7 +55,10 @@ export function workerSource(code: string): string {
     const keys = await generateKey(e.data.deviceInfo, e.data.address);
     self.postMessage({ ok: true, privateKey: keys && keys.privateKey, fingerprint: keys && keys.fingerprint });
   } catch (err) {
-    self.postMessage({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    // Something thrown that cannot become a string must still be answered.
+    let error = 'The code failed';
+    try { error = err instanceof Error ? err.message : String(err); } catch {}
+    self.postMessage({ ok: false, error });
   }
 };
 `;
