@@ -127,7 +127,8 @@
           <input bind:value={testRevision} class={field} placeholder="Revision" aria-label="Test revision" inputmode="numeric" />
           <input bind:value={testAddress} class={field} placeholder="Address" aria-label="Test address" autocomplete="off" />
         </div>
-        <div class="flex items-center gap-3">
+        <!-- Announced: the result arrives a moment after Run. -->
+        <div class="flex items-center gap-3" aria-live="polite">
           <Button variant="ghost" onclick={runTest} disabled={running}>{running ? 'Running…' : 'Run'}</Button>
           {#if outcome?.kind === 'ok'}
             <span class="min-w-0 truncate font-mono text-xs text-fg" data-testid="test-fingerprint">{outcome.fingerprint}</span>
@@ -136,7 +137,7 @@
           {/if}
         </div>
         {#if outcome?.kind === 'ok' && !outcome.agrees}
-          <p class="text-xs text-status-warn">The fingerprint the code returned is not this key's.</p>
+          <p class="text-xs text-status-warn" role="status">The fingerprint the code returned is not this key's.</p>
         {/if}
       </fieldset>
 

@@ -31,22 +31,34 @@
     await loadKeyGenerators();
   }
 
+  // A save error stays in the editor; once saved, the editor closes, and a failed
+  // host reload is only reported — the save itself went through.
   async function save(previous: string | null, generator: KeyGeneratorDto): Promise<void> {
     await saveKeyGenerator(previous, generator);
-    await loadKeyGenerators();
-    if (previous !== null && previous !== generator.name) await reloadHosts();
     dialog = null;
+    await loadKeyGenerators();
+    if (previous !== null && previous !== generator.name) await refreshHosts();
   }
 
   async function remove(name: string): Promise<void> {
+    dialog = null;
     try {
       await deleteKeyGenerator(name);
-      await loadKeyGenerators();
-      await reloadHosts();
     } catch (e) {
       lastError.set(`Delete key generator: ${message(e)}`);
+      return;
     }
-    dialog = null;
+    await loadKeyGenerators();
+    await refreshHosts();
+  }
+
+  /** The hosts again, after a rename or delete changed them on disk. */
+  async function refreshHosts(): Promise<void> {
+    try {
+      await reloadHosts();
+    } catch (e) {
+      lastError.set(`Reload hosts: ${message(e)}`);
+    }
   }
 
   const iconBtn =
