@@ -132,6 +132,9 @@ fn upsert(hosts: &mut Vec<Host>, input: HostInputDto, imported: Option<Host>) {
     // Likewise an omitted upload protocol: a form that predates it must not reset
     // an SFTP host to ZMODEM.
     let upload_given = input.upload_protocol.is_some();
+    // And omitted key generator settings: a form with generators switched off
+    // leaves them out, and must not wipe them.
+    let key_gen_given = input.key_gen.is_some();
     let mut host = Host::from(input);
     match hosts.iter().position(|h| h.name == host.name) {
         Some(i) => {
@@ -143,6 +146,11 @@ fn upsert(hosts: &mut Vec<Host>, input: HostInputDto, imported: Option<Host>) {
             if !upload_given {
                 host.upload_protocol = existing.upload_protocol;
                 host.upload_dir = existing.upload_dir.clone();
+            }
+            if !key_gen_given {
+                host.key_generator = existing.key_generator.clone();
+                host.device_mac = existing.device_mac.clone();
+                host.device_revision = existing.device_revision;
             }
             host.password = host.password.or_else(|| existing.password.clone());
             host.identity_file = host
@@ -184,10 +192,16 @@ fn upsert(hosts: &mut Vec<Host>, input: HostInputDto, imported: Option<Host>) {
 fn duplicate(source: &Host, input: HostInputDto) -> Host {
     let monitoring_given = input.monitoring.is_some();
     let upload_given = input.upload_protocol.is_some();
+    let key_gen_given = input.key_gen.is_some();
     let mut host = Host::from(input);
     if !upload_given {
         host.upload_protocol = source.upload_protocol;
         host.upload_dir = source.upload_dir.clone();
+    }
+    if !key_gen_given {
+        host.key_generator = source.key_generator.clone();
+        host.device_mac = source.device_mac.clone();
+        host.device_revision = source.device_revision;
     }
     host.password = host.password.or_else(|| source.password.clone());
     host.identity_file = host.identity_file.or_else(|| source.identity_file.clone());
@@ -249,7 +263,7 @@ async fn persist(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{HostUploadProtocolDto, MonitorModeDto};
+    use crate::dto::{HostKeyGenDto, HostUploadProtocolDto, MonitorModeDto};
     use omnyssh_core::ssh::client::HostUploadProtocol;
     use omnyssh_core::ssh::client::{HostSource, MonitorMode};
 
@@ -271,6 +285,7 @@ mod tests {
             forward_agent: false,
             upload_protocol: None,
             upload_dir: None,
+            key_gen: None,
         }
     }
 
@@ -422,6 +437,29 @@ mod tests {
         upsert(&mut hosts, back, None);
         assert_eq!(hosts[0].upload_protocol, HostUploadProtocol::Zmodem);
         assert_eq!(hosts[0].upload_dir, None);
+    }
+
+    #[test]
+    fn upsert_keeps_key_generator_settings_the_payload_left_out() {
+        let mut hosts = vec![Host {
+            name: "cam".to_string(),
+            key_generator: Some("vendor-a".to_string()),
+            device_mac: Some("30:ae:7b:eb:17:82".to_string()),
+            device_revision: Some(2),
+            source: HostSource::Manual,
+            ..Host::default()
+        }];
+        upsert(&mut hosts, input("cam"), None);
+        assert_eq!(hosts[0].key_generator.as_deref(), Some("vendor-a"));
+        assert_eq!(hosts[0].device_mac.as_deref(), Some("30:ae:7b:eb:17:82"));
+        assert_eq!(hosts[0].device_revision, Some(2));
+
+        let mut cleared = input("cam");
+        cleared.key_gen = Some(HostKeyGenDto::default());
+        upsert(&mut hosts, cleared, None);
+        assert_eq!(hosts[0].key_generator, None);
+        assert_eq!(hosts[0].device_mac, None);
+        assert_eq!(hosts[0].device_revision, None);
     }
 
     #[test]
@@ -587,6 +625,28 @@ mod tests {
         let host = duplicate(&source, typed);
         assert_eq!(host.upload_protocol, HostUploadProtocol::Zmodem);
         assert_eq!(host.upload_dir, None);
+    }
+
+    #[test]
+    fn a_duplicate_takes_the_sources_key_generator_unless_the_form_gives_its_own() {
+        let mut source = source_host();
+        source.key_generator = Some("vendor-a".to_string());
+        source.device_mac = Some("30:ae:7b:eb:17:82".to_string());
+        source.device_revision = Some(2);
+        let host = duplicate(&source, input("web-2"));
+        assert_eq!(host.key_generator.as_deref(), Some("vendor-a"));
+        assert_eq!(host.device_mac.as_deref(), Some("30:ae:7b:eb:17:82"));
+        assert_eq!(host.device_revision, Some(2));
+
+        let mut typed = input("web-3");
+        typed.key_gen = Some(HostKeyGenDto {
+            generator: Some("vendor-a".to_string()),
+            mac: Some("30:ae:7b:eb:17:83".to_string()),
+            revision: None,
+        });
+        let host = duplicate(&source, typed);
+        assert_eq!(host.device_mac.as_deref(), Some("30:ae:7b:eb:17:83"));
+        assert_eq!(host.device_revision, None);
     }
 
     #[test]

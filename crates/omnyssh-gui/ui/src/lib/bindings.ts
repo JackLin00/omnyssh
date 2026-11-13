@@ -804,7 +804,11 @@ export type FlowControlDto = "none" | "software" | "hardware"
  * (tech-gui.md §3.4). `hasKey` reports whether an identity file is configured;
  * the key path itself never crosses the boundary.
  */
-export type HostDto = { name: string; hostname: string; user: string; port: number; tags: string[]; notes?: string | null; source: HostSourceDto; hasKey: boolean; passwordAuthDisabled?: boolean | null; monitoring: MonitorModeDto; monitorPort?: number | null; localForwards: LocalForwardDto[]; tunnelAutostart: boolean; forwardAgent: boolean; uploadProtocol?: HostUploadProtocolDto; uploadDir?: string | null }
+export type HostDto = { name: string; hostname: string; user: string; port: number; tags: string[]; notes?: string | null; source: HostSourceDto; hasKey: boolean; passwordAuthDisabled?: boolean | null; monitoring: MonitorModeDto; monitorPort?: number | null; localForwards: LocalForwardDto[]; tunnelAutostart: boolean; forwardAgent: boolean; uploadProtocol?: HostUploadProtocolDto; uploadDir?: string | null; 
+/**
+ * The key generator this host's key comes from, if any.
+ */
+keyGenerator?: string | null; deviceMac?: string | null; deviceRevision?: number | null }
 /**
  * Inbound host form payload for `save_host` (tech-gui.md §4.1, Stage 4.1). Always
  * builds a **manual** `Host`: editing an SSH-config import saves a copy that shadows
@@ -821,7 +825,12 @@ uploadProtocol?: HostUploadProtocolDto | null;
 /**
  * Blank means the home directory.
  */
-uploadDir?: string | null }
+uploadDir?: string | null; 
+/**
+ * Left out means unchanged: the form leaves it out while key generators are
+ * switched off, and must not wipe what was set.
+ */
+keyGen?: HostKeyGenDto | null }
 /**
  * A host key no longer matches `known_hosts` on a connection the user started
  * (a terminal or files); `jumpFor` names the host a bastion was on the way to.
@@ -833,6 +842,11 @@ export type HostKeyChanged = { requestId: number; hostName: string; host: string
  * crosses: the frontend cannot hand the core a key.
  */
 export type HostKeyDecisionDto = "update" | "once" | "cancel"
+/**
+ * A host's key generator settings as the form sends them. No generator clears
+ * the MAC and revision with it.
+ */
+export type HostKeyGenDto = { generator?: string | null; mac?: string | null; revision?: number | null }
 /**
  * Host origin, mirrors `omnyssh_core::ssh::client::HostSource`.
  */

@@ -143,6 +143,26 @@ pub struct HostDto {
     pub upload_protocol: HostUploadProtocolDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_dir: Option<String>,
+    /// The key generator this host's key comes from, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_generator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_mac: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_revision: Option<u32>,
+}
+
+/// A host's key generator settings as the form sends them. No generator clears
+/// the MAC and revision with it.
+#[derive(Debug, Clone, Default, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HostKeyGenDto {
+    #[serde(default)]
+    pub generator: Option<String>,
+    #[serde(default)]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub revision: Option<u32>,
 }
 
 /// One `ssh -L` rule (tech-gui.md §4.1): listen on `bindAddress:bindPort` here and
@@ -207,6 +227,10 @@ pub struct HostInputDto {
     /// Blank means the home directory.
     #[serde(default)]
     pub upload_dir: Option<String>,
+    /// Left out means unchanged: the form leaves it out while key generators are
+    /// switched off, and must not wipe what was set.
+    #[serde(default)]
+    pub key_gen: Option<HostKeyGenDto>,
 }
 
 /// What this desktop allows the tray (tech-gui.md §4.2 `set_tray_behavior`): an icon
@@ -586,6 +610,9 @@ impl From<&Host> for HostDto {
             forward_agent: host.forward_agent,
             upload_protocol: host.upload_protocol.into(),
             upload_dir: host.upload_dir.clone(),
+            key_generator: host.key_generator.clone(),
+            device_mac: host.device_mac.clone(),
+            device_revision: host.device_revision,
         }
     }
 }
@@ -653,6 +680,14 @@ impl From<HostInputDto> for Host {
         // last guard. Password is not trimmed — its bytes are preserved verbatim.
         let non_empty = |s: Option<String>| s.filter(|v| !v.is_empty());
         let monitoring: MonitorMode = dto.monitoring.map(Into::into).unwrap_or_default();
+        let trimmed = |s: Option<String>| non_empty(s.map(|v| v.trim().to_string()));
+        // No generator, no device details: they mean nothing without one.
+        let key_gen = dto.key_gen.unwrap_or_default();
+        let key_generator = trimmed(key_gen.generator);
+        let (device_mac, device_revision) = match key_generator {
+            Some(_) => (trimmed(key_gen.mac), key_gen.revision),
+            None => (None, None),
+        };
         Host {
             name: dto.name,
             hostname: dto.hostname,
@@ -678,10 +713,10 @@ impl From<HostInputDto> for Host {
             forward_agent: dto.forward_agent,
             upload_protocol: dto.upload_protocol.map(Into::into).unwrap_or_default(),
             upload_dir: non_empty(dto.upload_dir.map(|d| d.trim().to_string())),
-            // Set by `save_host` from the payload's `keyGen`, or carried over.
-            key_generator: None,
-            device_mac: None,
-            device_revision: None,
+            // `save_host` carries these over when the payload leaves `keyGen` out.
+            key_generator,
+            device_mac,
+            device_revision,
             key_setup_date: None,
             password_auth_disabled: None,
         }
@@ -1091,6 +1126,7 @@ mod tests {
             forward_agent: false,
             upload_protocol: None,
             upload_dir: None,
+            key_gen: None,
         }
     }
 
@@ -1115,6 +1151,38 @@ mod tests {
         assert!(host.original_ssh_host.is_none());
         assert!(host.key_setup_date.is_none());
         assert!(host.password_auth_disabled.is_none());
+    }
+
+    #[test]
+    fn key_generator_settings_cross_both_ways() {
+        let mut input = full_input();
+        input.key_gen = Some(HostKeyGenDto {
+            generator: Some(" vendor-a ".to_string()),
+            mac: Some(" 30:ae:7b:eb:17:82 ".to_string()),
+            revision: Some(2),
+        });
+        let host = Host::from(input);
+        assert_eq!(host.key_generator.as_deref(), Some("vendor-a"));
+        assert_eq!(host.device_mac.as_deref(), Some("30:ae:7b:eb:17:82"));
+        assert_eq!(host.device_revision, Some(2));
+        let json = serde_json::to_value(HostDto::from(&host)).unwrap();
+        assert_eq!(json["keyGenerator"], "vendor-a");
+        assert_eq!(json["deviceMac"], "30:ae:7b:eb:17:82");
+        assert_eq!(json["deviceRevision"], 2);
+
+        // No generator: the device details go with it.
+        let mut none = full_input();
+        none.key_gen = Some(HostKeyGenDto {
+            generator: Some(" ".to_string()),
+            mac: Some("30:ae:7b:eb:17:82".to_string()),
+            revision: Some(2),
+        });
+        let host = Host::from(none);
+        assert_eq!(host.key_generator, None);
+        assert_eq!(host.device_mac, None);
+        assert_eq!(host.device_revision, None);
+        let json = serde_json::to_value(HostDto::from(&host)).unwrap();
+        assert!(json.get("keyGenerator").is_none());
     }
 
     #[test]
@@ -1198,6 +1266,7 @@ mod tests {
             forward_agent: false,
             upload_protocol: None,
             upload_dir: Some("  ".to_string()),
+            key_gen: None,
         });
         assert!(host.identity_file.is_none());
         assert!(host.upload_dir.is_none(), "a blank upload dir means home");
