@@ -295,6 +295,9 @@ impl HostForm {
             forward_agent,
             upload_protocol: Default::default(),
             upload_dir: None,
+            key_generator: None,
+            device_mac: None,
+            device_revision: None,
             key_setup_date: None,
             password_auth_disabled: None,
         })
@@ -579,10 +582,13 @@ impl App {
                         // Nor has IdentitiesOnly, and losing it brings back a login
                         // that offers every agent key.
                         host.identities_only = old_host.is_some_and(|h| h.identities_only);
-                        // Nor have the desktop's upload settings.
+                        // Nor have the desktop's upload and key generator settings.
                         if let Some(old) = old_host {
                             host.upload_protocol = old.upload_protocol;
                             host.upload_dir = old.upload_dir.clone();
+                            host.key_generator = old.key_generator.clone();
+                            host.device_mac = old.device_mac.clone();
+                            host.device_revision = old.device_revision;
                         }
 
                         // An import is adopted under the name it was imported by; a copy

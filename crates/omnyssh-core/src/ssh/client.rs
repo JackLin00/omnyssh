@@ -127,6 +127,16 @@ pub struct Host {
     /// Where SFTP uploads go: `~`, `~/dir` or an absolute path. Unset means `~`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_dir: Option<String>,
+    /// The key generator (`key_generators.toml`) whose key this host is tried
+    /// with first, while generators are switched on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_generator: Option<String>,
+    /// The device's MAC, handed to the key generator as it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_mac: Option<String>,
+    /// The device's revision for the key generator; unset leaves it to the code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_revision: Option<u32>,
 
     // -----------------------------------------------------------------------
     // Auto SSH Key Setup metadata
@@ -184,6 +194,9 @@ impl Default for Host {
             forward_agent: false,
             upload_protocol: HostUploadProtocol::default(),
             upload_dir: None,
+            key_generator: None,
+            device_mac: None,
+            device_revision: None,
             key_setup_date: None,
             password_auth_disabled: None,
         }
@@ -268,5 +281,27 @@ mod tests {
 
         assert_eq!(read.monitoring, MonitorMode::TcpPort);
         assert_eq!(read.monitor_port, Some(8443));
+    }
+
+    #[test]
+    fn key_generator_fields_stay_out_until_set_and_read_back() {
+        let plain: Host = toml::from_str("name = \"web\"\nhostname = \"10.0.0.1\"\n").unwrap();
+        assert_eq!(plain.key_generator, None);
+        let written = toml::to_string(&plain).expect("serialize");
+        assert!(!written.contains("key_generator"), "{written}");
+        assert!(!written.contains("device_"), "{written}");
+
+        let host = Host {
+            name: String::from("cam"),
+            hostname: String::from("192.168.11.1"),
+            key_generator: Some(String::from("vendor-a")),
+            device_mac: Some(String::from("30:ae:7b:eb:17:82")),
+            device_revision: Some(2),
+            ..Host::default()
+        };
+        let read: Host = toml::from_str(&toml::to_string(&host).unwrap()).unwrap();
+        assert_eq!(read.key_generator.as_deref(), Some("vendor-a"));
+        assert_eq!(read.device_mac.as_deref(), Some("30:ae:7b:eb:17:82"));
+        assert_eq!(read.device_revision, Some(2));
     }
 }

@@ -5,11 +5,13 @@
 //! - [`snippets`]    — `~/.config/omnyssh/snippets.toml`
 //! - [`serial_devices`] — `~/.config/omnyssh/serial.toml`
 //! - [`quick_commands`] — `~/.config/omnyssh/quick_commands.toml`
+//! - [`key_generators`] — `~/.config/omnyssh/key_generators.toml`
 //!
 //! Top-level functions in this module handle loading and persisting the
 //! host list (`hosts.toml`).
 
 pub mod app_config;
+pub mod key_generators;
 pub mod quick_commands;
 pub mod serial_devices;
 pub mod snippets;

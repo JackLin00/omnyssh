@@ -678,6 +678,10 @@ impl From<HostInputDto> for Host {
             forward_agent: dto.forward_agent,
             upload_protocol: dto.upload_protocol.map(Into::into).unwrap_or_default(),
             upload_dir: non_empty(dto.upload_dir.map(|d| d.trim().to_string())),
+            // Set by `save_host` from the payload's `keyGen`, or carried over.
+            key_generator: None,
+            device_mac: None,
+            device_revision: None,
             key_setup_date: None,
             password_auth_disabled: None,
         }

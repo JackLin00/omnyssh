@@ -51,6 +51,11 @@ pub fn quick_commands_config_path() -> Option<PathBuf> {
     app_config_dir().map(|d| d.join("quick_commands.toml"))
 }
 
+/// Returns the path to the key generators file.
+pub fn key_generators_config_path() -> Option<PathBuf> {
+    app_config_dir().map(|d| d.join("key_generators.toml"))
+}
+
 /// Removes rolling log files in `log_dir` older than `max_age_days`.
 ///
 /// Best-effort and fault-tolerant: a missing directory, an unreadable entry,
