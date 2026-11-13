@@ -223,13 +223,15 @@ async fn ask(
         id
     };
     let _pending = Pending(request_id);
-    // A full channel must not hold the login past its wait either.
-    match tokio::time::timeout(wait, service.send(event(request_id))).await {
+    // One deadline for sending and answering: a full channel must not stretch
+    // the login past `wait` either.
+    let deadline = tokio::time::Instant::now() + wait;
+    match tokio::time::timeout_at(deadline, service.send(event(request_id))).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => return Err("the desktop app is not running it".to_string()),
         Err(_) => return Err(format!("no key within {} s", wait.as_secs())),
     }
-    match tokio::time::timeout(wait, answered).await {
+    match tokio::time::timeout_at(deadline, answered).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(_)) => Err("the request was dropped".to_string()),
         Err(_) => Err(format!("no key within {} s", wait.as_secs())),
