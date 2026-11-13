@@ -1,0 +1,169 @@
+import { expect, test, type Page } from '@playwright/test';
+
+// Key generators. e2e runs the static SPA with Tauri absent, so `__TAURI_INTERNALS__`
+// is stubbed at the boundary. The stub keeps the generators and the hosts the way
+// the backend would (a rename or delete follows through to the hosts), records every
+// save and answer, and fingerprints a key by its length. `__fire` plays the core's
+// `generated-key-required`; the generator then runs in a real Worker.
+const CAM = { name: 'cam', hostname: '192.168.11.1', user: 'root', port: 22, tags: [], source: 'manual', hasKey: false, localForwards: [], tunnelAutostart: false, forwardAgent: false };
+const WEB = { name: 'web', hostname: 'web.example.com', user: 'root', port: 22, tags: [], source: 'manual', hasKey: true, localForwards: [], tunnelAutostart: false, forwardAgent: false };
+
+/** Returns key text naming everything it was given. */
+const ECHO = `async function generateKey(deviceInfo, address) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(deviceInfo.mac));
+  return {
+    privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\\n' + JSON.stringify({ deviceInfo, address, bytes: digest.byteLength }) + '\\n-----END OPENSSH PRIVATE KEY-----\\n',
+    fingerprint: 'SHA256:from-the-code'
+  };
+}`;
+
+type Generators = { enabled: boolean; generators: Array<{ name: string; code: string; credential: string }> };
+type Call = { cmd: string; args: Record<string, unknown> };
+
+async function boot(page: Page, generators: Generators, hosts: unknown[] = [CAM, WEB]): Promise<void> {
+  await page.addInitScript(
+    ({ generators, hosts }) => {
+      let cbid = 0;
+      const win = window as unknown as Record<string, unknown>;
+      const listeners: Record<string, number[]> = {};
+      const calls: Call[] = [];
+      win.__calls = calls;
+      const state = { generators: structuredClone(generators), hosts: structuredClone(hosts) as Array<Record<string, unknown>> };
+      win.__state = state;
+
+      function fire(event: string, payload: unknown): void {
+        for (const id of listeners[event] ?? []) {
+          const cb = win[`__cb${id}`] as ((e: unknown) => void) | undefined;
+          cb?.({ event, id, payload });
+        }
+      }
+      win.__fire = fire;
+
+      (win as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
+        invoke: (cmd: string, args: Record<string, unknown>) => {
+          switch (cmd) {
+            case 'list_hosts':
+              return Promise.resolve(structuredClone(state.hosts));
+            case 'list_serial_devices':
+            case 'list_quick_commands':
+              return Promise.resolve([]);
+            case 'list_key_generators':
+              return Promise.resolve(structuredClone(state.generators));
+            case 'set_key_generators_enabled':
+              calls.push({ cmd, args });
+              state.generators.enabled = args.enabled as boolean;
+              return Promise.resolve(null);
+            case 'save_key_generator': {
+              calls.push({ cmd, args });
+              const { previousName, generator } = args as { previousName: string | null; generator: Generators['generators'][0] };
+              const i = state.generators.generators.findIndex((g) => g.name === previousName);
+              if (i >= 0) state.generators.generators[i] = generator;
+              else state.generators.generators.push(generator);
+              for (const h of state.hosts) if (previousName && h.keyGenerator === previousName) h.keyGenerator = generator.name;
+              return Promise.resolve(null);
+            }
+            case 'delete_key_generator': {
+              calls.push({ cmd, args });
+              state.generators.generators = state.generators.generators.filter((g) => g.name !== args.name);
+              for (const h of state.hosts) {
+                if (h.keyGenerator === args.name) {
+                  delete h.keyGenerator;
+                  delete h.deviceMac;
+                  delete h.deviceRevision;
+                }
+              }
+              return Promise.resolve(null);
+            }
+            case 'key_fingerprint':
+              calls.push({ cmd, args });
+              return Promise.resolve(`SHA256:len-${(args.privateKey as string).length}`);
+            case 'answer_generated_key':
+            case 'save_host':
+            case 'duplicate_host':
+              calls.push({ cmd, args });
+              return Promise.resolve(null);
+            case 'reload_hosts':
+              fire('hosts-loaded', structuredClone(state.hosts));
+              return Promise.resolve(null);
+            case 'plugin:event|listen': {
+              const { event, handler } = args as { event: string; handler: number };
+              (listeners[event] ||= []).push(handler);
+              return Promise.resolve(cbid);
+            }
+            default:
+              return Promise.resolve(null);
+          }
+        },
+        transformCallback: (cb: unknown) => {
+          const id = ++cbid;
+          win[`__cb${id}`] = cb;
+          return id;
+        },
+        unregisterCallback: (id: number) => {
+          delete win[`__cb${id}`];
+        }
+      };
+    },
+    { generators, hosts }
+  );
+  await page.goto('/');
+  await expect(page.getByText(`${hosts.length} host`)).toBeVisible();
+}
+
+const calls = (page: Page, cmd: string): Promise<Array<Record<string, unknown>>> =>
+  page.evaluate(
+    (cmd) => ((window as unknown as { __calls: Call[] }).__calls ?? []).filter((c) => c.cmd === cmd).map((c) => c.args),
+    cmd
+  );
+
+const fire = (page: Page, event: string, payload: unknown) =>
+  page.evaluate(
+    ([event, payload]) => (window as unknown as { __fire: (e: string, p: unknown) => void }).__fire(event as string, payload),
+    [event, payload] as const
+  );
+
+const ON: Generators = {
+  enabled: true,
+  generators: [{ name: 'vendor-a', code: ECHO, credential: '{"master_key":"00ff"}' }]
+};
+
+test('a login asking for a generated key gets it from the code, run in a worker', async ({ page }) => {
+  await boot(page, ON);
+  await fire(page, 'generated-key-required', {
+    requestId: 3,
+    hostName: 'cam',
+    code: ECHO,
+    credential: '{"master_key":"00ff"}',
+    mac: '30:ae:7b:eb:17:82',
+    revision: null,
+    address: '192.168.11.1'
+  });
+  await expect.poll(() => calls(page, 'answer_generated_key')).toHaveLength(1);
+  const [answer] = await calls(page, 'answer_generated_key');
+  expect(answer.requestId).toBe(3);
+  expect(answer.error).toBeNull();
+  const echoed = JSON.parse((answer.privateKey as string).split('\n')[1]);
+  // No revision: the key is left out, for the code's own default.
+  expect(echoed).toEqual({
+    deviceInfo: { credential: { master_key: '00ff' }, mac: '30:ae:7b:eb:17:82' },
+    address: '192.168.11.1',
+    bytes: 32
+  });
+
+  // Code that fails answers with why.
+  await fire(page, 'generated-key-required', {
+    requestId: 4,
+    hostName: 'cam',
+    code: 'async function generateKey() { throw new Error("master_key is undefined"); }',
+    credential: '',
+    mac: 'x',
+    revision: 1,
+    address: '192.168.11.1'
+  });
+  await expect.poll(() => calls(page, 'answer_generated_key')).toHaveLength(2);
+  expect((await calls(page, 'answer_generated_key'))[1]).toEqual({
+    requestId: 4,
+    privateKey: null,
+    error: 'master_key is undefined'
+  });
+});

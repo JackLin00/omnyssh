@@ -9,6 +9,8 @@ import type {
   HostInputDto,
   HostUploadProtocolDto,
   HostKeyDecisionDto,
+  KeyGeneratorDto,
+  KeyGeneratorsDto,
   LogModeDto,
   LogStatusDto,
   QuickGroupDto,
@@ -344,6 +346,52 @@ export async function unlockIdentity(keyPath: string, passphrase: string): Promi
 export async function answerPassword(requestId: number, password: string | null): Promise<void> {
   const res = await commands.answerPassword(requestId, password);
   if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** The key generators' switch and the generators, credentials included. */
+export async function listKeyGenerators(): Promise<KeyGeneratorsDto> {
+  const res = await commands.listKeyGenerators();
+  if (res.status === 'error') throw new Error(res.error.message);
+  return res.data;
+}
+
+/** Switch key generators on or off for every host. */
+export async function setKeyGeneratorsEnabled(enabled: boolean): Promise<void> {
+  const res = await commands.setKeyGeneratorsEnabled(enabled);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Add a generator, or replace the one named `previousName` (renaming its hosts'
+ *  references). Reload the hosts after a rename. */
+export async function saveKeyGenerator(
+  previousName: string | null,
+  generator: KeyGeneratorDto
+): Promise<void> {
+  const res = await commands.saveKeyGenerator(previousName, generator);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Delete a generator; the hosts naming it lose it. Reload the hosts after. */
+export async function deleteKeyGenerator(name: string): Promise<void> {
+  const res = await commands.deleteKeyGenerator(name);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** Answer a `generated-key-required` request: the private key, or why there is none. */
+export async function answerGeneratedKey(
+  requestId: number,
+  privateKey: string | null,
+  error: string | null
+): Promise<void> {
+  const res = await commands.answerGeneratedKey(requestId, privateKey, error);
+  if (res.status === 'error') throw new Error(res.error.message);
+}
+
+/** The `SHA256:…` fingerprint of a private key, read as a login reads it. */
+export async function keyFingerprint(privateKey: string): Promise<string> {
+  const res = await commands.keyFingerprint(privateKey);
+  if (res.status === 'error') throw new Error(res.error.message);
+  return res.data;
 }
 
 /** Answer a changed host key: save it and connect, connect once, or give up. */

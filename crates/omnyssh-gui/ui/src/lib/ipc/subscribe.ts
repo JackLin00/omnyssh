@@ -31,6 +31,7 @@ import {
   applyHostKeyChanged
 } from './router';
 import { applyLogStopped } from '$lib/stores/sessionLogs';
+import { applyGeneratedKeyRequired } from '$lib/keyGen';
 import { applyUploadFinished, applyUploadProgress } from '$lib/stores/uploads';
 
 export async function startEventBridge(): Promise<() => void> {
@@ -58,6 +59,9 @@ export async function startEventBridge(): Promise<() => void> {
     offs.push(await events.updateAvailable.listen((e) => applyUpdateAvailable(e.payload)));
     offs.push(await events.keyPassphraseRequired.listen((e) => applyKeyPassphraseRequired(e.payload)));
     offs.push(await events.passwordRequired.listen((e) => applyPasswordRequired(e.payload)));
+    offs.push(
+      await events.generatedKeyRequired.listen((e) => void applyGeneratedKeyRequired(e.payload))
+    );
     offs.push(await events.hostKeyChanged.listen((e) => applyHostKeyChanged(e.payload)));
     offs.push(await events.logStopped.listen((e) => applyLogStopped(e.payload)));
     offs.push(await events.uploadProgress.listen((e) => applyUploadProgress(e.payload)));

@@ -38,6 +38,7 @@ vi.mock('$lib/bindings', () => {
       updateAvailable: channel('updateAvailable'),
       keyPassphraseRequired: channel('keyPassphraseRequired'),
       passwordRequired: channel('passwordRequired'),
+      generatedKeyRequired: channel('generatedKeyRequired'),
       hostKeyChanged: channel('hostKeyChanged'),
       logStopped: channel('logStopped'),
       uploadProgress: channel('uploadProgress'),
