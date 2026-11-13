@@ -47,6 +47,11 @@ async function boot(page: Page, generators: Generators, hosts: unknown[] = [CAM,
             case 'list_serial_devices':
             case 'list_quick_commands':
               return Promise.resolve([]);
+            // The settings page asks for these as it opens.
+            case 'set_tray_behavior':
+              return Promise.resolve({ available: true, minimize: true });
+            case 'load_update_config':
+              return Promise.resolve({ checkOnStartup: false, skipVersion: '' });
             case 'list_key_generators':
               return Promise.resolve(structuredClone(state.generators));
             case 'set_key_generators_enabled':
@@ -166,4 +171,79 @@ test('a login asking for a generated key gets it from the code, run in a worker'
     privateKey: null,
     error: 'master_key is undefined'
   });
+});
+
+async function openSettings(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Key generators' })).toBeVisible();
+}
+
+test('the switch is off at first and shows nothing else; on, generators can be added', async ({ page }) => {
+  await boot(page, { enabled: false, generators: [] });
+  await openSettings(page);
+  const toggle = page.getByRole('switch', { name: 'Use key generators' });
+  await expect(toggle).toHaveAttribute('aria-checked', 'false');
+  await expect(page.getByRole('button', { name: 'Add key generator' })).toHaveCount(0);
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-checked', 'true');
+  expect(await calls(page, 'set_key_generators_enabled')).toEqual([{ enabled: true }]);
+
+  await page.getByRole('button', { name: 'Add key generator' }).click();
+  const editor = page.getByRole('dialog', { name: 'Add key generator' });
+  await editor.getByLabel('Name').fill('vendor-a');
+  await editor.getByLabel('Code').fill(ECHO);
+  // A credential that is not JSON is not saved.
+  await editor.getByLabel('Credential (JSON)').fill('{master_key: 1}');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect(editor.getByRole('alert')).toHaveText('The credential is not valid JSON');
+  await editor.getByLabel('Credential (JSON)').fill('{"master_key":"00ff"}');
+  await editor.getByRole('button', { name: 'Save' }).click();
+
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(await calls(page, 'save_key_generator')).toEqual([
+    { previousName: null, generator: { name: 'vendor-a', code: ECHO, credential: '{"master_key":"00ff"}' } }
+  ]);
+  await expect(page.getByRole('list', { name: 'Key generators' })).toContainText('vendor-a');
+});
+
+test('the test panel runs the code and shows the key fingerprint, or why there is none', async ({ page }) => {
+  await boot(page, ON);
+  await openSettings(page);
+  await page.getByRole('button', { name: 'Edit vendor-a' }).click();
+  const editor = page.getByRole('dialog', { name: 'Edit key generator' });
+  await editor.getByLabel('Test MAC').fill('30:ae:7b:eb:17:82');
+  await editor.getByLabel('Test address').fill('192.168.11.1');
+  await editor.getByRole('button', { name: 'Run' }).click();
+  await expect(editor.getByTestId('test-fingerprint')).toHaveText(/^SHA256:len-\d+$/);
+  // The stub's fingerprint is not the one the code reports.
+  await expect(editor.getByText("The fingerprint the code returned is not this key's.")).toBeVisible();
+  const [fingerprinted] = await calls(page, 'key_fingerprint');
+  expect(fingerprinted.privateKey as string).toContain('"mac":"30:ae:7b:eb:17:82"');
+
+  await editor.getByLabel('Code').fill('async function generateKey() { return { publicKey: "x" }; }');
+  await editor.getByRole('button', { name: 'Run' }).click();
+  await expect(editor.getByTestId('test-error')).toHaveText('The result has no privateKey');
+});
+
+test('a rename and a delete reach the hosts that use the generator', async ({ page }) => {
+  await boot(page, ON, [{ ...CAM, keyGenerator: 'vendor-a', deviceMac: '30:ae:7b:eb:17:82' }, WEB]);
+  await openSettings(page);
+  await expect(page.getByRole('list', { name: 'Key generators' })).toContainText('1 host');
+
+  await page.getByRole('button', { name: 'Edit vendor-a' }).click();
+  const editor = page.getByRole('dialog', { name: 'Edit key generator' });
+  await editor.getByLabel('Name').fill('vendor-b');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect((await calls(page, 'save_key_generator'))[0].previousName).toBe('vendor-a');
+  await expect(page.getByRole('list', { name: 'Key generators' })).toContainText('vendor-b');
+  await expect(page.getByRole('list', { name: 'Key generators' })).toContainText('1 host');
+
+  await page.getByRole('button', { name: 'Delete vendor-b' }).click();
+  const confirm = page.getByRole('dialog', { name: 'Delete key generator' });
+  await expect(confirm).toContainText('cam uses it');
+  await confirm.getByRole('button', { name: 'Delete' }).click();
+  expect(await calls(page, 'delete_key_generator')).toEqual([{ name: 'vendor-b' }]);
+  await expect(page.getByRole('list', { name: 'Key generators' })).toContainText('No key generators yet.');
 });

@@ -6,6 +6,7 @@
   import ShortcutSettings from './ShortcutSettings.svelte';
   import SchemePicker from './SchemePicker.svelte';
   import GlobalHotkeySetting from './GlobalHotkeySetting.svelte';
+  import KeyGeneratorSettings from './KeyGeneratorSettings.svelte';
   import { theme } from '$lib/stores/theme';
   import { streamerMode } from '$lib/stores/streamer';
   import {
@@ -192,6 +193,12 @@
           </div>
         </div>
       </div>
+    </Surface>
+
+    <!-- Key generators -->
+    <Surface class="p-5">
+      <h2 class="mb-3 text-sm font-semibold">Key generators</h2>
+      <KeyGeneratorSettings />
     </Surface>
 
     <!-- Terminal colors -->
