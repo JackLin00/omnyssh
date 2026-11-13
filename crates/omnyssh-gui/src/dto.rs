@@ -1,6 +1,8 @@
 //! DTOs crossing the IPC boundary (tech-gui.md §4.1). Every type derives serde +
 //! `specta::Type` so `bindings.ts` is generated, never hand-written. Secret
-//! fields (`password`, key material) never appear here.
+//! fields (`password`, key material) never appear here. The exception is
+//! `KeyGeneratorDto.credential`, a key generator's credential (it may hold a
+//! master key): the page runs the generator and edits it.
 
 use serde::{Deserialize, Serialize};
 

@@ -413,11 +413,11 @@ fn main() {
             // The GUI answers host-key questions (`answer_host_key`); the TUI does not.
             let pty = PtyManager::with_raw_output(raw_tx).asking_host_keys();
 
+            // The page runs key generators: logins ask it for their keys.
+            omnyssh_core::ssh::key_gen::serve(engine_tx.clone());
             // Pre-load the shared host config so the first `list_hosts` paints
             // immediately. A load failure here is non-fatal — the frontend's
             // `reload_hosts` re-attempts and surfaces the error (tech-gui.md §3.4).
-            // The page runs key generators: logins ask it for their keys.
-            omnyssh_core::ssh::key_gen::serve(engine_tx.clone());
             let gui_state = GuiState::new(engine_tx, pty);
             if let Ok(hosts) = omnyssh_core::config::load_all_hosts() {
                 gui_state.set_hosts(hosts);

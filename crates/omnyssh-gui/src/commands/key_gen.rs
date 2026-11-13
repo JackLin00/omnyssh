@@ -44,13 +44,20 @@ pub async fn save_key_generator(
     generator: KeyGeneratorDto,
 ) -> Result<(), CommandError> {
     let generator = KeyGenerator::from(generator);
-    let renamed =
-        update_generators(move |config| upsert(config, previous_name.as_deref(), generator))
-            .await?;
-    if let Some((from, to)) = renamed {
-        update_hosts(move |hosts| rename_in(hosts, &from, &to)).await?;
-    }
-    Ok(())
+    blocking(move || {
+        let _guard = WRITE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut config = load_key_generators().map_err(|e| format!("{e:#}"))?;
+        // Hosts first: if saving the generators then fails, a retry still works.
+        if let Some((from, to)) = upsert(&mut config, previous_name.as_deref(), generator)? {
+            let mut hosts = load_hosts().map_err(|e| e.to_string())?;
+            rename_in(&mut hosts, &from, &to);
+            save_hosts(&hosts).map_err(|e| e.to_string())?;
+        }
+        save_key_generators(&config).map_err(|e| format!("{e:#}"))
+    })
+    .await
 }
 
 /// Delete the generator named `name`; the hosts that named it lose it, with
@@ -59,13 +66,18 @@ pub async fn save_key_generator(
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_key_generator(name: String) -> Result<(), CommandError> {
-    let gone = name.clone();
-    update_generators(move |config| {
-        config.generators.retain(|g| g.name != gone);
-        Ok(())
+    blocking(move || {
+        let _guard = WRITE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut config = load_key_generators().map_err(|e| format!("{e:#}"))?;
+        let mut hosts = load_hosts().map_err(|e| e.to_string())?;
+        clear_in(&mut hosts, &name);
+        save_hosts(&hosts).map_err(|e| e.to_string())?;
+        config.generators.retain(|g| g.name != name);
+        save_key_generators(&config).map_err(|e| format!("{e:#}"))
     })
-    .await?;
-    update_hosts(move |hosts| clear_in(hosts, &name)).await
+    .await
 }
 
 /// Answer the `generated-key-required` request `request_id` with the private
@@ -110,6 +122,11 @@ fn upsert(
     {
         return Err("the credential is not valid JSON".to_string());
     }
+    if let Some(from) = previous {
+        if !config.generators.iter().any(|g| g.name == from) {
+            return Err(format!("key generator '{from}' no longer exists"));
+        }
+    }
     let taken = config
         .generators
         .iter()
@@ -148,6 +165,10 @@ fn clear_in(hosts: &mut [Host], name: &str) {
     }
 }
 
+/// Key generator commands load, change and save whole files; two at once would
+/// lose one's change.
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, CommandError> {
@@ -164,22 +185,13 @@ async fn update_generators<T: Send + 'static>(
     mutate: impl FnOnce(&mut KeyGenerators) -> Result<T, String> + Send + 'static,
 ) -> Result<T, CommandError> {
     blocking(move || {
+        let _guard = WRITE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut config = load_key_generators().map_err(|e| format!("{e:#}"))?;
         let out = mutate(&mut config)?;
         save_key_generators(&config).map_err(|e| format!("{e:#}"))?;
         Ok(out)
-    })
-    .await
-}
-
-/// Load the manual hosts, apply `mutate`, and write them back.
-async fn update_hosts(
-    mutate: impl FnOnce(&mut [Host]) + Send + 'static,
-) -> Result<(), CommandError> {
-    blocking(move || {
-        let mut hosts = load_hosts().map_err(|e| e.to_string())?;
-        mutate(&mut hosts);
-        save_hosts(&hosts).map_err(|e| e.to_string())
     })
     .await
 }
@@ -245,6 +257,16 @@ mod tests {
         let mut none = generator("c");
         none.credential = "  ".to_string();
         assert_eq!(upsert(&mut config, None, none), Ok(None));
+    }
+
+    #[test]
+    fn a_previous_name_that_is_gone_is_refused() {
+        let mut config = config();
+        assert_eq!(
+            upsert(&mut config, Some("gone"), generator("c")),
+            Err("key generator 'gone' no longer exists".to_string())
+        );
+        assert_eq!(config.generators.len(), 2);
     }
 
     fn host(name: &str, generator: Option<&str>) -> Host {
