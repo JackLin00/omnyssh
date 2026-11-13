@@ -6,6 +6,7 @@
 import type {
   HostDto,
   HostInputDto,
+  HostKeyGenDto,
   HostUploadProtocolDto,
   LocalForwardDto,
   MonitorModeDto
@@ -39,6 +40,11 @@ export interface HostFormFields {
   uploadProtocol: HostUploadProtocolDto;
   /** Where SFTP uploads go: blank means the home folder. Only read for `sftp`. */
   uploadDir: string;
+  /** The key generator's name; blank for none. */
+  keyGenerator: string;
+  deviceMac: string;
+  /** Blank leaves it to the generator's code. */
+  deviceRevision: string;
 }
 
 export function emptyForm(): HostFormFields {
@@ -59,7 +65,10 @@ export function emptyForm(): HostFormFields {
     tunnelAutostart: false,
     forwardAgent: false,
     uploadProtocol: 'zmodem',
-    uploadDir: ''
+    uploadDir: '',
+    keyGenerator: '',
+    deviceMac: '',
+    deviceRevision: ''
   };
 }
 
@@ -97,7 +106,10 @@ export function formFromHost(h: HostDto): HostFormFields {
     tunnelAutostart: h.tunnelAutostart,
     forwardAgent: h.forwardAgent,
     uploadProtocol: h.uploadProtocol ?? 'zmodem',
-    uploadDir: h.uploadDir ?? ''
+    uploadDir: h.uploadDir ?? '',
+    keyGenerator: h.keyGenerator ?? '',
+    deviceMac: h.deviceMac ?? '',
+    deviceRevision: h.deviceRevision == null ? '' : String(h.deviceRevision)
   };
 }
 
@@ -181,7 +193,7 @@ export type HostFormResult = { ok: true; input: HostInputDto } | { ok: false; er
  *  dropped to `undefined` when empty (so the wire form stays sparse, §4.1). `proxyJump`
  *  is not surfaced by the form (parity with the TUI, which sets it `None`) — `save_host`
  *  preserves any existing value across an edit. */
-export function formToInput(f: HostFormFields): HostFormResult {
+export function formToInput(f: HostFormFields, withKeyGen = false): HostFormResult {
   const name = f.name.trim();
   if (!name) return { ok: false, error: 'Name cannot be empty' };
   const hostname = f.hostname.trim();
@@ -215,6 +227,9 @@ export function formToInput(f: HostFormFields): HostFormResult {
   const localForwards = parseForwards(f.forwards);
   if (typeof localForwards === 'string') return { ok: false, error: localForwards };
 
+  const keyGen = withKeyGen ? parseKeyGen(f) : undefined;
+  if (typeof keyGen === 'string') return { ok: false, error: keyGen };
+
   const identityFile = f.identityFile.trim();
   const password = f.password.trim();
   const notes = f.notes.trim();
@@ -239,7 +254,22 @@ export function formToInput(f: HostFormFields): HostFormResult {
       // Always sent: an omitted protocol means "keep" to the backend, and takes the
       // folder with it. A folder nobody can see (ZMODEM) is cleared.
       uploadProtocol: f.uploadProtocol,
-      uploadDir: f.uploadProtocol === 'sftp' ? f.uploadDir.trim() || undefined : undefined
+      uploadDir: f.uploadProtocol === 'sftp' ? f.uploadDir.trim() || undefined : undefined,
+      // Only while key generators are on: left out, the backend keeps what is set.
+      ...(keyGen ? { keyGen } : {})
     }
   };
+}
+
+/** The key generator fields, or an error. No generator sends none of them. */
+function parseKeyGen(f: HostFormFields): HostKeyGenDto | string {
+  const generator = f.keyGenerator.trim();
+  if (!generator) return { generator: null, mac: null, revision: null };
+  const mac = f.deviceMac.trim();
+  if (!mac) return 'MAC is required for a key generator';
+  const revision = f.deviceRevision.trim();
+  if (revision !== '' && (!/^\d+$/.test(revision) || Number(revision) > 0xffffffff)) {
+    return `Revision must be a whole number, got '${revision}'`;
+  }
+  return { generator, mac, revision: revision === '' ? null : Number(revision) };
 }

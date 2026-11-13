@@ -14,6 +14,7 @@
   import { spawnSession } from '$lib/stores/navigation';
   import { streamerMode, displayHostname } from '$lib/stores/streamer';
   import { hosts } from '$lib/stores/hosts';
+  import { keyGenerators, loadKeyGenerators } from '$lib/stores/keyGenerators';
   import { lastError } from '$lib/stores/notifications';
   import { isWindows } from '$lib/platform';
   import { serialDevices, reloadSerialDevices } from '$lib/stores/serialDevices';
@@ -153,7 +154,12 @@
   // Saved serial devices (Windows only, like the Serial entry): cards after the hosts.
   onMount(() => {
     if (isWindows) void reloadSerialDevices();
+    void loadKeyGenerators();
   });
+  // The host form's key generator fields: shown only while generators are on.
+  const generatorNames = $derived(
+    $keyGenerators?.enabled ? $keyGenerators.generators.map((g) => g.name) : null
+  );
   const devices = $derived(isWindows ? $serialDevices : []);
   const visibleDevices = $derived(filterSerialDevices(devices, query));
   const deviceNames = $derived(devices.map((d) => d.name));
@@ -297,6 +303,14 @@
                       title="Imported from ~/.ssh/config — editing saves your own copy, which takes priority"
                     >
                       ssh config
+                    </span>
+                  {/if}
+                  {#if $keyGenerators?.enabled && card.host.keyGenerator}
+                    <span
+                      class="shrink-0 rounded-full border border-default px-1.5 py-0.5 text-[10px] text-faint"
+                      title="Its key comes from key generator {card.host.keyGenerator} first"
+                    >
+                      gen
                     </span>
                   {/if}
                   <!-- Auth-state reflection (tech-gui.md §4.2): key-only once password
@@ -535,7 +549,13 @@
 </section>
 
 {#if dialog?.kind === 'add'}
-  <HostEditor mode="add" initial={emptyForm()} onSubmit={submit} onCancel={() => (dialog = null)} />
+  <HostEditor
+    mode="add"
+    initial={emptyForm()}
+    keyGenerators={generatorNames}
+    onSubmit={submit}
+    onCancel={() => (dialog = null)}
+  />
 {:else if dialog?.kind === 'edit'}
   {@const host = dialog.host}
   <HostEditor
@@ -543,6 +563,7 @@
     initial={formFromHost(host)}
     previousName={host.name}
     imported={host.source === 'sshConfig'}
+    keyGenerators={generatorNames}
     onSubmit={submit}
     onCancel={() => (dialog = null)}
   />
@@ -552,6 +573,7 @@
     mode="add"
     initial={formForDuplicate(host, $hosts.map((h) => h.name))}
     copiedFrom={host.name}
+    keyGenerators={generatorNames}
     onSubmit={(input) => submitDuplicate(host.name, input)}
     onCancel={() => (dialog = null)}
   />

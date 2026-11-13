@@ -358,3 +358,43 @@ describe('formToInput — drag-and-drop upload', () => {
     expect(out.ok && [out.input.uploadProtocol, out.input.uploadDir]).toEqual(['zmodem', undefined]);
   });
 });
+
+describe('formToInput — key generator', () => {
+  const cam = (over: Partial<HostFormFields> = {}) =>
+    fields({ name: 'cam', hostname: '192.168.11.1', keyGenerator: 'vendor-a', deviceMac: ' 30:ae:7b:eb:17:82 ', ...over });
+
+  it('leaves keyGen out while generators are off, so the backend keeps what is set', () => {
+    const out = formToInput(cam());
+    expect(out.ok && 'keyGen' in out.input).toBe(false);
+  });
+
+  it('sends the generator, the MAC and the revision while they are on', () => {
+    const out = formToInput(cam({ deviceRevision: ' 2 ' }), true);
+    expect(out.ok && out.input.keyGen).toEqual({ generator: 'vendor-a', mac: '30:ae:7b:eb:17:82', revision: 2 });
+    const blank = formToInput(cam(), true);
+    expect(blank.ok && blank.input.keyGen).toEqual({ generator: 'vendor-a', mac: '30:ae:7b:eb:17:82', revision: null });
+  });
+
+  it('sends no generator as all three cleared', () => {
+    const out = formToInput(cam({ keyGenerator: '' }), true);
+    expect(out.ok && out.input.keyGen).toEqual({ generator: null, mac: null, revision: null });
+  });
+
+  it('wants a MAC and a whole revision', () => {
+    expect(formToInput(cam({ deviceMac: ' ' }), true)).toEqual({ ok: false, error: 'MAC is required for a key generator' });
+    expect(formToInput(cam({ deviceRevision: '1.5' }), true)).toEqual({
+      ok: false,
+      error: "Revision must be a whole number, got '1.5'"
+    });
+    expect(formToInput(cam({ deviceRevision: '4294967296' }), true).ok).toBe(false);
+  });
+
+  it('seeds the form from the host and keeps it on a duplicate', () => {
+    const h = host({ keyGenerator: 'vendor-a', deviceMac: '30:ae:7b:eb:17:82', deviceRevision: 3 });
+    const f = formFromHost(h);
+    expect([f.keyGenerator, f.deviceMac, f.deviceRevision]).toEqual(['vendor-a', '30:ae:7b:eb:17:82', '3']);
+    const dup = formForDuplicate(h, []);
+    expect([dup.keyGenerator, dup.deviceMac, dup.deviceRevision]).toEqual(['vendor-a', '30:ae:7b:eb:17:82', '3']);
+    expect([emptyForm().keyGenerator, formFromHost(host({})).deviceRevision]).toEqual(['', '']);
+  });
+});

@@ -247,3 +247,50 @@ test('a rename and a delete reach the hosts that use the generator', async ({ pa
   expect(await calls(page, 'delete_key_generator')).toEqual([{ name: 'vendor-b' }]);
   await expect(page.getByRole('list', { name: 'Key generators' })).toContainText('No key generators yet.');
 });
+
+const SET_UP = { ...CAM, keyGenerator: 'vendor-a', deviceMac: '30:ae:7b:eb:17:82', deviceRevision: 2 };
+
+test('while generators are off the host form and the cards show nothing of them', async ({ page }) => {
+  await boot(page, { ...ON, enabled: false }, [SET_UP, WEB]);
+  await expect(page.getByText('gen', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Edit cam' }).click();
+  const editor = page.getByRole('dialog', { name: 'Edit host' });
+  await expect(editor.getByLabel('Key generator')).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(() => calls(page, 'save_host')).toHaveLength(1);
+  // Left out, so the backend keeps the host's generator.
+  expect('keyGen' in ((await calls(page, 'save_host'))[0].input as object)).toBe(false);
+});
+
+test('a host picks a generator with its MAC and revision; a duplicate keeps them', async ({ page }) => {
+  await boot(page, ON, [SET_UP, WEB]);
+  await expect(page.getByText('gen', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('gen', { exact: true })).toHaveAttribute('title', /vendor-a/);
+
+  await page.getByRole('button', { name: 'Edit web' }).click();
+  const editor = page.getByRole('dialog', { name: 'Edit host' });
+  await expect(editor.getByLabel('MAC')).toHaveCount(0);
+  await editor.getByLabel('Key generator').selectOption('vendor-a');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect(editor.getByText('MAC is required for a key generator')).toBeVisible();
+  await editor.getByLabel('MAC').fill('30:ae:7b:eb:17:99');
+  await editor.getByLabel('Revision').fill('3');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(() => calls(page, 'save_host')).toHaveLength(1);
+  expect(((await calls(page, 'save_host'))[0].input as { keyGen: unknown }).keyGen).toEqual({
+    generator: 'vendor-a',
+    mac: '30:ae:7b:eb:17:99',
+    revision: 3
+  });
+
+  await page.getByRole('button', { name: 'Duplicate cam' }).click();
+  const copy = page.getByRole('dialog', { name: 'Add host' });
+  await expect(copy.getByLabel('MAC')).toHaveValue('30:ae:7b:eb:17:82');
+  await copy.getByRole('button', { name: 'Add host' }).click();
+  await expect.poll(() => calls(page, 'duplicate_host')).toHaveLength(1);
+  expect(((await calls(page, 'duplicate_host'))[0].input as { keyGen: unknown }).keyGen).toEqual({
+    generator: 'vendor-a',
+    mac: '30:ae:7b:eb:17:82',
+    revision: 2
+  });
+});

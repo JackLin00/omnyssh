@@ -17,6 +17,7 @@
     previousName,
     imported = false,
     copiedFrom,
+    keyGenerators = null,
     onSubmit,
     onCancel
   }: {
@@ -27,6 +28,9 @@
     imported?: boolean;
     /** Duplicating this host: the blank login fields keep its values — say so. */
     copiedFrom?: string;
+    /** The key generators' names while they are switched on; null hides the fields,
+     *  and the save then leaves the host's settings as they are. */
+    keyGenerators?: readonly string[] | null;
     onSubmit: (input: HostInputDto, previousName: string | undefined) => Promise<void>;
     onCancel: () => void;
   } = $props();
@@ -46,7 +50,7 @@
   onMount(() => (mode === 'add' ? nameEl : hostnameEl)?.focus());
 
   async function save(): Promise<void> {
-    const result = formToInput(fields);
+    const result = formToInput(fields, keyGenerators !== null);
     if (!result.ok) {
       error = result.error;
       return;
@@ -65,6 +69,13 @@
   // On edit the DTO omits identity/password (§3.4), so the fields start blank and mean
   // "keep the stored value"; on add they mean "none".
   const secretHint = $derived(mode === 'edit' ? 'Leave blank to keep the current value' : undefined);
+
+  // One a host names but the list no longer has stays pickable rather than vanishing.
+  const generatorChoices = $derived(
+    keyGenerators === null
+      ? []
+      : [...new Set([...keyGenerators, ...(fields.keyGenerator ? [fields.keyGenerator] : [])])]
+  );
 
   const label = 'block space-y-1 text-xs font-medium text-muted';
   const forwardGrid = 'grid grid-cols-[8.5rem,1fr,4.5rem,1.75rem] items-center gap-2';
@@ -207,6 +218,33 @@
           Files dropped on a terminal are sent to <span class="font-mono">rz</span> in its shell — the host needs lrzsz.
         {/if}
       </p>
+
+      {#if keyGenerators !== null}
+        <div class="grid grid-cols-[1fr,1fr,6rem] gap-3">
+          <label class={label}>
+            <span>Key generator</span>
+            <Select bind:value={fields.keyGenerator} class={field}>
+              <option value="">None</option>
+              {#each generatorChoices as name (name)}<option value={name}>{name}</option>{/each}
+            </Select>
+          </label>
+          {#if fields.keyGenerator}
+            <label class={label}>
+              <span>MAC</span>
+              <input bind:value={fields.deviceMac} class={field} placeholder="30:ae:7b:eb:17:82" autocomplete="off" />
+            </label>
+            <label class={label}>
+              <span>Revision</span>
+              <input bind:value={fields.deviceRevision} class={field} placeholder="Default" inputmode="numeric" />
+            </label>
+          {/if}
+        </div>
+        {#if fields.keyGenerator}
+          <p class="text-xs text-faint">
+            The key it makes for this device is tried first; the login goes on as usual if it does not get in.
+          </p>
+        {/if}
+      {/if}
 
       <div class="flex items-center justify-between gap-4 border-t border-default pt-3.5">
         <div class="min-w-0">
