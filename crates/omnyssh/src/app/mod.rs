@@ -892,6 +892,14 @@ impl App {
                     omnyssh_core::ssh::host_key::Decision::Cancel,
                 );
             }
+            // The TUI runs no key generators and never serves their requests;
+            // should one reach it anyway, the login goes on without the key.
+            CoreEvent::KeyRequired { request_id, .. } => {
+                let _ = omnyssh_core::ssh::key_gen::answer(
+                    request_id,
+                    Err("the terminal app does not run key generators".to_string()),
+                );
+            }
 
             // ----------------------------------------------------------------
             // Update checker events

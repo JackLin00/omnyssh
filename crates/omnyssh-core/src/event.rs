@@ -159,6 +159,19 @@ pub enum CoreEvent {
     /// A private key is encrypted and no passphrase is cached for it yet.
     /// Frontends prompt once per key path and call [`crate::ssh::identity::unlock`].
     KeyPassphraseRequired { host_name: HostId, key_path: String },
+    /// A login to `host_name` waits for the private key its key generator
+    /// makes: run `code`'s `generateKey({ credential, mac, revision }, address)`
+    /// (`credential` is JSON text, empty for none; no `revision` key when it is
+    /// `None`) and reply through [`crate::ssh::key_gen::answer`].
+    KeyRequired {
+        request_id: u64,
+        host_name: HostId,
+        code: String,
+        credential: String,
+        mac: String,
+        revision: Option<u32>,
+        address: String,
+    },
     /// A connection to `host_name` waits for the login password of `login`
     /// (`user@host`). Frontends answer with [`crate::ssh::password::answer`];
     /// `retry` says the previous one was refused, and `new_host_key` is the

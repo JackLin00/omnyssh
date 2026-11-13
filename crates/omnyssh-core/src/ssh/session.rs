@@ -37,6 +37,7 @@ use tokio::time;
 use crate::ssh::client::Host;
 use crate::ssh::host_key::{self, AskHostKey, Decision, HostKeyChanged, Shown};
 use crate::ssh::identity::{self, IdentityError};
+use crate::ssh::key_gen::{self, Generated};
 use crate::ssh::known_hosts::{self, Verdict};
 use crate::ssh::password::{self, AskPassword, Method, NoAnswer, Prompt};
 
@@ -1155,7 +1156,20 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = anyhow::Result<Dialed>>,
 {
-    let Dialed { handle, link, .. } = first;
+    let Dialed {
+        mut handle, link, ..
+    } = first;
+    // The key a generator makes for this host goes first; whatever comes of it,
+    // the login then goes on as it always has.
+    let generated = match generated_login(&mut handle, host).await? {
+        GeneratedLogin::Accepted => return Ok(handle),
+        GeneratedLogin::Failed(note) => Some(note),
+        GeneratedLogin::Unused => None,
+    };
+    let failed = |message: String| match &generated {
+        Some(note) => format!("{message} ({note})"),
+        None => message,
+    };
     let asking = matches!(passwords, Passwords::Ask(_));
     let (handle, keys) = authenticate(handle, host, asking).await?;
     let encrypted_key = match keys {
@@ -1256,7 +1270,7 @@ where
                 "SSH login to {} gave up waiting for the password",
                 host.name
             ),
-            Asked::Refused => format!("SSH authentication failed for {}", host.name),
+            Asked::Refused => failed(format!("SSH authentication failed for {}", host.name)),
         };
         // No password got in: the key it skipped still may (#97).
         return Err(match locked {
@@ -1272,7 +1286,7 @@ where
         return Err(NoPassword::new(key, &host.name).into());
     }
 
-    let message = format!("SSH authentication failed for {}", host.name);
+    let message = failed(format!("SSH authentication failed for {}", host.name));
     // Every attempt folds a dropped link into "not accepted". A connection that
     // is gone refused us only if the server hung up itself, as OpenSSH does
     // after too many failed logins.
@@ -1476,6 +1490,48 @@ where
 
 /// How long one login request may wait for the server's verdict.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How the key from `host`'s key generator did.
+enum GeneratedLogin {
+    /// No generator in use.
+    Unused,
+    Accepted,
+    /// Why it did not get in, for the error should nothing else either.
+    Failed(String),
+}
+
+/// Tries the key `host`'s key generator makes. Only a server that stops
+/// answering ends the login here.
+async fn generated_login(
+    handle: &mut Handle<KnownHostsHandler>,
+    host: &Host,
+) -> anyhow::Result<GeneratedLogin> {
+    let (generator, key) = match key_gen::generate(host).await {
+        Generated::Unused => return Ok(GeneratedLogin::Unused),
+        Generated::Key { generator, key } => (generator, key),
+        Generated::Failed { generator, reason } => {
+            tracing::warn!(host = %host.name, %generator, %reason, "key generator failed");
+            return Ok(GeneratedLogin::Failed(format!(
+                "key generator '{generator}': {reason}"
+            )));
+        }
+    };
+    let verdict = time::timeout(
+        AUTH_TIMEOUT,
+        handle.authenticate_publickey(host.user.clone(), Arc::new(*key)),
+    )
+    .await
+    .map_err(|_| Stalled)?;
+    let reason = match verdict {
+        Ok(true) => return Ok(GeneratedLogin::Accepted),
+        Ok(false) => "the server did not accept its key".to_string(),
+        Err(e) => e.to_string(),
+    };
+    tracing::info!(host = %host.name, %generator, %reason, "generated key not used");
+    Ok(GeneratedLogin::Failed(format!(
+        "key generator '{generator}': {reason}"
+    )))
+}
 
 enum KeyAuth {
     Accepted,
